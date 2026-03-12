@@ -46,6 +46,9 @@ impl ProviderAddFormState {
                     ClaudeApiFormat::OpenAiChat => {
                         meta_obj.insert("apiFormat".to_string(), json!("openai_chat"));
                     }
+                    ClaudeApiFormat::OpenAiResponses => {
+                        meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
+                    }
                 }
             }
         }

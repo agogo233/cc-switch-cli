@@ -240,10 +240,21 @@ impl App {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
-                provider.claude_api_format = match provider.claude_api_format {
-                    form::ClaudeApiFormat::Anthropic => form::ClaudeApiFormat::OpenAiChat,
-                    form::ClaudeApiFormat::OpenAiChat => form::ClaudeApiFormat::Anthropic,
-                };
+                let next_format = provider.claude_api_format.next();
+                provider.claude_api_format = next_format;
+                let proxy_ready = data
+                    .proxy
+                    .routes_current_app_through_proxy(&provider.app_type)
+                    .unwrap_or(false);
+                if next_format.requires_proxy() && !proxy_ready {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        message: texts::tui_claude_api_format_requires_proxy_message(
+                            next_format.as_str(),
+                        ),
+                        action: ConfirmAction::ProviderApiFormatRequiresProxy,
+                    });
+                }
                 Action::None
             }
             ProviderAddField::CodexWireApi => {

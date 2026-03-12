@@ -183,7 +183,7 @@ fn convert_message_to_openai(
     Ok(result)
 }
 
-fn clean_schema(mut schema: Value) -> Value {
+pub(crate) fn clean_schema(mut schema: Value) -> Value {
     if let Some(obj) = schema.as_object_mut() {
         if obj.get("format").and_then(|v| v.as_str()) == Some("uri") {
             obj.remove("format");

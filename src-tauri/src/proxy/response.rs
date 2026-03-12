@@ -8,8 +8,12 @@ use std::{
 };
 
 use super::{
-    error::ProxyError, metrics::estimate_tokens_from_bytes,
-    providers::streaming::create_anthropic_sse_stream,
+    error::ProxyError,
+    metrics::estimate_tokens_from_bytes,
+    providers::{
+        streaming::create_anthropic_sse_stream,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+    },
 };
 
 pub struct PreparedResponse {
@@ -186,6 +190,7 @@ pub fn build_anthropic_stream_response(
     response: reqwest::Response,
     first_byte_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
+    api_format: &str,
 ) -> Result<PreparedResponse, ProxyError> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -193,15 +198,25 @@ pub fn build_anthropic_stream_response(
     copy_headers(&mut builder, &headers, true);
 
     let stream_completion = StreamCompletion::default();
-    let stream = create_anthropic_sse_stream(
-        with_stream_timeouts(
-            response.bytes_stream(),
-            first_byte_timeout,
-            idle_timeout,
-            None,
-        ),
-        stream_completion.clone(),
+    let timed_stream = with_stream_timeouts(
+        response.bytes_stream(),
+        first_byte_timeout,
+        idle_timeout,
+        None,
     );
+    let stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
+    > = if api_format == "openai_responses" {
+        Box::pin(create_anthropic_sse_stream_from_responses(
+            timed_stream,
+            stream_completion.clone(),
+        ))
+    } else {
+        Box::pin(create_anthropic_sse_stream(
+            timed_stream,
+            stream_completion.clone(),
+        ))
+    };
     builder
         .body(Body::from_stream(stream))
         .map(|response| PreparedResponse::streaming(response, stream_completion))

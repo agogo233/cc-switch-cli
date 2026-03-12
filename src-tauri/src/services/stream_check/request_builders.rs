@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde_json::json;
 
 use crate::error::AppError;
+use crate::provider::Provider;
+use crate::proxy::providers::get_claude_api_format;
 
 use super::service::StreamCheckService;
 use super::types::{AuthInfo, AuthStrategy};
@@ -15,60 +17,104 @@ impl StreamCheckService {
         model: &str,
         test_prompt: &str,
         timeout: std::time::Duration,
+        provider: &Provider,
     ) -> Result<(u16, String), AppError> {
         let base = base_url.trim_end_matches('/');
-        let url = if base.ends_with("/v1") {
-            format!("{base}/messages?beta=true")
-        } else {
-            format!("{base}/v1/messages?beta=true")
+        let api_format = get_claude_api_format(provider);
+        let is_openai_compatible = matches!(api_format, "openai_chat" | "openai_responses");
+        let url = match api_format {
+            "openai_chat" => {
+                if base.ends_with("/v1") {
+                    format!("{base}/chat/completions")
+                } else {
+                    format!("{base}/v1/chat/completions")
+                }
+            }
+            "openai_responses" => {
+                if base.ends_with("/v1") {
+                    format!("{base}/responses")
+                } else {
+                    format!("{base}/v1/responses")
+                }
+            }
+            _ => {
+                if base.ends_with("/v1") {
+                    format!("{base}/messages?beta=true")
+                } else {
+                    format!("{base}/v1/messages?beta=true")
+                }
+            }
         };
 
-        let body = json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{ "role": "user", "content": test_prompt }],
-            "stream": true,
-        });
-
-        let os_name = Self::get_os_name();
-        let arch_name = Self::get_arch_name();
+        let body = if api_format == "openai_responses" {
+            json!({
+                "model": model,
+                "max_output_tokens": 1,
+                "input": [{
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": test_prompt }]
+                }],
+                "stream": true,
+            })
+        } else {
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{ "role": "user", "content": test_prompt }],
+                "stream": true,
+            })
+        };
 
         let mut request = client
             .post(&url)
             .header("authorization", format!("Bearer {}", auth.api_key));
 
-        if auth.strategy == AuthStrategy::Anthropic {
-            request = request.header("x-api-key", &auth.api_key);
-        }
+        let response = if is_openai_compatible {
+            request
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .timeout(timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(Self::map_request_error)?
+        } else {
+            let os_name = Self::get_os_name();
+            let arch_name = Self::get_arch_name();
 
-        let response = request
-            .header("anthropic-version", "2023-06-01")
-            .header(
-                "anthropic-beta",
-                "claude-code-20250219,interleaved-thinking-2025-05-14",
-            )
-            .header("anthropic-dangerous-direct-browser-access", "true")
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .header("accept-encoding", "identity")
-            .header("accept-language", "*")
-            .header("user-agent", "claude-cli/2.1.2 (external, cli)")
-            .header("x-app", "cli")
-            .header("x-stainless-lang", "js")
-            .header("x-stainless-package-version", "0.70.0")
-            .header("x-stainless-os", os_name)
-            .header("x-stainless-arch", arch_name)
-            .header("x-stainless-runtime", "node")
-            .header("x-stainless-runtime-version", "v22.20.0")
-            .header("x-stainless-retry-count", "0")
-            .header("x-stainless-timeout", "600")
-            .header("sec-fetch-mode", "cors")
-            .header("connection", "keep-alive")
-            .timeout(timeout)
-            .json(&body)
-            .send()
-            .await
-            .map_err(Self::map_request_error)?;
+            if auth.strategy == AuthStrategy::Anthropic {
+                request = request.header("x-api-key", &auth.api_key);
+            }
+
+            request
+                .header("anthropic-version", "2023-06-01")
+                .header(
+                    "anthropic-beta",
+                    "claude-code-20250219,interleaved-thinking-2025-05-14",
+                )
+                .header("anthropic-dangerous-direct-browser-access", "true")
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .header("accept-encoding", "identity")
+                .header("accept-language", "*")
+                .header("user-agent", "claude-cli/2.1.2 (external, cli)")
+                .header("x-app", "cli")
+                .header("x-stainless-lang", "js")
+                .header("x-stainless-package-version", "0.70.0")
+                .header("x-stainless-os", os_name)
+                .header("x-stainless-arch", arch_name)
+                .header("x-stainless-runtime", "node")
+                .header("x-stainless-runtime-version", "v22.20.0")
+                .header("x-stainless-retry-count", "0")
+                .header("x-stainless-timeout", "600")
+                .header("sec-fetch-mode", "cors")
+                .header("connection", "keep-alive")
+                .timeout(timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(Self::map_request_error)?
+        };
 
         let status = response.status().as_u16();
         if !response.status().is_success() {

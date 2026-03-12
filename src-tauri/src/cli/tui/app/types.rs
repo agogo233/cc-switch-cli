@@ -67,6 +67,7 @@ pub enum ConfirmAction {
     ConfigReset,
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
+    ProviderApiFormatRequiresProxy,
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,

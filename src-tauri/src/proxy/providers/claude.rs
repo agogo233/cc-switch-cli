@@ -13,6 +13,47 @@ pub enum ProviderType {
 
 pub struct ClaudeAdapter;
 
+pub fn get_claude_api_format(provider: &Provider) -> &'static str {
+    if let Some(meta) = provider.meta.as_ref() {
+        if let Some(api_format) = meta.api_format.as_deref() {
+            return match api_format {
+                "openai_chat" => "openai_chat",
+                "openai_responses" => "openai_responses",
+                _ => "anthropic",
+            };
+        }
+    }
+
+    if let Some(api_format) = provider
+        .settings_config
+        .get("api_format")
+        .and_then(|v| v.as_str())
+    {
+        return match api_format {
+            "openai_chat" => "openai_chat",
+            "openai_responses" => "openai_responses",
+            _ => "anthropic",
+        };
+    }
+
+    let raw = provider.settings_config.get("openrouter_compat_mode");
+    let enabled = match raw {
+        Some(serde_json::Value::Bool(v)) => *v,
+        Some(serde_json::Value::Number(num)) => num.as_i64().unwrap_or(0) != 0,
+        Some(serde_json::Value::String(value)) => {
+            let normalized = value.trim().to_lowercase();
+            normalized == "true" || normalized == "1"
+        }
+        _ => false,
+    };
+
+    if enabled {
+        "openai_chat"
+    } else {
+        "anthropic"
+    }
+}
+
 impl ClaudeAdapter {
     pub fn new() -> Self {
         Self
@@ -35,44 +76,7 @@ impl ClaudeAdapter {
     }
 
     fn get_api_format(&self, provider: &Provider) -> &'static str {
-        if let Some(meta) = provider.meta.as_ref() {
-            if let Some(api_format) = meta.api_format.as_deref() {
-                return if api_format == "openai_chat" {
-                    "openai_chat"
-                } else {
-                    "anthropic"
-                };
-            }
-        }
-
-        if let Some(api_format) = provider
-            .settings_config
-            .get("api_format")
-            .and_then(|v| v.as_str())
-        {
-            return if api_format == "openai_chat" {
-                "openai_chat"
-            } else {
-                "anthropic"
-            };
-        }
-
-        let raw = provider.settings_config.get("openrouter_compat_mode");
-        let enabled = match raw {
-            Some(serde_json::Value::Bool(v)) => *v,
-            Some(serde_json::Value::Number(num)) => num.as_i64().unwrap_or(0) != 0,
-            Some(serde_json::Value::String(value)) => {
-                let normalized = value.trim().to_lowercase();
-                normalized == "true" || normalized == "1"
-            }
-            _ => false,
-        };
-
-        if enabled {
-            "openai_chat"
-        } else {
-            "anthropic"
-        }
+        get_claude_api_format(provider)
     }
 
     fn is_bearer_only_mode(&self, provider: &Provider) -> bool {
@@ -232,18 +236,28 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn needs_transform(&self, provider: &Provider) -> bool {
-        self.get_api_format(provider) == "openai_chat"
+        matches!(
+            self.get_api_format(provider),
+            "openai_chat" | "openai_responses"
+        )
     }
 
     fn transform_request(
         &self,
         body: serde_json::Value,
-        _provider: &Provider,
+        provider: &Provider,
     ) -> Result<serde_json::Value, ProxyError> {
-        super::transform::anthropic_to_openai(body)
+        match self.get_api_format(provider) {
+            "openai_responses" => super::transform_responses::anthropic_to_responses(body, None),
+            _ => super::transform::anthropic_to_openai(body),
+        }
     }
 
     fn transform_response(&self, body: serde_json::Value) -> Result<serde_json::Value, ProxyError> {
-        super::transform::openai_to_anthropic(body)
+        if body.get("output").is_some() {
+            super::transform_responses::responses_to_anthropic(body)
+        } else {
+            super::transform::openai_to_anthropic(body)
+        }
     }
 }

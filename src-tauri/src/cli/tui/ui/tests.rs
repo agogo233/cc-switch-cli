@@ -57,7 +57,51 @@ fn provider_field_label_and_value_renders_claude_api_format() {
         crate::cli::tui::form::ProviderAddField::ClaudeApiFormat,
     );
     assert!(label.contains("API"));
-    assert_eq!(value, "openai_chat");
+    assert!(value.contains("OpenAI Chat Completions"));
+    assert!(value.contains("代理") || value.contains("proxy"));
+}
+
+#[test]
+fn provider_field_label_and_value_renders_claude_responses_api_format() {
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.claude_api_format = crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses;
+
+    let (_label, value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::ClaudeApiFormat,
+    );
+    assert!(value.contains("OpenAI Responses API"));
+    assert!(value.contains("代理") || value.contains("proxy"));
+}
+
+#[test]
+fn provider_detail_uses_legacy_claude_api_format_for_display() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Demo Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com"
+            },
+            "api_format": "openai_chat"
+        }),
+        None,
+    );
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("OpenAI Chat Completions"));
 }
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());

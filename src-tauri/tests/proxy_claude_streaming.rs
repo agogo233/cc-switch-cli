@@ -110,6 +110,46 @@ async fn handle_streaming_chat(
     )
 }
 
+async fn handle_streaming_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    *state.request_body.lock().await = Some(body);
+    *state.authorization.lock().await = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    *state.api_key.lock().await = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let stream = async_stream::stream! {
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"event: response.created\ndata: {\"response\":{\"id\":\"resp-stream\",\"model\":\"gpt-4.1-mini\",\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\n",
+        ));
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"event: response.content_part.added\ndata: {\"item_id\":\"msg_1\",\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n",
+        ));
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"event: response.output_text.delta\ndata: {\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"hello from responses\"}\n\n",
+        ));
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"event: response.content_part.done\ndata: {\"item_id\":\"msg_1\",\"content_index\":0}\n\n",
+        ));
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n",
+        ));
+    };
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/event-stream")],
+        Body::from_stream(stream),
+    )
+}
+
 async fn handle_slow_streaming_chat(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
@@ -395,6 +435,131 @@ async fn proxy_claude_openai_chat_streaming_transforms_sse() {
     assert_eq!(
         upstream_body.get("stream").and_then(|v| v.as_bool()),
         Some(true)
+    );
+    assert_eq!(
+        upstream_state.authorization.lock().await.as_deref(),
+        Some("Bearer sk-test-claude")
+    );
+    assert_eq!(
+        upstream_state.api_key.lock().await.as_deref(),
+        Some("sk-test-claude")
+    );
+
+    service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_claude_openai_responses_streaming_transforms_sse() {
+    let upstream_state = UpstreamState::default();
+    let upstream_router = Router::new()
+        .route("/v1/responses", post(handle_streaming_responses))
+        .with_state(upstream_state.clone());
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("read upstream address");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let provider = Provider {
+        id: "claude-openai-responses-stream".to_string(),
+        name: "Claude OpenAI Responses Stream".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("http://{}", upstream_addr),
+                "ANTHROPIC_API_KEY": "sk-test-claude"
+            }
+        }),
+        website_url: None,
+        category: Some("claude".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..ProviderMeta::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider("claude", &provider)
+        .expect("save test provider");
+    db.set_current_provider("claude", &provider.id)
+        .expect("set current provider");
+
+    let service = ProxyService::new(db);
+    let mut config = service.get_config().await.expect("read proxy config");
+    config.listen_port = 0;
+    service
+        .update_config(&config)
+        .await
+        .expect("update proxy config");
+
+    let proxy = service.start().await.expect("start proxy service");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://{}:{}/v1/messages",
+            proxy.address, proxy.port
+        ))
+        .json(&json!({
+            "model": "claude-3-7-sonnet",
+            "stream": true,
+            "max_tokens": 64,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hello"
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("send request to proxy");
+
+    assert!(response.status().is_success());
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let body = response.text().await.expect("read streaming response body");
+    assert!(body.contains("event: message_start"));
+    assert!(body.contains("event: content_block_start"));
+    assert!(body.contains("event: content_block_delta"));
+    assert!(body.contains("hello from responses"));
+    assert!(body.contains("event: message_delta"));
+    assert!(body.contains("\"input_tokens\":11"));
+    assert!(body.contains("\"output_tokens\":7"));
+    assert!(body.contains("event: message_stop"));
+
+    let upstream_body = upstream_state
+        .request_body
+        .lock()
+        .await
+        .clone()
+        .expect("upstream should receive request body");
+    assert_eq!(
+        upstream_body
+            .pointer("/input/0/role")
+            .and_then(|v| v.as_str()),
+        Some("user")
+    );
+    assert_eq!(
+        upstream_body
+            .pointer("/input/0/content/0/type")
+            .and_then(|v| v.as_str()),
+        Some("input_text")
     );
     assert_eq!(
         upstream_state.authorization.lock().await.as_deref(),

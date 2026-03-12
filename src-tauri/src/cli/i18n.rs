@@ -1293,9 +1293,52 @@ pub mod texts {
 
     pub fn tui_label_claude_api_format() -> &'static str {
         if is_chinese() {
-            "Claude API 格式"
+            "API 格式"
         } else {
-            "Claude API Format"
+            "API Format"
+        }
+    }
+
+    pub fn tui_claude_api_format_value(api_format: &str) -> &'static str {
+        match api_format {
+            "openai_chat" => {
+                if is_chinese() {
+                    "OpenAI Chat Completions (需开启代理)"
+                } else {
+                    "OpenAI Chat Completions (Requires proxy)"
+                }
+            }
+            "openai_responses" => {
+                if is_chinese() {
+                    "OpenAI Responses API (需开启代理)"
+                } else {
+                    "OpenAI Responses API (Requires proxy)"
+                }
+            }
+            _ => {
+                if is_chinese() {
+                    "Anthropic Messages (原生)"
+                } else {
+                    "Anthropic Messages (Native)"
+                }
+            }
+        }
+    }
+
+    pub fn tui_claude_api_format_requires_proxy_title() -> &'static str {
+        if is_chinese() {
+            "需开启代理"
+        } else {
+            "Proxy Required"
+        }
+    }
+
+    pub fn tui_claude_api_format_requires_proxy_message(api_format: &str) -> String {
+        let label = tui_claude_api_format_value(api_format);
+        if is_chinese() {
+            format!("已切换为 {label}。\n该格式需开启本地代理使用。\n按 Enter 打开代理帮助。")
+        } else {
+            format!("Switched to {label}.\nThis format requires the local proxy.\nPress Enter to open proxy help.")
         }
     }
 

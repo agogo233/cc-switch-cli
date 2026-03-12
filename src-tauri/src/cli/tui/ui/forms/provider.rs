@@ -1,5 +1,9 @@
 use super::*;
 
+fn claude_api_format_label(api_format: crate::cli::tui::form::ClaudeApiFormat) -> String {
+    texts::tui_claude_api_format_value(api_format.as_str()).to_string()
+}
+
 pub(crate) fn render_provider_add_form(
     frame: &mut Frame<'_>,
     app: &App,
@@ -334,7 +338,7 @@ pub(crate) fn provider_field_label_and_value(
     };
 
     let value = match field {
-        ProviderAddField::ClaudeApiFormat => provider.claude_api_format.as_str().to_string(),
+        ProviderAddField::ClaudeApiFormat => claude_api_format_label(provider.claude_api_format),
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {
@@ -400,7 +404,10 @@ pub(crate) fn provider_field_editor_line(
     } else {
         let text = match field {
             ProviderAddField::ClaudeApiFormat => {
-                format!("api_format = {}", provider.claude_api_format.as_str())
+                format!(
+                    "api_format = {}",
+                    texts::tui_claude_api_format_value(provider.claude_api_format.as_str())
+                )
             }
             ProviderAddField::CodexWireApi => {
                 format!("wire_api = {}", provider.codex_wire_api.as_str())

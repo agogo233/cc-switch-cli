@@ -1,6 +1,10 @@
 use crate::{app_config::AppType, provider::Provider};
 
-use super::{error::ProxyError, providers::get_adapter, server::ProxyServerState};
+use super::{
+    error::ProxyError,
+    providers::{get_adapter, get_claude_api_format},
+    server::ProxyServerState,
+};
 
 pub struct ProviderRouter {
     app_type: AppType,
@@ -65,7 +69,10 @@ impl ProviderRouter {
             && self.needs_transform
             && endpoint == "/v1/messages"
         {
-            "/v1/chat/completions".to_string()
+            match get_claude_api_format(&self.provider) {
+                "openai_responses" => "/v1/responses".to_string(),
+                _ => "/v1/chat/completions".to_string(),
+            }
         } else {
             endpoint.to_string()
         }

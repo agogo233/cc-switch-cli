@@ -114,6 +114,7 @@ async fn handle_claude_request(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let adapter = ClaudeAdapter::new();
+    let api_format = super::providers::get_claude_api_format(context.provider_router.provider());
 
     if is_stream {
         let first_byte_timeout = context.streaming_first_byte_timeout();
@@ -148,7 +149,7 @@ async fn handle_claude_request(
             && status.is_success()
             && is_sse_response(&response)
         {
-            build_anthropic_stream_response(response, first_byte_timeout, idle_timeout)
+            build_anthropic_stream_response(response, first_byte_timeout, idle_timeout, api_format)
         } else {
             build_passthrough_response(response, first_byte_timeout, idle_timeout).await
         };

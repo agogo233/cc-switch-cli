@@ -194,22 +194,20 @@ fn populate_opencode_form(form: &mut ProviderAddFormState, provider: &Provider) 
 }
 
 fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
-    if provider
+    if let Some(api_format) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.api_format.as_deref())
-        .is_some_and(|value| value == "openai_chat")
     {
-        return ClaudeApiFormat::OpenAiChat;
+        return ClaudeApiFormat::from_raw(api_format);
     }
 
-    if provider
+    if let Some(api_format) = provider
         .settings_config
         .get("api_format")
         .and_then(|value| value.as_str())
-        .is_some_and(|value| value == "openai_chat")
     {
-        return ClaudeApiFormat::OpenAiChat;
+        return ClaudeApiFormat::from_raw(api_format);
     }
 
     let compat_enabled = match provider.settings_config.get("openrouter_compat_mode") {

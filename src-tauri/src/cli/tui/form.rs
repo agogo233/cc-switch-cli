@@ -123,6 +123,7 @@ impl CodexWireApi {
 pub enum ClaudeApiFormat {
     Anthropic,
     OpenAiChat,
+    OpenAiResponses,
 }
 
 impl ClaudeApiFormat {
@@ -130,7 +131,28 @@ impl ClaudeApiFormat {
         match self {
             ClaudeApiFormat::Anthropic => "anthropic",
             ClaudeApiFormat::OpenAiChat => "openai_chat",
+            ClaudeApiFormat::OpenAiResponses => "openai_responses",
         }
+    }
+
+    pub fn from_raw(value: &str) -> Self {
+        match value {
+            "openai_chat" => ClaudeApiFormat::OpenAiChat,
+            "openai_responses" => ClaudeApiFormat::OpenAiResponses,
+            _ => ClaudeApiFormat::Anthropic,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ClaudeApiFormat::Anthropic => ClaudeApiFormat::OpenAiChat,
+            ClaudeApiFormat::OpenAiChat => ClaudeApiFormat::OpenAiResponses,
+            ClaudeApiFormat::OpenAiResponses => ClaudeApiFormat::Anthropic,
+        }
+    }
+
+    pub fn requires_proxy(self) -> bool {
+        !matches!(self, ClaudeApiFormat::Anthropic)
     }
 }
 

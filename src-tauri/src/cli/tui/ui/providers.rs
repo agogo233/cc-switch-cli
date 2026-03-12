@@ -198,12 +198,7 @@ pub(super) fn render_provider_detail(
                 Span::raw(": "),
                 Span::raw(base_url),
             ]));
-            let api_format = row
-                .provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.api_format.as_deref())
-                .unwrap_or("anthropic");
+            let api_format = crate::proxy::providers::get_claude_api_format(&row.provider);
 
             lines.push(Line::from(vec![
                 Span::styled(
@@ -211,7 +206,7 @@ pub(super) fn render_provider_detail(
                     Style::default().fg(theme.accent),
                 ),
                 Span::raw(": "),
-                Span::raw(api_format),
+                Span::raw(texts::tui_claude_api_format_value(api_format)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled(

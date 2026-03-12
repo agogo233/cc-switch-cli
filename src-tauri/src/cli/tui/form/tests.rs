@@ -270,6 +270,30 @@ fn provider_add_form_claude_api_format_restores_openai_chat_meta() {
 }
 
 #[test]
+fn provider_add_form_claude_api_format_round_trips_openai_responses_meta() {
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("openai_responses".to_string()),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_api_format.as_str(), "openai_responses");
+
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["apiFormat"], "openai_responses");
+}
+
+#[test]
 fn provider_add_form_claude_from_provider_backfills_models_with_legacy_fallback() {
     let provider = Provider::with_id(
         "p1".to_string(),
