@@ -68,9 +68,7 @@ pub(super) fn render_main(
             label_width,
             vec![
                 Span::styled(current_provider.to_string(), provider_name_style),
-                Span::raw("  "),
-                Span::styled("● ", Style::default().fg(Color::Rgb(80, 250, 123))),
-                Span::styled("Online", Style::default().fg(Color::Rgb(80, 250, 123))),
+                // Do not claim a connection state until a real health check has run.
                 Span::raw("   "),
                 Span::styled(
                     format!("{} ", texts::tui_label_mcp_short()),

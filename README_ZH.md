@@ -2,14 +2,14 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-4.8.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Claude Code、Codex、Gemini 与 OpenCode CLI 的命令行管理工具**
 
-统一管理 Claude Code、Codex、Gemini 与 OpenCode CLI 的供应商配置、MCP 服务器、Skills 扩展、环境检查和系统提示词。
+统一管理 Claude Code、Codex、Gemini 与 OpenCode CLI 的供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查。
 
 [English](README.md) | [中文](README_ZH.md)
 
@@ -95,6 +95,7 @@ cc-switch provider stream-check <id> # 检查供应商流式健康
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
 cc-switch mcp sync                   # 同步 MCP 服务器
+cc-switch proxy show                 # 查看代理路由和状态
 
 # 使用全局 `--app` 参数来指定目标应用：
 cc-switch --app claude provider list    # 管理 Claude 供应商
@@ -231,9 +232,9 @@ cc-switch provider fetch-models <id> # 拉取远端模型列表
 
 ### 🛠️ MCP 服务器管理
 
-跨 Claude/Codex/Gemini 管理模型上下文协议服务器。
+跨 Claude、Codex、Gemini 与 OpenCode 管理模型上下文协议服务器。
 
-**功能：** 统一管理、多应用支持、三种传输类型（stdio/http/sse）、自动同步、智能 TOML 解析器。
+**功能：** 统一管理、多应用支持、三种传输类型（stdio/http/sse）、自动同步，以及面向 TOML / JSON live 配置的格式适配。
 
 ```bash
 cc-switch mcp list                   # 列出所有 MCP 服务器
@@ -251,7 +252,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设
@@ -266,7 +267,7 @@ cc-switch prompts delete <id>        # 删除提示词
 
 ### 🎯 Skills 管理
 
-通过社区技能扩展 Claude Code/Codex/Gemini 的能力。
+通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode 的能力。
 
 **功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、扫描/导入未管理技能、仓库发现。
 
@@ -330,6 +331,19 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # 重置为默认配置
 ```
 
+### 🌉 代理管理
+
+查看并控制服务于各应用的本地多应用代理。
+
+**功能：** 持久化开关、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+
+```bash
+cc-switch proxy show                 # 显示代理配置和路由
+cc-switch proxy enable               # 启用持久化代理开关
+cc-switch proxy disable              # 禁用持久化代理开关
+cc-switch proxy serve                # 以前台模式运行代理
+```
+
 ### 🧪 环境与本地工具
 
 检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode CLI 是否已经装好。
@@ -361,7 +375,7 @@ cc-switch env list                   # 列出环境变量
 
 # 自更新
 cc-switch update                     # 更新到最新版本
-cc-switch update --version v4.7.2    # 更新到指定版本
+cc-switch update --version vX.Y.Z    # 更新到指定版本
 ```
 
 ---
@@ -370,8 +384,9 @@ cc-switch update --version v4.7.2    # 更新到指定版本
 
 ### 核心设计
 
-- **SSOT**：所有配置存于 `~/.cc-switch/config.json`，实时配置是生成的产物
-- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`）
+- **SQLite 持久化**：核心数据存放在 `~/.cc-switch/cc-switch.db`；旧版 `~/.cc-switch/config.json` 仅保留给兼容与迁移路径使用
+- **Skills SSOT**：技能源文件保存在 `~/.cc-switch/skills/`，安装状态和启用状态由数据库统一记录
+- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini` 或 `~/.config/opencode`）
 - **原子写入**：临时文件 + 重命名模式防止损坏
 - **服务层复用**：100% 复用原 GUI 版本
 - **并发安全**：RwLock 配合作用域守卫
@@ -379,14 +394,17 @@ cc-switch update --version v4.7.2    # 更新到指定版本
 ### 配置文件
 
 **CC-Switch 存储：**
-- `~/.cc-switch/config.json` - 主配置（SSOT）
+- `~/.cc-switch/cc-switch.db` - 供应商、MCP、提示词和应用状态的主数据库
 - `~/.cc-switch/settings.json` - 设置
+- `~/.cc-switch/skills/` - 已安装技能源码（SSOT）
 - `~/.cc-switch/backups/` - 自动轮换（保留 10 个）
+- `~/.cc-switch/config.json` - 为兼容与导入流程保留的旧版 JSON
 
 **实时配置：**
-- Claude: `~/.claude/settings.json`, `~/.claude.json` (MCP), `~/.claude/CLAUDE.md` (提示词)
-- Codex: `~/.codex/auth.json`, `~/.codex/config.toml` (MCP), `~/.codex/AGENTS.md` (提示词)
-- Gemini: `~/.gemini/.env`, `~/.gemini/settings.json` (MCP), `~/.gemini/GEMINI.md` (提示词)
+- Claude: `~/.claude/settings.json`（供应商 / 通用配置）, `~/.claude.json`（MCP）, `~/.claude/CLAUDE.md`（提示词）
+- Codex: `~/.codex/auth.json`（认证状态）, `~/.codex/config.toml`（供应商 / 通用配置 + MCP）, `~/.codex/AGENTS.md`（提示词）
+- Gemini: `~/.gemini/.env`（供应商环境变量）, `~/.gemini/settings.json`（设置 + MCP）, `~/.gemini/GEMINI.md`（提示词）
+- OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
 
 ---
 
@@ -397,7 +415,7 @@ cc-switch update --version v4.7.2    # 更新到指定版本
 
 <br>
 
-首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help`），然后再切换一次供应商。
+首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help`），然后再切换一次供应商。
 
 这通常是由**环境变量冲突**引起的。如果你在系统环境变量中设置了 API 密钥（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`），它们会覆盖 CC-Switch 的配置。
 
@@ -485,7 +503,7 @@ cargo test                           # 运行测试
 ```
 src-tauri/src/
 ├── cli/
-│   ├── commands/          # CLI 子命令（provider, mcp, prompts, env, skills, ...）
+│   ├── commands/          # CLI 子命令（provider, mcp, prompts, skills, proxy, env, ...）
 │   ├── tui/               # 交互式 TUI 模式（ratatui）
 │   ├── interactive/       # 交互入口 / TTY 检查
 │   └── ui/                # UI 实用工具（表格、颜色）

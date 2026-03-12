@@ -16,7 +16,7 @@ use crate::app_config::AppType;
     name = "cc-switch",
     version,
     about = "All-in-One Assistant for Claude Code, Codex, Gemini & OpenCode CLI",
-    long_about = "Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, environment checks, and system prompts.\n\nRun without arguments to enter interactive mode."
+    long_about = "Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
 )]
 pub struct Cli {
     /// Specify the application type
@@ -86,9 +86,29 @@ pub fn generate_completions(shell: Shell) {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::{Cli, Commands};
+
+    #[test]
+    fn long_help_mentions_prompts_and_proxy_routes() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+
+        assert!(help.contains("prompts, local proxy routes, and environment checks"));
+    }
+
+    #[test]
+    fn skills_help_uses_current_storage_description() {
+        let mut cmd = Cli::command();
+        let skills = cmd
+            .find_subcommand_mut("skills")
+            .expect("skills subcommand should exist");
+        let help = skills.render_long_help().to_string();
+
+        assert!(!help.contains("skills.json"));
+        assert!(help.contains("SSOT + database state"));
+    }
 
     #[test]
     fn parses_proxy_serve_subcommand() {

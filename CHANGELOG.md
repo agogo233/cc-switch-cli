@@ -7,6 +7,64 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0] - 2026-03-13
+
+### Added
+
+- **OpenCode**: Add first-class provider support plus TUI MCP and skills flows.
+- **Proxy (TUI)**: Add multi-app proxy management, token telemetry on the dashboard, and restore the local proxy settings flow.
+- **TUI**: Add an external editor shortcut for prompt, provider, and MCP editing.
+- **Claude**: Align API format support with upstream.
+
+### Changed
+
+- **TUI**: Remove the legacy TUI and consolidate the interactive experience around the ratatui flow, including shared visual tokens, overlay rules, footer blocks, and connection card spacing.
+- **Skills / MCP**: Refine dialogs and align skill import and scan behavior with upstream.
+- **Stream Check**: Split the backend module for cleaner maintenance.
+
+### Fixed
+
+- **TUI**: Unify MCP and skill import UX, stop showing the restart notice after provider switch, and polish the Claude API format picker.
+- **i18n**: Localize the remaining Chinese TUI copy.
+- **Claude / Sync**: Align official provider behavior, db-v6 schema, and WebDAV format with upstream.
+
+### Docs & Chore
+
+- **Repo Hygiene**: Ignore local agent artifacts, worktrees, and workspace docs.
+- **Docs / Tests**: Refresh agent guidance, move homepage gifs, and align proxy waveform assertions with baseline rendering.
+
+### Commits (since v4.8.0)
+
+- cb7e878 refactor(tui): unify visual style tokens and overlay rules
+- b8a2d3a feat(tui): add external editor shortcut
+- 64637f2 refactor(stream-check): split backend module
+- 64da960 feat(provider): add OpenCode support
+- 65d63c9 feat(opencode): add MCP and skills support to TUI
+- e6ab625 feat(tui): refine skill and mcp dialogs
+- a107593 fix(tui): unify mcp and skill import ux
+- 7eabc5e feat(skill): align import and scan with upstream
+- 1d6c54b chore: ignore local agent artifacts
+- a20adbb chore: ignore worktrees and lock Chinese TUI copy
+- 8c39a3d feat(proxy): add multi-app proxy management to TUI
+- 1613650 fix(i18n): localize remaining Chinese TUI copy
+- e925eec feat(proxy): add token telemetry to the TUI dashboard
+- 2817ba1 refactor(cli): remove legacy TUI and align CLI with interactive flows
+- 338e621 test(proxy): align waveform assertions with baseline rendering
+- a7b593c fix(claude): align official provider behavior with upstream
+- 0438577 fix(sync): align db-v6 schema and WebDAV format with upstream
+- 9b6ea26 fix(tui): stop showing restart notice after provider switch
+- e2c1cc8 feat(claude): align api format support with upstream
+- 55792bb feat(tui): redesign footer with NAV/ACT color blocks and add provider Online indicator
+- 0b9c077 style(tui): add top padding before connection info card
+- 54baf70 fix(tui): polish claude api format picker ux
+- 43e634f feat(tui): restore local proxy settings flow and proxy-required switch notice
+- c8c86a5 docs: refresh agent guidance and move homepage gifs
+- 4235820 chore: stop tracking local workspace docs
+
+### Thanks
+
+- Thanks `@saladday` for driving the v5.0.0 TUI consolidation, multi-app proxy workflow, and OpenCode support.
+
 ## [4.8.0] - 2026-02-28
 
 ### Added

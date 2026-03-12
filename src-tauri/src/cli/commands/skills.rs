@@ -9,7 +9,7 @@ use crate::services::SkillService;
 
 #[derive(Subcommand)]
 pub enum SkillsCommand {
-    /// List installed skills (from ~/.cc-switch/skills.json)
+    /// List installed skills (from SSOT + database state)
     List,
     /// Discover available skills (from enabled repos)
     #[command(alias = "search")]
@@ -124,7 +124,14 @@ fn list_installed() -> Result<(), AppError> {
     }
 
     let mut table = create_table();
-    table.set_header(vec!["Directory", "Name", "Claude", "Codex", "Gemini"]);
+    table.set_header(vec![
+        "Directory",
+        "Name",
+        "Claude",
+        "Codex",
+        "Gemini",
+        "OpenCode",
+    ]);
     for skill in skills {
         table.add_row(vec![
             skill.directory,
@@ -132,6 +139,7 @@ fn list_installed() -> Result<(), AppError> {
             if skill.apps.claude { "✓" } else { " " }.to_string(),
             if skill.apps.codex { "✓" } else { " " }.to_string(),
             if skill.apps.gemini { "✓" } else { " " }.to_string(),
+            if skill.apps.opencode { "✓" } else { " " }.to_string(),
         ]);
     }
 
@@ -259,8 +267,8 @@ fn show_skill_info(spec: &str) -> Result<(), AppError> {
         println!("Desc:      {}", desc);
     }
     println!(
-        "Enabled:   claude={} codex={} gemini={}",
-        record.apps.claude, record.apps.codex, record.apps.gemini
+        "Enabled:   claude={} codex={} gemini={} opencode={}",
+        record.apps.claude, record.apps.codex, record.apps.gemini, record.apps.opencode
     );
 
     Ok(())

@@ -2,14 +2,14 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-4.8.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Command-Line Management Tool for Claude Code, Codex, Gemini & OpenCode CLI**
 
-Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, environment checks, and system prompts.
+Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.
 
 [English](README.md) | [中文](README_ZH.md)
 
@@ -93,6 +93,7 @@ cc-switch provider stream-check <id> # Check provider stream health
 cc-switch config webdav show         # Inspect WebDAV sync settings
 cc-switch env tools                  # Check local CLI tools
 cc-switch mcp sync                   # Sync MCP servers
+cc-switch proxy show                 # Inspect proxy routes and status
 
 # Use the global `--app` flag to target specific applications:
 cc-switch --app claude provider list    # Manage Claude providers
@@ -229,9 +230,9 @@ cc-switch provider fetch-models <id> # Fetch remote model list
 
 ### 🛠️ MCP Server Management
 
-Manage Model Context Protocol servers across Claude/Codex/Gemini.
+Manage Model Context Protocol servers across Claude, Codex, Gemini, and OpenCode.
 
-**Features:** Unified management, multi-app support, three transport types (stdio/http/sse), automatic sync, smart TOML parser.
+**Features:** Unified management, multi-app support, three transport types (stdio/http/sse), automatic sync, and live-config adapters for TOML and JSON targets.
 
 ```bash
 cc-switch mcp list                   # List all MCP servers
@@ -249,7 +250,7 @@ cc-switch mcp import --app claude    # Import from live config
 
 Manage system prompt presets for AI coding assistants.
 
-**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`).
+**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`).
 
 ```bash
 cc-switch prompts list               # List prompt presets
@@ -264,7 +265,7 @@ cc-switch prompts delete <id>        # Delete prompt
 
 ### 🎯 Skills Management
 
-Manage and extend Claude Code/Codex/Gemini capabilities with community skills.
+Manage and extend Claude Code/Codex/Gemini/OpenCode capabilities with community skills.
 
 **Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, unmanaged scan/import, repo discovery.
 
@@ -328,6 +329,19 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # Reset to default configuration
 ```
 
+### 🌉 Proxy Management
+
+Inspect and control the local multi-app proxy used by supported apps.
+
+**Features:** Persisted enable/disable switch, current route inspection, dashboard telemetry, and foreground serve mode for debugging.
+
+```bash
+cc-switch proxy show                 # Show proxy configuration and routes
+cc-switch proxy enable               # Enable the persisted proxy switch
+cc-switch proxy disable              # Disable the persisted proxy switch
+cc-switch proxy serve                # Run the proxy in foreground
+```
+
 ### 🧪 Environment & Local Tools
 
 Inspect environment conflicts and whether required local CLIs are installed.
@@ -359,7 +373,7 @@ cc-switch env list                   # List environment variables
 
 # Self-update
 cc-switch update                     # Update to latest release
-cc-switch update --version v4.7.2    # Update to a specific version
+cc-switch update --version vX.Y.Z    # Update to a specific version
 ```
 
 ---
@@ -368,8 +382,9 @@ cc-switch update --version v4.7.2    # Update to a specific version
 
 ### Core Design
 
-- **SSOT**: All config in `~/.cc-switch/config.json`, live configs are generated artifacts
-- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini` unexpectedly)
+- **SQLite-backed state**: Core data lives in `~/.cc-switch/cc-switch.db`; legacy `~/.cc-switch/config.json` is kept only for older import and migration paths
+- **Skills SSOT**: Skill source files live in `~/.cc-switch/skills/`, while install state and app enablement stay in the database
+- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, or `~/.config/opencode` unexpectedly)
 - **Atomic Writes**: Temp file + rename pattern prevents corruption
 - **Service Layer Reuse**: 100% reused from original GUI version
 - **Concurrency Safe**: RwLock with scoped guards
@@ -377,14 +392,17 @@ cc-switch update --version v4.7.2    # Update to a specific version
 ### Configuration Files
 
 **CC-Switch Storage:**
-- `~/.cc-switch/config.json` - Main configuration (SSOT)
+- `~/.cc-switch/cc-switch.db` - Main database for providers, MCP, prompts, and app state
 - `~/.cc-switch/settings.json` - Settings
+- `~/.cc-switch/skills/` - Installed skill sources (SSOT)
 - `~/.cc-switch/backups/` - Auto-rotation (keep 10)
+- `~/.cc-switch/config.json` - Legacy JSON kept for compatibility and import flows
 
 **Live Configs:**
-- Claude: `~/.claude/settings.json`, `~/.claude.json` (MCP), `~/.claude/CLAUDE.md` (prompts)
-- Codex: `~/.codex/auth.json`, `~/.codex/config.toml` (MCP), `~/.codex/AGENTS.md` (prompts)
-- Gemini: `~/.gemini/.env`, `~/.gemini/settings.json` (MCP), `~/.gemini/GEMINI.md` (prompts)
+- Claude: `~/.claude/settings.json` (provider/common config), `~/.claude.json` (MCP), `~/.claude/CLAUDE.md` (prompts)
+- Codex: `~/.codex/auth.json` (auth state), `~/.codex/config.toml` (provider/common config + MCP), `~/.codex/AGENTS.md` (prompts)
+- Gemini: `~/.gemini/.env` (provider env), `~/.gemini/settings.json` (settings + MCP), `~/.gemini/GEMINI.md` (prompts)
+- OpenCode: `~/.config/opencode/opencode.json` (providers + MCP + runtime config), `~/.config/opencode/AGENTS.md` (prompts)
 
 ---
 
@@ -395,7 +413,7 @@ cc-switch update --version v4.7.2    # Update to a specific version
 
 <br>
 
-First, make sure the target CLI has been initialized at least once (i.e. its config directory exists). CC-Switch may skip live sync for uninitialized apps; you will see a warning. Run the target CLI once (e.g. `claude --help`, `codex --help`, `gemini --help`), then switch again.
+First, make sure the target CLI has been initialized at least once (i.e. its config directory exists). CC-Switch may skip live sync for uninitialized apps; you will see a warning. Run the target CLI once (e.g. `claude --help`, `codex --help`, `gemini --help`, `opencode --help`), then switch again.
 
 This is usually caused by **environment variable conflicts**. If you have API keys set in system environment variables (like `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), they will override CC-Switch's configuration.
 
@@ -483,7 +501,7 @@ cargo test                           # Run tests
 ```
 src-tauri/src/
 ├── cli/
-│   ├── commands/          # CLI subcommands (provider, mcp, prompts, env, skills, ...)
+│   ├── commands/          # CLI subcommands (provider, mcp, prompts, skills, proxy, env, ...)
 │   ├── tui/               # Interactive TUI mode (ratatui)
 │   ├── interactive/       # Interactive entrypoint / TTY gate
 │   └── ui/                # UI utilities (tables, colors)
