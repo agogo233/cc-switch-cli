@@ -1258,13 +1258,210 @@ mod tests {
     }
 
     #[test]
-    fn settings_menu_hides_proxy_item_for_single_path_flow() {
+    fn settings_menu_exposes_proxy_item() {
         assert!(
-            !SettingsItem::ALL
+            SettingsItem::ALL
                 .iter()
                 .any(|item| matches!(item, SettingsItem::Proxy)),
-            "Settings should not expose a second proxy control entry"
+            "Settings should expose a local proxy entry"
         );
+    }
+
+    #[test]
+    fn settings_proxy_item_opens_second_level_menu() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::Proxy))
+            .expect("Proxy missing from SettingsItem::ALL");
+
+        let data = UiData::default();
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::SwitchRoute(Route::SettingsProxy)));
+        assert!(matches!(app.route, Route::SettingsProxy));
+    }
+
+    #[test]
+    fn settings_proxy_submenu_address_opens_text_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenAddress))
+            .expect("ListenAddress missing");
+
+        let mut data = UiData::default();
+        data.proxy.listen_address = "127.0.0.1".to_string();
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenAddress,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_submenu_port_opens_text_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenPort))
+            .expect("ListenPort missing");
+
+        let mut data = UiData::default();
+        data.proxy.listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenPort,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_submenu_does_not_open_editor_while_proxy_is_running() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenAddress))
+            .expect("ListenAddress missing");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.configured_listen_address = "127.0.0.1".to_string();
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_text_submit_validates_and_emits_actions() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Address".to_string(),
+            prompt: "address".to_string(),
+            buffer: "127.0.0.1".to_string(),
+            submit: TextSubmit::SettingsProxyListenAddress,
+            secret: false,
+        });
+        let data = UiData::default();
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyListenAddress { address } if address == "127.0.0.1"
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            buffer: "15721".to_string(),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyListenPort { port } if port == 15721
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_text_submit_invalid_input_keeps_prompt_open() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Address".to_string(),
+            prompt: "address".to_string(),
+            buffer: "bad host".to_string(),
+            submit: TextSubmit::SettingsProxyListenAddress,
+            secret: false,
+        });
+        let data = UiData::default();
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenAddress,
+                ..
+            })
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            buffer: "80".to_string(),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenPort,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_text_submit_is_blocked_if_proxy_starts_running_before_confirm() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Address".to_string(),
+            prompt: "address".to_string(),
+            buffer: "127.0.0.1".to_string(),
+            submit: TextSubmit::SettingsProxyListenAddress,
+            secret: false,
+        });
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+        ));
     }
 
     #[test]

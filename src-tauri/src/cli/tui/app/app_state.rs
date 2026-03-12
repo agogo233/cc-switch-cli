@@ -140,6 +140,12 @@ pub enum Action {
     SetProxyEnabled {
         enabled: bool,
     },
+    SetProxyListenAddress {
+        address: String,
+    },
+    SetProxyListenPort {
+        port: u16,
+    },
     SetProxyTakeover {
         app_type: AppType,
         enabled: bool,
@@ -196,11 +202,25 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 4] = [
+    pub const ALL: [SettingsItem; 5] = [
         SettingsItem::Language,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
+        SettingsItem::Proxy,
         SettingsItem::CheckForUpdates,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalProxySettingsItem {
+    ListenAddress,
+    ListenPort,
+}
+
+impl LocalProxySettingsItem {
+    pub const ALL: [LocalProxySettingsItem; 2] = [
+        LocalProxySettingsItem::ListenAddress,
+        LocalProxySettingsItem::ListenPort,
     ];
 }
 
@@ -276,4 +296,5 @@ pub struct App {
     pub webdav_quick_setup_username: Option<String>,
     pub language_idx: usize,
     pub settings_idx: usize,
+    pub settings_proxy_idx: usize,
 }

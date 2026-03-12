@@ -4,13 +4,13 @@ impl App {
     pub(super) fn handle_dialog_overlay_key(
         &mut self,
         key: KeyEvent,
-        _data: &UiData,
+        data: &UiData,
     ) -> Option<Action> {
         if let Some(action) = self.handle_confirm_overlay_key(key) {
             return Some(action);
         }
 
-        if let Some(action) = self.handle_text_input_overlay_key(key) {
+        if let Some(action) = self.handle_text_input_overlay_key(key, data) {
             return Some(action);
         }
 
@@ -86,7 +86,7 @@ impl App {
         Some(action)
     }
 
-    fn handle_text_input_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_text_input_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
         let Overlay::TextInput(input) = &self.overlay else {
             return None;
         };
@@ -109,7 +109,7 @@ impl App {
                     _ => String::new(),
                 };
                 self.overlay = Overlay::None;
-                self.handle_text_input_submit(submit, raw)
+                self.handle_text_input_submit(submit, raw, data)
             }
             KeyCode::Backspace => {
                 if let Overlay::TextInput(input) = &mut self.overlay {
@@ -131,7 +131,12 @@ impl App {
         Some(action)
     }
 
-    fn handle_text_input_submit(&mut self, submit: TextSubmit, raw: String) -> Action {
+    fn handle_text_input_submit(
+        &mut self,
+        submit: TextSubmit,
+        raw: String,
+        data: &UiData,
+    ) -> Action {
         match submit {
             TextSubmit::ConfigExport => {
                 if raw.is_empty() {
@@ -155,6 +160,12 @@ impl App {
             TextSubmit::ConfigBackupName => {
                 let name = if raw.is_empty() { None } else { Some(raw) };
                 Action::ConfigBackup { name }
+            }
+            TextSubmit::SettingsProxyListenAddress => {
+                self.handle_settings_proxy_listen_address_submit(data, raw)
+            }
+            TextSubmit::SettingsProxyListenPort => {
+                self.handle_settings_proxy_listen_port_submit(data, raw)
             }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {
@@ -227,4 +238,97 @@ impl App {
             password: raw,
         }
     }
+
+    fn handle_settings_proxy_listen_address_submit(
+        &mut self,
+        data: &UiData,
+        raw: String,
+    ) -> Action {
+        if data.proxy.running {
+            self.push_toast(
+                texts::tui_toast_proxy_settings_stop_before_edit(),
+                ToastKind::Info,
+            );
+            return Action::None;
+        }
+
+        let trimmed = raw.trim().to_string();
+        if !is_valid_proxy_listen_address(&trimmed) {
+            self.push_toast(
+                texts::tui_toast_proxy_listen_address_invalid(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_settings_proxy_title().to_string(),
+                prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
+                buffer: trimmed,
+                submit: TextSubmit::SettingsProxyListenAddress,
+                secret: false,
+            });
+            return Action::None;
+        }
+
+        Action::SetProxyListenAddress { address: trimmed }
+    }
+
+    fn handle_settings_proxy_listen_port_submit(&mut self, data: &UiData, raw: String) -> Action {
+        if data.proxy.running {
+            self.push_toast(
+                texts::tui_toast_proxy_settings_stop_before_edit(),
+                ToastKind::Info,
+            );
+            return Action::None;
+        }
+
+        let trimmed = raw.trim().to_string();
+        let Ok(port) = trimmed.parse::<u16>() else {
+            self.push_toast(
+                texts::tui_toast_proxy_listen_port_invalid(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_settings_proxy_title().to_string(),
+                prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                buffer: trimmed,
+                submit: TextSubmit::SettingsProxyListenPort,
+                secret: false,
+            });
+            return Action::None;
+        };
+
+        if !(1024..=65535).contains(&port) {
+            self.push_toast(
+                texts::tui_toast_proxy_listen_port_invalid(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_settings_proxy_title().to_string(),
+                prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                buffer: trimmed,
+                submit: TextSubmit::SettingsProxyListenPort,
+                secret: false,
+            });
+            return Action::None;
+        }
+
+        Action::SetProxyListenPort { port }
+    }
+}
+
+fn is_valid_proxy_listen_address(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if matches!(value, "localhost" | "0.0.0.0") {
+        return true;
+    }
+
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() != 4 {
+        return false;
+    }
+
+    parts
+        .iter()
+        .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
 }

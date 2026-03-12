@@ -14,6 +14,7 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::SkillsRepos
             | Route::SkillDetail { .. }
             | Route::Settings
+            | Route::SettingsProxy
     )
 }
 

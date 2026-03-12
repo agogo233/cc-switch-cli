@@ -28,6 +28,24 @@ pub(super) fn set_proxy_enabled(
     Ok(())
 }
 
+pub(super) fn set_proxy_listen_address(
+    ctx: &mut RuntimeActionContext<'_>,
+    address: String,
+) -> Result<(), AppError> {
+    update_proxy_config(ctx, |config| {
+        config.listen_address = address;
+    })
+}
+
+pub(super) fn set_proxy_listen_port(
+    ctx: &mut RuntimeActionContext<'_>,
+    port: u16,
+) -> Result<(), AppError> {
+    update_proxy_config(ctx, |config| {
+        config.listen_port = port;
+    })
+}
+
 pub(super) fn set_proxy_takeover(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: AppType,
@@ -60,6 +78,38 @@ pub(super) fn set_proxy_takeover(
     open_proxy_help_overlay_with(ctx.app, ctx.data, load_proxy_config)?;
     ctx.app.push_toast(
         texts::tui_toast_proxy_takeover_updated(app_type.as_str(), enabled),
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
+fn update_proxy_config(
+    ctx: &mut RuntimeActionContext<'_>,
+    mutate: impl FnOnce(&mut crate::proxy::ProxyConfig),
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+
+    let status = runtime.block_on(state.proxy_service.get_status());
+    if status.running {
+        *ctx.data = UiData::load(&ctx.app.app_type)?;
+        ctx.app.push_toast(
+            texts::tui_toast_proxy_settings_stop_before_edit(),
+            super::super::app::ToastKind::Info,
+        );
+        return Ok(());
+    }
+
+    let mut config = runtime.block_on(state.proxy_service.get_config())?;
+    mutate(&mut config);
+    runtime.block_on(state.proxy_service.update_config(&config))?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        texts::tui_toast_proxy_settings_saved(),
         super::super::app::ToastKind::Success,
     );
     Ok(())

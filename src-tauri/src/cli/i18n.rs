@@ -2236,6 +2236,102 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_proxy_title() -> &'static str {
+        if is_chinese() {
+            "本地代理"
+        } else {
+            "Local Proxy"
+        }
+    }
+
+    pub fn tui_settings_proxy_listen_address_label() -> &'static str {
+        if is_chinese() {
+            "监听地址"
+        } else {
+            "Listen Address"
+        }
+    }
+
+    pub fn tui_settings_proxy_listen_port_label() -> &'static str {
+        if is_chinese() {
+            "监听端口"
+        } else {
+            "Listen Port"
+        }
+    }
+
+    pub fn tui_settings_proxy_listen_address_prompt() -> &'static str {
+        if is_chinese() {
+            "输入监听地址（如 127.0.0.1 / localhost / 0.0.0.0）"
+        } else {
+            "Enter listen address (for example 127.0.0.1 / localhost / 0.0.0.0)"
+        }
+    }
+
+    pub fn tui_settings_proxy_listen_port_prompt() -> &'static str {
+        if is_chinese() {
+            "输入监听端口（1024-65535）"
+        } else {
+            "Enter listen port (1024-65535)"
+        }
+    }
+
+    pub fn tui_settings_proxy_restart_hint() -> &'static str {
+        if is_chinese() {
+            "修改监听地址或端口后，需先停止并重新开启本地代理才能生效"
+        } else {
+            "Changes to listen address or port require stopping and restarting the local proxy"
+        }
+    }
+
+    pub fn tui_settings_proxy_stop_before_edit_hint() -> &'static str {
+        if is_chinese() {
+            "请先停止本地代理，再修改监听地址或端口"
+        } else {
+            "Stop the local proxy before editing listen address or port"
+        }
+    }
+
+    pub fn tui_toast_proxy_listen_address_invalid() -> &'static str {
+        if is_chinese() {
+            "地址无效，请输入有效的 IPv4 地址、localhost 或 0.0.0.0"
+        } else {
+            "Invalid address. Enter a valid IPv4 address, localhost, or 0.0.0.0"
+        }
+    }
+
+    pub fn tui_toast_proxy_listen_port_invalid() -> &'static str {
+        if is_chinese() {
+            "端口无效，请输入 1024-65535 之间的数字"
+        } else {
+            "Invalid port. Enter a number between 1024 and 65535"
+        }
+    }
+
+    pub fn tui_toast_proxy_settings_saved() -> &'static str {
+        if is_chinese() {
+            "本地代理配置已保存。"
+        } else {
+            "Local proxy settings saved."
+        }
+    }
+
+    pub fn tui_toast_proxy_settings_restart_required() -> &'static str {
+        if is_chinese() {
+            "本地代理正在运行；新监听地址/端口会在重启代理后生效。"
+        } else {
+            "The local proxy is running; the new listen address/port will apply after restart."
+        }
+    }
+
+    pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
+        if is_chinese() {
+            "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
+        } else {
+            "The local proxy is running. Stop it before editing listen address or port."
+        }
+    }
+
     pub fn tui_config_title() -> &'static str {
         if is_chinese() {
             "配置"

@@ -145,6 +145,7 @@ fn render_content(
             render_skill_detail(frame, app, data, content_area, theme, directory)
         }
         Route::Settings => render_settings(frame, app, data, content_area, theme),
+        Route::SettingsProxy => render_settings_proxy(frame, app, data, content_area, theme),
     }
 }
 

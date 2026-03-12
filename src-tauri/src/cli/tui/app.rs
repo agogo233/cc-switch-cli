@@ -32,8 +32,8 @@ mod tests;
 mod types;
 
 pub(crate) use app_state::{
-    Action, App, ConfigItem, ProxyVisualTransition, SettingsItem, WebDavConfigItem,
-    PROXY_HERO_TRANSITION_TICKS,
+    Action, App, ConfigItem, LocalProxySettingsItem, ProxyVisualTransition, SettingsItem,
+    WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 use helpers::*;

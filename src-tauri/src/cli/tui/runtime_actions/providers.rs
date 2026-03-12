@@ -1,8 +1,10 @@
 use crate::cli::i18n::texts;
+use crate::cli::tui::form::ClaudeApiFormat;
 use crate::error::AppError;
+use crate::proxy::providers::get_claude_api_format;
 use crate::services::ProviderService;
 
-use super::super::app::{Overlay, ToastKind};
+use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::form::ProviderAddField;
 use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, StreamCheckReq};
@@ -10,7 +12,7 @@ use super::RuntimeActionContext;
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
     let state = load_state()?;
-    let provider = ctx
+    let switched_provider = ctx
         .data
         .providers
         .rows
@@ -18,11 +20,10 @@ pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
         .find(|row| row.id == id)
         .map(|row| row.provider.clone());
     ProviderService::switch(&state, ctx.app.app_type.clone(), &id)?;
-    if let Some(provider) = provider {
-        if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_provider_switch(
-            &ctx.app.app_type,
-            &provider,
-        ) {
+    if let Some(provider) = switched_provider.as_ref() {
+        if let Err(err) =
+            crate::claude_plugin::sync_claude_plugin_on_provider_switch(&ctx.app.app_type, provider)
+        {
             ctx.app.push_toast(
                 texts::tui_toast_claude_plugin_sync_failed(&err.to_string()),
                 ToastKind::Warning,
@@ -30,7 +31,45 @@ pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
         }
     }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
+
+    let proxy_ready = ctx
+        .data
+        .proxy
+        .routes_current_app_through_proxy(&ctx.app.app_type)
+        .unwrap_or(false);
+    if let Some(api_format) = switched_provider.as_ref().and_then(|provider| {
+        provider_switch_proxy_notice_api_format(&ctx.app.app_type, provider, proxy_ready)
+    }) {
+        ctx.app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+            message: texts::tui_claude_api_format_requires_proxy_message(api_format),
+            action: ConfirmAction::ProviderApiFormatProxyNotice,
+        });
+    }
+
     Ok(())
+}
+
+fn provider_requires_local_proxy(
+    app_type: &crate::app_config::AppType,
+    provider: &crate::provider::Provider,
+) -> Option<&'static str> {
+    if !matches!(app_type, crate::app_config::AppType::Claude) {
+        return None;
+    }
+
+    let api_format = get_claude_api_format(provider);
+    ClaudeApiFormat::from_raw(api_format)
+        .requires_proxy()
+        .then_some(api_format)
+}
+
+fn provider_switch_proxy_notice_api_format(
+    app_type: &crate::app_config::AppType,
+    provider: &crate::provider::Provider,
+    proxy_ready: bool,
+) -> Option<&'static str> {
+    provider_requires_local_proxy(app_type, provider).filter(|_| !proxy_ready)
 }
 
 pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
@@ -157,6 +196,7 @@ mod tests {
 
     use super::*;
     use crate::cli::tui::app::App;
+    use crate::cli::tui::app::{ConfirmAction, ConfirmOverlay};
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::provider::Provider;
@@ -226,6 +266,60 @@ mod tests {
         config
     }
 
+    fn claude_test_config(api_format: &str) -> MultiAppConfig {
+        let mut config = MultiAppConfig::default();
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy Claude".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                        "ANTHROPIC_API_KEY": "sk-old"
+                    },
+                    "api_format": "anthropic"
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "proxy-provider".to_string(),
+            Provider::with_id(
+                "proxy-provider".to_string(),
+                "Proxy Claude".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://example.com",
+                        "ANTHROPIC_API_KEY": "sk-new"
+                    },
+                    "api_format": api_format
+                }),
+                None,
+            ),
+        );
+        config
+    }
+
+    fn claude_provider_with_api_format(api_format: &str) -> Provider {
+        Provider::with_id(
+            "proxy-provider".to_string(),
+            "Proxy Claude".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://example.com",
+                    "ANTHROPIC_API_KEY": "sk-new"
+                },
+                "api_format": api_format
+            }),
+            None,
+        )
+    }
+
     fn run_codex_switch(initialized: bool) -> Result<(Option<String>, String), AppError> {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -270,6 +364,40 @@ mod tests {
         ))
     }
 
+    fn run_claude_switch(api_format: &str) -> Result<(Overlay, String), AppError> {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        claude_test_config(api_format).save()?;
+
+        let mut terminal = TuiTerminal::new_for_test()?;
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude)?;
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        switch(&mut ctx, "proxy-provider".to_string())?;
+
+        Ok((app.overlay.clone(), data.providers.current_id))
+    }
+
     #[test]
     #[serial]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
@@ -292,5 +420,64 @@ mod tests {
             toast.is_none(),
             "provider switch should not show restart toast"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_warns_when_claude_provider_requires_proxy_and_proxy_is_not_running() {
+        let (overlay, current_id) =
+            run_claude_switch("openai_chat").expect("switch should succeed");
+
+        assert_eq!(current_id, "proxy-provider");
+        assert!(matches!(
+            overlay,
+            Overlay::Confirm(ConfirmOverlay { title, message, action })
+                if title == texts::tui_claude_api_format_requires_proxy_title()
+                    && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                    && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_warns_for_openai_responses_when_proxy_is_not_running() {
+        let (overlay, current_id) =
+            run_claude_switch("openai_responses").expect("switch should succeed");
+
+        assert_eq!(current_id, "proxy-provider");
+        assert!(matches!(
+            overlay,
+            Overlay::Confirm(ConfirmOverlay { title, message, action })
+                if title == texts::tui_claude_api_format_requires_proxy_title()
+                    && message == texts::tui_claude_api_format_requires_proxy_message("openai_responses")
+                    && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
+        ));
+    }
+
+    #[test]
+    fn provider_switch_notice_is_suppressed_when_current_app_already_routes_through_proxy() {
+        let provider = claude_provider_with_api_format("openai_chat");
+
+        let notice = provider_switch_proxy_notice_api_format(&AppType::Claude, &provider, true);
+
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn provider_switch_notice_uses_openai_responses_api_format_when_proxy_is_not_ready() {
+        let provider = claude_provider_with_api_format("openai_responses");
+
+        let notice = provider_switch_proxy_notice_api_format(&AppType::Claude, &provider, false);
+
+        assert_eq!(notice, Some("openai_responses"));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_does_not_warn_when_claude_provider_uses_anthropic_format() {
+        let (overlay, current_id) = run_claude_switch("anthropic").expect("switch should succeed");
+
+        assert_eq!(current_id, "proxy-provider");
+        assert!(matches!(overlay, Overlay::None));
     }
 }

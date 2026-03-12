@@ -187,7 +187,7 @@ impl App {
         }
     }
 
-    pub(crate) fn on_settings_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+    pub(crate) fn on_settings_key(&mut self, key: KeyEvent, _data: &UiData) -> Action {
         let settings_len = SettingsItem::ALL.len();
         match key.code {
             KeyCode::Up => {
@@ -239,12 +239,58 @@ impl App {
                     });
                     Action::None
                 }
-                Some(SettingsItem::Proxy) => Action::SetProxyEnabled {
-                    enabled: !data.proxy.enabled,
-                },
+                Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_settings_proxy_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let items_len = LocalProxySettingsItem::ALL.len();
+        match key.code {
+            KeyCode::Up => {
+                self.settings_proxy_idx = self.settings_proxy_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(items_len - 1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                if data.proxy.running {
+                    self.push_toast(
+                        texts::tui_toast_proxy_settings_stop_before_edit(),
+                        ToastKind::Info,
+                    );
+                    return Action::None;
+                }
+
+                match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+                    Some(LocalProxySettingsItem::ListenAddress) => {
+                        self.overlay = Overlay::TextInput(TextInputState {
+                            title: texts::tui_settings_proxy_title().to_string(),
+                            prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
+                            buffer: data.proxy.configured_listen_address.clone(),
+                            submit: TextSubmit::SettingsProxyListenAddress,
+                            secret: false,
+                        });
+                        Action::None
+                    }
+                    Some(LocalProxySettingsItem::ListenPort) => {
+                        self.overlay = Overlay::TextInput(TextInputState {
+                            title: texts::tui_settings_proxy_title().to_string(),
+                            prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                            buffer: data.proxy.configured_listen_port.to_string(),
+                            submit: TextSubmit::SettingsProxyListenPort,
+                            secret: false,
+                        });
+                        Action::None
+                    }
+                    None => Action::None,
+                }
+            }
             _ => Action::None,
         }
     }

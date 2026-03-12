@@ -104,6 +104,52 @@ fn provider_detail_uses_legacy_claude_api_format_for_display() {
     assert!(all.contains("OpenAI Chat Completions"));
 }
 
+#[test]
+fn settings_local_proxy_row_shows_address_without_enabled_badge() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.configured_listen_address = "127.0.0.1".to_string();
+    data.proxy.configured_listen_port = 15722;
+    data.proxy.enabled = true;
+
+    let buf = render(&app, &data);
+    let proxy_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Local Proxy"))
+        .expect("settings view should render Local Proxy row");
+
+    assert!(proxy_line.contains("127.0.0.1:15722"));
+    assert!(!proxy_line.contains("Enabled"));
+    assert!(!proxy_line.contains("Disabled"));
+}
+
+#[test]
+fn settings_proxy_route_hides_edit_key_when_proxy_is_running() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsProxy;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.running = true;
+    data.proxy.configured_listen_address = "127.0.0.1".to_string();
+    data.proxy.configured_listen_port = 15722;
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(!all.contains("Enter Edit"));
+    assert!(all.contains("Stop the local proxy before editing listen address or port"));
+}
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {

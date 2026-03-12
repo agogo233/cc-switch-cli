@@ -210,6 +210,10 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
+        Action::SetProxyListenAddress { address } => {
+            settings::set_proxy_listen_address(&mut ctx, address)
+        }
+        Action::SetProxyListenPort { port } => settings::set_proxy_listen_port(&mut ctx, port),
         Action::SetProxyTakeover { app_type, enabled } => {
             settings::set_proxy_takeover(&mut ctx, app_type, enabled)
         }

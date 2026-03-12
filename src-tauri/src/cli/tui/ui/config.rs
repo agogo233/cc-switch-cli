@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::tui::app::LocalProxySettingsItem;
 
 pub(super) fn config_items_filtered(app: &App) -> Vec<ConfigItem> {
     let Some(q) = app.filter.query_lower() else {
@@ -48,6 +49,13 @@ pub(super) fn webdav_config_item_label(item: &WebDavConfigItem) -> &'static str 
         WebDavConfigItem::JianguoyunQuickSetup => {
             texts::tui_config_item_webdav_jianguoyun_quick_setup()
         }
+    }
+}
+
+pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> &'static str {
+    match item {
+        LocalProxySettingsItem::ListenAddress => texts::tui_settings_proxy_listen_address_label(),
+        LocalProxySettingsItem::ListenPort => texts::tui_settings_proxy_listen_port_label(),
     }
 }
 
@@ -150,7 +158,6 @@ pub(super) fn render_settings(
     let language = crate::cli::i18n::current_language();
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
-    let proxy_enabled = data.proxy.enabled;
 
     let rows_data = super::app::SettingsItem::ALL
         .iter()
@@ -177,11 +184,10 @@ pub(super) fn render_settings(
             ),
             super::app::SettingsItem::Proxy => (
                 texts::tui_config_item_proxy().to_string(),
-                if proxy_enabled {
-                    texts::enabled().to_string()
-                } else {
-                    texts::disabled().to_string()
-                },
+                format!(
+                    "{}:{}",
+                    data.proxy.configured_listen_address, data.proxy.configured_listen_port,
+                ),
             ),
             super::app::SettingsItem::CheckForUpdates => (
                 texts::tui_settings_check_for_updates().to_string(),
@@ -242,4 +248,89 @@ pub(super) fn render_settings(
     let mut state = TableState::default();
     state.select(Some(app.settings_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+}
+
+pub(super) fn render_settings_proxy(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let rows_data = LocalProxySettingsItem::ALL
+        .iter()
+        .map(|item| match item {
+            LocalProxySettingsItem::ListenAddress => (
+                local_proxy_settings_item_label(item).to_string(),
+                data.proxy.configured_listen_address.clone(),
+            ),
+            LocalProxySettingsItem::ListenPort => (
+                local_proxy_settings_item_label(item).to_string(),
+                data.proxy.configured_listen_port.to_string(),
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _value)| label.as_str())
+            .chain(std::iter::once(texts::tui_settings_header_setting())),
+        0,
+    );
+
+    let header = Row::new(vec![
+        Cell::from(texts::tui_settings_header_setting()),
+        Cell::from(texts::tui_settings_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = rows_data
+        .iter()
+        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(texts::tui_settings_proxy_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    if app.focus == Focus::Content && !data.proxy.running {
+        render_key_bar_center(frame, chunks[0], theme, &[("Enter", texts::tui_key_edit())]);
+    }
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(10)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    state.select(Some(app.settings_proxy_idx));
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+
+    frame.render_widget(
+        Paragraph::new(if data.proxy.running {
+            texts::tui_settings_proxy_stop_before_edit_hint()
+        } else {
+            texts::tui_settings_proxy_restart_hint()
+        })
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.dim)),
+        chunks[2],
+    );
 }

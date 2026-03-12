@@ -44,6 +44,7 @@ impl App {
             webdav_quick_setup_username: None,
             language_idx: 0,
             settings_idx: 0,
+            settings_proxy_idx: 0,
         }
     }
 
@@ -65,7 +66,7 @@ impl App {
             | Route::SkillsDiscover
             | Route::SkillsRepos
             | Route::SkillDetail { .. } => NavItem::Skills,
-            Route::Settings => NavItem::Settings,
+            Route::Settings | Route::SettingsProxy => NavItem::Settings,
         }
     }
 
@@ -351,6 +352,7 @@ impl App {
             Route::SkillsRepos => self.on_skills_repos_key(key, data),
             Route::SkillDetail { directory } => self.on_skill_detail_key(key, data, &directory),
             Route::Settings => self.on_settings_key(key, data),
+            Route::SettingsProxy => self.on_settings_proxy_key(key, data),
             Route::Main => match key.code {
                 KeyCode::Char('r') => Action::LocalEnvRefresh,
                 KeyCode::Char('p') | KeyCode::Char('P') => self.main_proxy_action(data),
