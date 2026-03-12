@@ -162,8 +162,9 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
 pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
     const NAV_BORDER_WIDTH: u16 = 2;
     const NAV_ICON_COL_WIDTH: u16 = 3;
+    const NAV_COL_SPACING: u16 = 1;
     const NAV_TEXT_MIN_WIDTH: u16 = 10;
-    const NAV_TEXT_EXTRA_WIDTH: u16 = 5;
+    const NAV_TEXT_EXTRA_WIDTH: u16 = 2;
     let highlight_width = UnicodeWidthStr::width(highlight_symbol(theme)) as u16;
 
     let max_text_width = NavItem::ALL
@@ -186,6 +187,7 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
     NAV_BORDER_WIDTH
         .saturating_add(highlight_width)
         .saturating_add(NAV_ICON_COL_WIDTH)
+        .saturating_add(NAV_COL_SPACING)
         .saturating_add(text_col_width)
 }
 pub(super) fn render_nav(
@@ -201,7 +203,7 @@ pub(super) fn render_nav(
     });
 
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(10)])
-        .column_spacing(0)
+        .column_spacing(1)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -262,16 +264,37 @@ pub(super) fn render_footer(
                 Style::default(),
             )]
         } else {
-            let key_style = Style::default()
-                .fg(theme.accent)
+            let nav_bg = Color::Rgb(101, 113, 160); // #6571A0
+            let act_bg = Color::Rgb(248, 248, 248); // #F8F8F8
+            let nav_label_style = Style::default()
+                .fg(Color::Rgb(255, 255, 255))
+                .bg(nav_bg)
                 .add_modifier(Modifier::BOLD);
-            let desc_style = Style::default().fg(theme.dim);
-            let sep = Span::styled("  ", desc_style);
+            let act_label_style = Style::default()
+                .fg(Color::Rgb(108, 108, 108))
+                .bg(act_bg)
+                .add_modifier(Modifier::BOLD);
+            let nav_key_style = Style::default()
+                .fg(Color::Rgb(255, 255, 255))
+                .bg(nav_bg)
+                .add_modifier(Modifier::BOLD);
+            let nav_desc_style = Style::default().fg(Color::Rgb(255, 255, 255)).bg(nav_bg);
+            let act_key_style = Style::default()
+                .fg(Color::Rgb(108, 108, 108))
+                .bg(act_bg)
+                .add_modifier(Modifier::BOLD);
+            let act_desc_style = Style::default().fg(Color::Rgb(108, 108, 108)).bg(act_bg);
+            let nav_sep = Span::styled("  ", nav_desc_style);
+            let act_sep = Span::styled("  ", act_desc_style);
 
-            let items: &[(&str, &str)] = if i18n::is_chinese() {
+            let nav_items: &[(&str, &str)] = if i18n::is_chinese() {
+                &[("←→", "菜单/内容"), ("↑↓", "移动")]
+            } else {
+                &[("←→", "menu/content"), ("↑↓", "move")]
+            };
+
+            let act_items_base: &[(&str, &str)] = if i18n::is_chinese() {
                 &[
-                    ("←→", "菜单/内容"),
-                    ("↑↓", "移动"),
                     ("[ ]", "切换应用"),
                     ("/", "过滤"),
                     ("Esc", "返回"),
@@ -279,8 +302,6 @@ pub(super) fn render_footer(
                 ]
             } else {
                 &[
-                    ("←→", "menu/content"),
-                    ("↑↓", "move"),
                     ("[ ]", "switch app"),
                     ("/", "filter"),
                     ("Esc", "back"),
@@ -288,19 +309,34 @@ pub(super) fn render_footer(
                 ]
             };
 
-            let mut items = items.to_vec();
+            let mut act_items = act_items_base.to_vec();
             if proxy_action_available {
-                items.push(("P", proxy_footer_label));
+                act_items.push(("P", proxy_footer_label));
             }
 
             let mut v = Vec::new();
-            for (i, (key, desc)) in items.iter().enumerate() {
+            // NAV block
+            v.push(Span::styled(" NAV ", nav_label_style));
+            for (i, (key, desc)) in nav_items.iter().enumerate() {
                 if i > 0 {
-                    v.push(sep.clone());
+                    v.push(nav_sep.clone());
                 }
-                v.push(Span::styled(format!(" {} ", key), key_style));
-                v.push(Span::styled(format!(" {}", desc), desc_style));
+                v.push(Span::styled(format!(" {} ", key), nav_key_style));
+                v.push(Span::styled(format!(" {}", desc), nav_desc_style));
             }
+            v.push(Span::styled(" ", nav_desc_style));
+            // gap between blocks
+            v.push(Span::raw(" "));
+            // ACT block
+            v.push(Span::styled(" ACT ", act_label_style));
+            for (i, (key, desc)) in act_items.iter().enumerate() {
+                if i > 0 {
+                    v.push(act_sep.clone());
+                }
+                v.push(Span::styled(format!(" {} ", key), act_key_style));
+                v.push(Span::styled(format!(" {}", desc), act_desc_style));
+            }
+            v.push(Span::styled(" ", act_desc_style));
             v
         }
     };
