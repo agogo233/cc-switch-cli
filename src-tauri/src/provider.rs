@@ -236,6 +236,11 @@ pub struct ProviderMeta {
     /// 供应商单独的代理配置
     #[serde(rename = "proxyConfig", skip_serializing_if = "Option::is_none")]
     pub proxy_config: Option<ProviderProxyConfig>,
+    /// Claude API 格式（仅 Claude 供应商使用）
+    /// - "anthropic": 原生 Anthropic Messages API，直接透传
+    /// - "openai_chat": OpenAI Chat Completions 格式，需要转换
+    #[serde(rename = "apiFormat", skip_serializing_if = "Option::is_none")]
+    pub api_format: Option<String>,
 }
 
 impl ProviderManager {

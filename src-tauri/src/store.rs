@@ -1,6 +1,7 @@
 use crate::app_config::MultiAppConfig;
 use crate::database::Database;
 use crate::error::AppError;
+use crate::services::ProxyService;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -8,6 +9,7 @@ use std::sync::{Arc, RwLock};
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<MultiAppConfig>,
+    pub proxy_service: ProxyService,
 }
 
 impl AppState {
@@ -22,10 +24,7 @@ impl AppState {
             let db = Arc::new(Database::init()?);
             let mut config = export_db_to_multi_app_config(&db)?;
             migrate_legacy_codex_configs(&db, &mut config);
-            return Ok(Self {
-                db,
-                config: RwLock::new(config),
-            });
+            return Self::from_parts(db, config);
         }
 
         // Validate legacy files before creating the database file.
@@ -79,16 +78,41 @@ impl AppState {
 
         let mut config = export_db_to_multi_app_config(&db)?;
         migrate_legacy_codex_configs(&db, &mut config);
-        Ok(Self {
-            db,
-            config: RwLock::new(config),
-        })
+        Self::from_parts(db, config)
+    }
+
+    /// 创建新的应用状态，并在真实进程启动路径上执行一次启动恢复。
+    pub fn try_new_with_startup_recovery() -> Result<Self, AppError> {
+        let state = Self::try_new()?;
+
+        if !state
+            .proxy_service
+            .is_running_blocking()
+            .map_err(AppError::Message)?
+        {
+            state
+                .proxy_service
+                .recover_takeovers_on_startup_blocking()
+                .map_err(AppError::Config)?;
+        }
+
+        Ok(state)
     }
 
     /// 将内存中的 config 快照持久化到 SQLite（SSOT）。
     pub fn save(&self) -> Result<(), AppError> {
         let config = self.config.read().map_err(AppError::from)?;
         persist_multi_app_config_to_db(&self.db, &config)
+    }
+
+    fn from_parts(db: Arc<Database>, config: MultiAppConfig) -> Result<Self, AppError> {
+        let proxy_service = ProxyService::new(db.clone());
+
+        Ok(Self {
+            db,
+            config: RwLock::new(config),
+            proxy_service,
+        })
     }
 }
 

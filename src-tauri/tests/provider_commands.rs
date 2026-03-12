@@ -1,14 +1,25 @@
 use serde_json::json;
+use serial_test::serial;
 use std::collections::HashMap;
+use std::net::TcpListener;
 
 use cc_switch_lib::{
-    get_codex_auth_path, get_codex_config_path, read_json_file, write_codex_live_atomic, AppType,
-    McpApps, McpServer, MultiAppConfig, Provider, ProviderService,
+    get_claude_settings_path, get_codex_auth_path, get_codex_config_path, read_json_file,
+    write_codex_live_atomic, AppType, McpApps, McpServer, MultiAppConfig, Provider,
+    ProviderService,
 };
 
 #[path = "support.rs"]
 mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+
+fn find_free_port() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
+    listener
+        .local_addr()
+        .expect("read local listener address")
+        .port()
+}
 
 #[test]
 fn switch_provider_updates_codex_live_and_state() {
@@ -301,7 +312,6 @@ fn switch_provider_updates_claude_live_and_state() {
             ),
         );
     }
-
     let app_state = state_from_config(config);
 
     ProviderService::switch(&app_state, AppType::Claude, "new-provider")
@@ -406,4 +416,157 @@ fn switch_provider_codex_allows_missing_auth_and_writes_config() {
     );
     let cfg_path = get_codex_config_path();
     assert!(cfg_path.exists(), "config.toml should be written");
+}
+
+#[tokio::test]
+#[serial]
+async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_updates_restore_backup(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+
+    let legacy_live = json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "legacy-key"
+        },
+        "workspace": {
+            "path": "/tmp/workspace"
+        }
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+    )
+    .expect("seed claude live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "stale-key" }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Fresh Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "fresh-key" },
+                    "workspace": { "path": "/tmp/new-workspace" }
+                }),
+                None,
+            ),
+        );
+    }
+    config.common_config_snippets.claude = Some(
+        serde_json::json!({
+            "env": {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+            }
+        })
+        .to_string(),
+    );
+
+    let state = state_from_config(config);
+    state.save().expect("persist provider state to db");
+
+    let mut proxy_config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("read proxy config");
+    proxy_config.listen_port = find_free_port();
+    state
+        .proxy_service
+        .update_config(&proxy_config)
+        .await
+        .expect("update proxy config");
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", true)
+        .await
+        .expect("enable claude takeover");
+
+    ProviderService::switch(&state, AppType::Claude, "new-provider")
+        .expect("switch provider should succeed under takeover");
+
+    let live_during_takeover: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings under takeover");
+    assert_eq!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(format!("http://127.0.0.1:{}", proxy_config.listen_port).as_str()),
+        "provider switch under takeover should keep Claude live config pointed at the local proxy"
+    );
+    assert_eq!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "provider switch under takeover should keep the managed placeholder in Claude live config"
+    );
+
+    let backup_after_switch = state
+        .db
+        .get_live_backup("claude")
+        .await
+        .expect("read claude live backup after takeover-time switch")
+        .expect("claude takeover backup should exist after switch");
+    let backup_after_switch: serde_json::Value =
+        serde_json::from_str(&backup_after_switch.original_config)
+            .expect("parse claude live backup after takeover-time switch");
+    assert_eq!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        Some("1"),
+        "takeover-time switch should refresh the stored backup with the same Claude common snippet semantics"
+    );
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", false)
+        .await
+        .expect("disable claude takeover");
+
+    let restored_live: serde_json::Value =
+        read_json_file(&settings_path).expect("read restored claude live settings");
+    assert_eq!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "restore after a takeover-time switch should recover the new provider config, not the pre-switch one"
+    );
+    assert_eq!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        Some("1"),
+        "restore after a takeover-time switch should keep the normal Claude common snippet semantics"
+    );
 }

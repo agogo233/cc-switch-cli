@@ -1,0 +1,325 @@
+use axum::{body::Body, http, response::Response};
+use bytes::Bytes;
+use futures::stream::StreamExt;
+use serde_json::Value;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use super::{error::ProxyError, providers::streaming::create_anthropic_sse_stream};
+
+pub struct PreparedResponse {
+    pub response: Response,
+    pub stream_completion: Option<StreamCompletion>,
+}
+
+impl PreparedResponse {
+    fn buffered(response: Response) -> Self {
+        Self {
+            response,
+            stream_completion: None,
+        }
+    }
+
+    fn streaming(response: Response, stream_completion: StreamCompletion) -> Self {
+        Self {
+            response,
+            stream_completion: Some(stream_completion),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct StreamCompletion {
+    inner: Arc<Mutex<Option<Result<(), String>>>>,
+}
+
+impl StreamCompletion {
+    pub fn record_success(&self) {
+        let mut outcome = self.inner.lock().expect("lock stream completion");
+        if outcome.is_none() {
+            *outcome = Some(Ok(()));
+        }
+    }
+
+    pub fn record_error(&self, message: String) {
+        let mut outcome = self.inner.lock().expect("lock stream completion");
+        if outcome.is_none() {
+            *outcome = Some(Err(message));
+        }
+    }
+
+    pub fn outcome(&self) -> Option<Result<(), String>> {
+        self.inner.lock().expect("lock stream completion").clone()
+    }
+}
+
+pub fn is_sse_response(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+pub async fn build_passthrough_response(
+    response: reqwest::Response,
+    first_byte_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+) -> Result<PreparedResponse, ProxyError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, &headers, false);
+
+    if is_sse_response(&response) {
+        let stream_completion = StreamCompletion::default();
+        let stream = with_stream_timeouts(
+            response.bytes_stream(),
+            first_byte_timeout,
+            idle_timeout,
+            Some(stream_completion.clone()),
+        );
+        return builder
+            .body(Body::from_stream(stream))
+            .map(|response| PreparedResponse::streaming(response, stream_completion))
+            .map_err(|error| {
+                ProxyError::RequestFailed(format!("build streaming response failed: {error}"))
+            });
+    }
+
+    let body = read_buffered_body(response, first_byte_timeout).await?;
+    builder
+        .body(Body::from(body))
+        .map(PreparedResponse::buffered)
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build passthrough response failed: {error}"))
+        })
+}
+
+pub async fn build_json_response<F>(
+    response: reqwest::Response,
+    transform: F,
+) -> Result<PreparedResponse, ProxyError>
+where
+    F: FnOnce(Value) -> Result<Value, ProxyError>,
+{
+    let status = response.status();
+    let headers = response.headers().clone();
+    let upstream_body: Value = response.json().await.map_err(|error| {
+        ProxyError::RequestFailed(format!("parse upstream json failed: {error}"))
+    })?;
+    let response_body = transform(upstream_body)?;
+    let response_body = serde_json::to_vec(&response_body).map_err(|error| {
+        ProxyError::RequestFailed(format!("serialize transformed json failed: {error}"))
+    })?;
+
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, &headers, false);
+    builder = builder.header("content-type", "application/json");
+
+    builder
+        .body(Body::from(response_body))
+        .map(PreparedResponse::buffered)
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build transformed response failed: {error}"))
+        })
+}
+
+pub fn build_buffered_passthrough_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+) -> Result<PreparedResponse, ProxyError> {
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, headers, false);
+    builder
+        .body(Body::from(body))
+        .map(PreparedResponse::buffered)
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build passthrough response failed: {error}"))
+        })
+}
+
+pub fn build_buffered_json_response<F>(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+    transform: F,
+) -> Result<PreparedResponse, ProxyError>
+where
+    F: FnOnce(Value) -> Result<Value, ProxyError>,
+{
+    let upstream_body: Value = serde_json::from_slice(&body).map_err(|error| {
+        ProxyError::RequestFailed(format!("parse upstream json failed: {error}"))
+    })?;
+    let response_body = transform(upstream_body)?;
+    let response_body = serde_json::to_vec(&response_body).map_err(|error| {
+        ProxyError::RequestFailed(format!("serialize transformed json failed: {error}"))
+    })?;
+
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, headers, false);
+    builder = builder.header("content-type", "application/json");
+
+    builder
+        .body(Body::from(response_body))
+        .map(PreparedResponse::buffered)
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build transformed response failed: {error}"))
+        })
+}
+
+pub fn build_anthropic_stream_response(
+    response: reqwest::Response,
+    first_byte_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+) -> Result<PreparedResponse, ProxyError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, &headers, true);
+
+    let stream_completion = StreamCompletion::default();
+    let stream = create_anthropic_sse_stream(
+        with_stream_timeouts(
+            response.bytes_stream(),
+            first_byte_timeout,
+            idle_timeout,
+            None,
+        ),
+        stream_completion.clone(),
+    );
+    builder
+        .body(Body::from_stream(stream))
+        .map(|response| PreparedResponse::streaming(response, stream_completion))
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build anthropic stream response failed: {error}"))
+        })
+}
+
+fn with_stream_timeouts(
+    stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    first_byte_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+    stream_completion: Option<StreamCompletion>,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    async_stream::stream! {
+        tokio::pin!(stream);
+        let mut is_first_chunk = true;
+
+        while let Some(next) = next_chunk_with_timeout(
+            &mut stream,
+            if is_first_chunk { first_byte_timeout } else { idle_timeout },
+            if is_first_chunk {
+                StreamTimeoutPhase::FirstByte
+            } else {
+                StreamTimeoutPhase::Idle
+            },
+        ).await {
+            match next {
+                Ok(chunk) => {
+                    is_first_chunk = false;
+                    yield Ok(chunk);
+                }
+                Err(error) => {
+                    if let Some(stream_completion) = &stream_completion {
+                        stream_completion.record_error(error.to_string());
+                    }
+                    yield Err(error);
+                    return;
+                }
+            }
+        }
+
+        if let Some(stream_completion) = &stream_completion {
+            stream_completion.record_success();
+        }
+    }
+}
+
+async fn read_buffered_body(
+    response: reqwest::Response,
+    timeout_duration: Option<Duration>,
+) -> Result<Bytes, ProxyError> {
+    match timeout_duration {
+        Some(timeout) => match tokio::time::timeout(timeout, response.bytes()).await {
+            Ok(result) => result.map_err(|error| {
+                ProxyError::RequestFailed(format!("read response body failed: {error}"))
+            }),
+            Err(_) => Err(ProxyError::RequestFailed(
+                StreamTimeoutPhase::FirstByte.error_message(timeout),
+            )),
+        },
+        None => response.bytes().await.map_err(|error| {
+            ProxyError::RequestFailed(format!("read response body failed: {error}"))
+        }),
+    }
+}
+
+async fn next_chunk_with_timeout<S>(
+    stream: &mut S,
+    timeout_duration: Option<Duration>,
+    phase: StreamTimeoutPhase,
+) -> Option<Result<Bytes, std::io::Error>>
+where
+    S: futures::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    let next = match timeout_duration {
+        Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                return Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    phase.error_message(timeout),
+                )));
+            }
+        },
+        None => stream.next().await,
+    };
+
+    next.map(|result| result.map_err(std::io::Error::other))
+}
+
+#[derive(Clone, Copy)]
+enum StreamTimeoutPhase {
+    FirstByte,
+    Idle,
+}
+
+impl StreamTimeoutPhase {
+    fn error_message(self, timeout: Duration) -> String {
+        let display_seconds = timeout.as_secs().max(u64::from(!timeout.is_zero()));
+        match self {
+            StreamTimeoutPhase::FirstByte => {
+                format!("stream timeout after {}s", display_seconds)
+            }
+            StreamTimeoutPhase::Idle => {
+                format!("stream idle timeout after {}s", display_seconds)
+            }
+        }
+    }
+}
+
+fn copy_headers(
+    builder: &mut http::response::Builder,
+    headers: &reqwest::header::HeaderMap,
+    force_sse_content_type: bool,
+) {
+    for (key, value) in headers {
+        let lower = key.as_str().to_ascii_lowercase();
+        if lower == "content-length" || lower == "transfer-encoding" {
+            continue;
+        }
+        if force_sse_content_type && lower == "content-type" {
+            continue;
+        }
+        *builder = std::mem::take(builder).header(key, value);
+    }
+
+    if force_sse_content_type {
+        *builder = std::mem::take(builder).header("content-type", "text/event-stream");
+    }
+}

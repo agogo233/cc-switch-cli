@@ -38,6 +38,14 @@ impl Database {
         Ok(())
     }
 
+    /// 删除设置值
+    pub fn delete_setting(&self, key: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     // --- Config Snippets 辅助方法 ---
 
     /// 获取通用配置片段
@@ -55,11 +63,7 @@ impl Database {
         if let Some(value) = snippet {
             self.set_setting(&key, &value)
         } else {
-            // 如果为 None 则删除
-            let conn = lock_conn!(self.conn);
-            conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            Ok(())
+            self.delete_setting(&key)
         }
     }
 

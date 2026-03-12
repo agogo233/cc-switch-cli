@@ -23,6 +23,10 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
+    if !matches!(cli.command, Some(Commands::Completions { .. })) {
+        let _state = cc_switch_lib::AppState::try_new_with_startup_recovery()?;
+    }
+
     match cli.command {
         // Default to interactive mode if no command is provided
         None | Some(Commands::Interactive) => cc_switch_lib::cli::interactive::run(cli.app),
@@ -35,6 +39,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Commands::Skills(cmd)) => cc_switch_lib::cli::commands::skills::execute(cmd, cli.app),
         Some(Commands::Config(cmd)) => cc_switch_lib::cli::commands::config::execute(cmd, cli.app),
+        Some(Commands::Proxy(cmd)) => cc_switch_lib::cli::commands::proxy::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions { shell }) => {

@@ -26,9 +26,11 @@ pub struct ProviderService;
 
 #[cfg(test)]
 fn state_from_config(config: MultiAppConfig) -> AppState {
+    let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
     AppState {
-        db: std::sync::Arc::new(crate::Database::memory().expect("create memory database")),
+        db: db.clone(),
         config: std::sync::RwLock::new(config),
+        proxy_service: crate::ProxyService::new(db),
     }
 }
 
@@ -203,6 +205,7 @@ struct PostCommitAction {
     sync_mcp: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
+    takeover_active: bool,
 }
 
 #[cfg(test)]
@@ -1489,18 +1492,36 @@ impl ProviderService {
             .as_ref()
             .and_then(|meta| meta.apply_common_config)
             .unwrap_or(true);
-        Self::write_live_snapshot(
-            &action.app_type,
-            &action.provider,
-            action.common_config_snippet.as_deref(),
-            apply_common_config,
-        )?;
+        if action.takeover_active {
+            let backup_snapshot = Self::build_live_backup_snapshot(
+                &action.app_type,
+                &action.provider,
+                action.common_config_snippet.as_deref(),
+                apply_common_config,
+            )?;
+            futures::executor::block_on(
+                state
+                    .proxy_service
+                    .save_live_backup_snapshot(action.app_type.as_str(), &backup_snapshot),
+            )
+            .map_err(AppError::Message)?;
+        } else {
+            Self::write_live_snapshot(
+                &action.app_type,
+                &action.provider,
+                action.common_config_snippet.as_deref(),
+                apply_common_config,
+            )?;
+        }
         if action.sync_mcp {
             // 使用 v3.7.0 统一的 MCP 同步机制，支持所有应用
             use crate::services::mcp::McpService;
             McpService::sync_all_enabled(state)?;
         }
-        if action.refresh_snapshot && crate::sync_policy::should_sync_live(&action.app_type) {
+        if !action.takeover_active
+            && action.refresh_snapshot
+            && crate::sync_policy::should_sync_live(&action.app_type)
+        {
             Self::refresh_provider_snapshot(state, &action.app_type, &action.provider.id)?;
         }
 
@@ -1773,6 +1794,7 @@ impl ProviderService {
                     sync_mcp: false,
                     refresh_snapshot: false,
                     common_config_snippet,
+                    takeover_active: false,
                 })
             } else {
                 None
@@ -1843,6 +1865,7 @@ impl ProviderService {
                     sync_mcp: false,
                     refresh_snapshot: false,
                     common_config_snippet,
+                    takeover_active: false,
                 })
             } else {
                 None
@@ -2144,6 +2167,22 @@ impl ProviderService {
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
         let app_type_clone = app_type.clone();
         let provider_id_owned = provider_id.to_string();
+        let takeover_active = if app_type.is_additive_mode() {
+            false
+        } else {
+            let is_running = state
+                .proxy_service
+                .is_running_blocking()
+                .map_err(AppError::Message)?;
+            if !is_running {
+                false
+            } else {
+                state
+                    .proxy_service
+                    .is_app_takeover_active_blocking(&app_type)
+                    .map_err(AppError::Message)?
+            }
+        };
 
         Self::run_transaction(state, move |config| {
             if app_type_clone.is_additive_mode() {
@@ -2171,6 +2210,42 @@ impl ProviderService {
                         .common_config_snippets
                         .get(&app_type_clone)
                         .cloned(),
+                    takeover_active: false,
+                };
+
+                return Ok(((), Some(action)));
+            }
+
+            if takeover_active {
+                let provider = config
+                    .get_manager(&app_type_clone)
+                    .ok_or_else(|| Self::app_not_found(&app_type_clone))?
+                    .providers
+                    .get(&provider_id_owned)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.not_found",
+                            format!("供应商不存在: {provider_id_owned}"),
+                            format!("Provider not found: {provider_id_owned}"),
+                        )
+                    })?;
+
+                if let Some(manager) = config.get_manager_mut(&app_type_clone) {
+                    manager.current = provider_id_owned.clone();
+                }
+
+                let action = PostCommitAction {
+                    app_type: app_type_clone.clone(),
+                    provider,
+                    backup: Self::capture_live_snapshot(&app_type_clone)?,
+                    sync_mcp: false,
+                    refresh_snapshot: false,
+                    common_config_snippet: config
+                        .common_config_snippets
+                        .get(&app_type_clone)
+                        .cloned(),
+                    takeover_active: true,
                 };
 
                 return Ok(((), Some(action)));
@@ -2191,6 +2266,7 @@ impl ProviderService {
                 sync_mcp: true, // v3.7.0: 所有应用切换时都同步 MCP，防止配置丢失
                 refresh_snapshot: true,
                 common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
+                takeover_active: false,
             };
 
             Ok(((), Some(action)))
@@ -2765,6 +2841,193 @@ impl ProviderService {
                     Err(_) => crate::opencode_config::set_provider(&provider.id, config_to_write),
                 }
             }
+        }
+    }
+
+    pub(crate) fn build_live_backup_snapshot(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+    ) -> Result<Value, AppError> {
+        match app_type {
+            AppType::Claude => {
+                let mut provider_content = provider.settings_config.clone();
+                let _ = Self::normalize_claude_models_in_value(&mut provider_content);
+
+                if !apply_common_config {
+                    return Ok(provider_content);
+                }
+
+                let Some(snippet) = common_config_snippet.map(str::trim) else {
+                    return Ok(provider_content);
+                };
+                if snippet.is_empty() {
+                    return Ok(provider_content);
+                }
+
+                let common = Self::parse_common_claude_config_snippet(snippet)?;
+                let mut merged = common;
+                merge_json_values(&mut merged, &provider_content);
+                let _ = Self::normalize_claude_models_in_value(&mut merged);
+                Ok(merged)
+            }
+            AppType::Codex => {
+                let settings = provider
+                    .settings_config
+                    .as_object()
+                    .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
+                let auth = settings.get("auth").cloned();
+                let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
+
+                let cfg_text_owned;
+                let cfg_text = if is_codex_official_provider(provider)
+                    && !cfg_text.trim().is_empty()
+                {
+                    if let Ok(mut doc) = cfg_text.parse::<toml_edit::DocumentMut>() {
+                        let mp_key = doc
+                            .get("model_provider")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(key) = mp_key {
+                            if let Some(section) = doc
+                                .get_mut("model_providers")
+                                .and_then(|v| v.as_table_like_mut())
+                                .and_then(|t| t.get_mut(&key))
+                                .and_then(|v| v.as_table_like_mut())
+                            {
+                                if section.get("wire_api").is_none() {
+                                    section.insert("wire_api", toml_edit::value("responses"));
+                                }
+                                if section.get("requires_openai_auth").is_none() {
+                                    section.insert("requires_openai_auth", toml_edit::value(true));
+                                }
+                            }
+                        }
+                        cfg_text_owned = doc.to_string();
+                        &cfg_text_owned
+                    } else {
+                        cfg_text
+                    }
+                } else {
+                    cfg_text
+                };
+
+                if !cfg_text.trim().is_empty() {
+                    crate::codex_config::validate_config_toml(cfg_text)?;
+                }
+
+                let final_text = if apply_common_config {
+                    if let Some(snippet) = common_config_snippet.map(str::trim) {
+                        if !snippet.is_empty() && !cfg_text.trim().is_empty() {
+                            let mut doc = cfg_text
+                                .parse::<toml_edit::DocumentMut>()
+                                .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
+                            let common_doc =
+                                snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
+                                    AppError::Config(format!("Common config TOML parse error: {e}"))
+                                })?;
+                            Self::merge_toml_tables(doc.as_table_mut(), common_doc.as_table());
+                            doc.to_string()
+                        } else {
+                            cfg_text.to_string()
+                        }
+                    } else {
+                        cfg_text.to_string()
+                    }
+                } else {
+                    cfg_text.to_string()
+                };
+
+                let mut backup = serde_json::Map::new();
+                if let Some(auth) = auth {
+                    backup.insert("auth".to_string(), auth);
+                }
+                backup.insert("config".to_string(), Value::String(final_text));
+                Ok(Value::Object(backup))
+            }
+            AppType::Gemini => {
+                let provider_content = provider.settings_config.clone();
+                let content_to_write = if apply_common_config {
+                    if let Some(snippet) = common_config_snippet.map(str::trim) {
+                        if snippet.is_empty() {
+                            provider_content
+                        } else {
+                            let common = Self::parse_common_gemini_config_snippet(snippet)?;
+                            let mut merged = common;
+                            merge_json_values(&mut merged, &provider_content);
+                            merged
+                        }
+                    } else {
+                        provider_content
+                    }
+                } else {
+                    provider_content
+                };
+
+                let env_obj = content_to_write
+                    .get("env")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let settings_path = crate::gemini_config::get_gemini_settings_path();
+                let config_value = if let Some(config_value) = content_to_write.get("config") {
+                    if config_value.is_null() {
+                        if settings_path.exists() {
+                            read_json_file(&settings_path)?
+                        } else {
+                            json!({})
+                        }
+                    } else if let Some(provider_config) = config_value.as_object() {
+                        if provider_config.is_empty() {
+                            if settings_path.exists() {
+                                read_json_file(&settings_path)?
+                            } else {
+                                json!({})
+                            }
+                        } else {
+                            let mut merged = if settings_path.exists() {
+                                read_json_file(&settings_path)?
+                            } else {
+                                json!({})
+                            };
+
+                            if !merged.is_object() {
+                                merged = json!({});
+                            }
+
+                            let merged_map = merged.as_object_mut().ok_or_else(|| {
+                                AppError::localized(
+                                    "gemini.validation.invalid_settings",
+                                    "Gemini 现有 settings.json 格式错误: 必须是对象",
+                                    "Gemini existing settings.json invalid: must be a JSON object",
+                                )
+                            })?;
+                            for (key, value) in provider_config {
+                                merged_map.insert(key.clone(), value.clone());
+                            }
+                            merged
+                        }
+                    } else {
+                        return Err(AppError::localized(
+                            "gemini.validation.invalid_config",
+                            "Gemini 配置格式错误: config 必须是对象或 null",
+                            "Gemini config invalid: config must be an object or null",
+                        ));
+                    }
+                } else if settings_path.exists() {
+                    read_json_file(&settings_path)?
+                } else {
+                    json!({})
+                };
+
+                Ok(json!({
+                    "env": env_obj,
+                    "config": config_value,
+                }))
+            }
+            AppType::OpenCode => Err(AppError::Config(
+                "OpenCode does not support proxy takeover backups".into(),
+            )),
         }
     }
 

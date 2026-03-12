@@ -65,12 +65,53 @@ pub struct SkillsSnapshot {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ProxyTargetSnapshot {
+    pub provider_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProxySnapshot {
+    pub enabled: bool,
+    pub running: bool,
+    pub managed_runtime: bool,
+    pub claude_takeover: bool,
+    pub codex_takeover: bool,
+    pub gemini_takeover: bool,
+    pub default_cost_multiplier: Option<String>,
+    pub listen_address: String,
+    pub listen_port: u16,
+    pub uptime_seconds: u64,
+    pub total_requests: u64,
+    pub success_rate: Option<f32>,
+    pub current_provider: Option<String>,
+    pub last_error: Option<String>,
+    pub current_app_target: Option<ProxyTargetSnapshot>,
+}
+
+impl ProxySnapshot {
+    pub fn takeover_enabled_for(&self, app_type: &AppType) -> Option<bool> {
+        match app_type {
+            AppType::Claude => Some(self.claude_takeover),
+            AppType::Codex => Some(self.codex_takeover),
+            AppType::Gemini => Some(self.gemini_takeover),
+            AppType::OpenCode => None,
+        }
+    }
+
+    pub fn routes_current_app_through_proxy(&self, app_type: &AppType) -> Option<bool> {
+        self.takeover_enabled_for(app_type)
+            .map(|takeover_enabled| self.running && takeover_enabled)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct UiData {
     pub providers: ProvidersSnapshot,
     pub mcp: McpSnapshot,
     pub prompts: PromptsSnapshot,
     pub config: ConfigSnapshot,
     pub skills: SkillsSnapshot,
+    pub proxy: ProxySnapshot,
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -86,6 +127,7 @@ impl UiData {
         let prompts = load_prompts(&state, app_type)?;
         let config = load_config_snapshot(&state, app_type)?;
         let skills = load_skills_snapshot()?;
+        let proxy = load_proxy_snapshot(app_type)?;
 
         Ok(Self {
             providers,
@@ -93,7 +135,13 @@ impl UiData {
             prompts,
             config,
             skills,
+            proxy,
         })
+    }
+
+    pub(crate) fn refresh_proxy_snapshot(&mut self, app_type: &AppType) -> Result<(), AppError> {
+        self.proxy = load_proxy_snapshot(app_type)?;
+        Ok(())
     }
 }
 
@@ -221,6 +269,89 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
     })
 }
 
+pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
+    let state = load_state()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+
+    runtime.block_on(async { state.db.get_proxy_config().await.map(Some) })
+}
+
+fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
+    let state = load_state()?;
+    let current_app = app_type.as_str().to_string();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+
+    runtime.block_on(async {
+        let config = state.proxy_service.get_global_config().await?;
+        let runtime_status = state.proxy_service.get_status().await;
+        let takeover = state
+            .proxy_service
+            .get_takeover_status()
+            .await
+            .map_err(AppError::Message)?;
+
+        let current_app_target = runtime_status
+            .active_targets
+            .iter()
+            .find(|target| target.app_type.eq_ignore_ascii_case(&current_app))
+            .map(|target| ProxyTargetSnapshot {
+                provider_name: target.provider_name.clone(),
+            });
+        let listen_address = if runtime_status.address.trim().is_empty() {
+            config.listen_address.clone()
+        } else {
+            runtime_status.address.clone()
+        };
+        let listen_port = if runtime_status.port == 0 {
+            config.listen_port
+        } else {
+            runtime_status.port
+        };
+        let default_cost_multiplier = state
+            .db
+            .get_default_cost_multiplier(app_type.as_str())
+            .await
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        Ok(ProxySnapshot {
+            enabled: config.proxy_enabled,
+            running: runtime_status.running,
+            managed_runtime: runtime_status.managed_session_token.is_some(),
+            claude_takeover: takeover.claude,
+            codex_takeover: takeover.codex,
+            gemini_takeover: takeover.gemini,
+            default_cost_multiplier,
+            listen_address,
+            listen_port,
+            uptime_seconds: runtime_status.uptime_seconds,
+            total_requests: runtime_status.total_requests,
+            success_rate: (runtime_status.total_requests > 0)
+                .then_some(runtime_status.success_rate),
+            current_provider: runtime_status
+                .current_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            last_error: runtime_status
+                .last_error
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            current_app_target,
+        })
+    })
+}
+
 fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
     Ok(SkillsSnapshot {
         installed: SkillService::list_installed()?,
@@ -276,6 +407,84 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::OpenCode),
             Some("https://opencode.example".to_string())
+        );
+    }
+
+    #[test]
+    fn proxy_snapshot_returns_app_specific_takeover_state() {
+        let snapshot = ProxySnapshot {
+            claude_takeover: true,
+            codex_takeover: false,
+            gemini_takeover: true,
+            ..ProxySnapshot::default()
+        };
+
+        assert_eq!(snapshot.takeover_enabled_for(&AppType::Claude), Some(true));
+        assert_eq!(snapshot.takeover_enabled_for(&AppType::Codex), Some(false));
+        assert_eq!(snapshot.takeover_enabled_for(&AppType::Gemini), Some(true));
+        assert_eq!(snapshot.takeover_enabled_for(&AppType::OpenCode), None);
+    }
+
+    #[test]
+    fn proxy_snapshot_distinguishes_running_route_from_stale_takeover_flag() {
+        let active = ProxySnapshot {
+            running: true,
+            managed_runtime: true,
+            claude_takeover: true,
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            active.routes_current_app_through_proxy(&AppType::Claude),
+            Some(true)
+        );
+
+        let stopped = ProxySnapshot {
+            running: false,
+            managed_runtime: true,
+            claude_takeover: true,
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            stopped.routes_current_app_through_proxy(&AppType::Claude),
+            Some(false)
+        );
+        assert_eq!(
+            stopped.routes_current_app_through_proxy(&AppType::OpenCode),
+            None
+        );
+    }
+
+    #[test]
+    fn proxy_snapshot_can_store_rich_runtime_fields_without_internal_token() {
+        let snapshot = ProxySnapshot {
+            running: true,
+            managed_runtime: true,
+            default_cost_multiplier: Some("1.5".to_string()),
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 15721,
+            uptime_seconds: 42,
+            total_requests: 7,
+            success_rate: Some(85.7),
+            current_provider: Some("Claude Test Provider".to_string()),
+            last_error: Some("last upstream failure".to_string()),
+            current_app_target: Some(ProxyTargetSnapshot {
+                provider_name: "Claude Test Provider".to_string(),
+            }),
+            ..ProxySnapshot::default()
+        };
+
+        assert!(snapshot.running);
+        assert!(snapshot.managed_runtime);
+        assert_eq!(snapshot.default_cost_multiplier.as_deref(), Some("1.5"));
+        assert_eq!(snapshot.listen_address, "127.0.0.1");
+        assert_eq!(snapshot.listen_port, 15721);
+        assert_eq!(snapshot.success_rate, Some(85.7));
+        assert_eq!(
+            snapshot
+                .current_app_target
+                .as_ref()
+                .map(|target| target.provider_name.as_str()),
+            Some("Claude Test Provider")
         );
     }
 }

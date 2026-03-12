@@ -1,0 +1,249 @@
+use reqwest::RequestBuilder;
+
+use crate::{provider::Provider, proxy::error::ProxyError};
+
+use super::{AuthInfo, AuthStrategy, ProviderAdapter};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderType {
+    Claude,
+    ClaudeAuth,
+    OpenRouter,
+}
+
+pub struct ClaudeAdapter;
+
+impl ClaudeAdapter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn provider_type(&self, provider: &Provider) -> ProviderType {
+        if self.is_openrouter(provider) {
+            return ProviderType::OpenRouter;
+        }
+        if self.is_bearer_only_mode(provider) {
+            return ProviderType::ClaudeAuth;
+        }
+        ProviderType::Claude
+    }
+
+    fn is_openrouter(&self, provider: &Provider) -> bool {
+        self.extract_base_url(provider)
+            .map(|base_url| base_url.contains("openrouter.ai"))
+            .unwrap_or(false)
+    }
+
+    fn get_api_format(&self, provider: &Provider) -> &'static str {
+        if let Some(meta) = provider.meta.as_ref() {
+            if let Some(api_format) = meta.api_format.as_deref() {
+                return if api_format == "openai_chat" {
+                    "openai_chat"
+                } else {
+                    "anthropic"
+                };
+            }
+        }
+
+        if let Some(api_format) = provider
+            .settings_config
+            .get("api_format")
+            .and_then(|v| v.as_str())
+        {
+            return if api_format == "openai_chat" {
+                "openai_chat"
+            } else {
+                "anthropic"
+            };
+        }
+
+        let raw = provider.settings_config.get("openrouter_compat_mode");
+        let enabled = match raw {
+            Some(serde_json::Value::Bool(v)) => *v,
+            Some(serde_json::Value::Number(num)) => num.as_i64().unwrap_or(0) != 0,
+            Some(serde_json::Value::String(value)) => {
+                let normalized = value.trim().to_lowercase();
+                normalized == "true" || normalized == "1"
+            }
+            _ => false,
+        };
+
+        if enabled {
+            "openai_chat"
+        } else {
+            "anthropic"
+        }
+    }
+
+    fn is_bearer_only_mode(&self, provider: &Provider) -> bool {
+        if let Some(auth_mode) = provider
+            .settings_config
+            .get("auth_mode")
+            .and_then(|v| v.as_str())
+        {
+            if auth_mode == "bearer_only" {
+                return true;
+            }
+        }
+
+        if let Some(env) = provider.settings_config.get("env") {
+            if let Some(auth_mode) = env.get("AUTH_MODE").and_then(|v| v.as_str()) {
+                if auth_mode == "bearer_only" {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn extract_key(&self, provider: &Provider) -> Option<String> {
+        if let Some(env) = provider.settings_config.get("env") {
+            if let Some(key) = env
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(key.to_string());
+            }
+            if let Some(key) = env
+                .get("ANTHROPIC_API_KEY")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(key.to_string());
+            }
+            if let Some(key) = env
+                .get("OPENROUTER_API_KEY")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(key.to_string());
+            }
+            if let Some(key) = env
+                .get("OPENAI_API_KEY")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(key.to_string());
+            }
+        }
+
+        provider
+            .settings_config
+            .get("apiKey")
+            .or_else(|| provider.settings_config.get("api_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    }
+}
+
+impl Default for ClaudeAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProviderAdapter for ClaudeAdapter {
+    fn name(&self) -> &'static str {
+        "Claude"
+    }
+
+    fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        if let Some(env) = provider.settings_config.get("env") {
+            if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
+                return Ok(url.trim_end_matches('/').to_string());
+            }
+        }
+
+        if let Some(url) = provider
+            .settings_config
+            .get("base_url")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
+        if let Some(url) = provider
+            .settings_config
+            .get("baseURL")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
+        if let Some(url) = provider
+            .settings_config
+            .get("apiEndpoint")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
+        Err(ProxyError::ConfigError(
+            "Claude Provider 缺少 base_url 配置".to_string(),
+        ))
+    }
+
+    fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
+        let strategy = match self.provider_type(provider) {
+            ProviderType::OpenRouter => AuthStrategy::Bearer,
+            ProviderType::ClaudeAuth => AuthStrategy::ClaudeAuth,
+            _ => AuthStrategy::Anthropic,
+        };
+        self.extract_key(provider)
+            .map(|key| AuthInfo::new(key, strategy))
+    }
+
+    fn build_url(&self, base_url: &str, endpoint: &str) -> String {
+        let mut base = format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            endpoint.trim_start_matches('/')
+        );
+
+        while base.contains("/v1/v1") {
+            base = base.replace("/v1/v1", "/v1");
+        }
+
+        if endpoint.contains("/v1/messages")
+            && !endpoint.contains("/v1/chat/completions")
+            && !endpoint.contains('?')
+        {
+            format!("{base}?beta=true")
+        } else {
+            base
+        }
+    }
+
+    fn add_auth_headers(&self, request: RequestBuilder, auth: &AuthInfo) -> RequestBuilder {
+        match auth.strategy {
+            AuthStrategy::Anthropic => request
+                .header("Authorization", format!("Bearer {}", auth.api_key))
+                .header("x-api-key", &auth.api_key),
+            AuthStrategy::ClaudeAuth => {
+                request.header("Authorization", format!("Bearer {}", auth.api_key))
+            }
+            AuthStrategy::Bearer | AuthStrategy::Google | AuthStrategy::GoogleOAuth => {
+                request.header("Authorization", format!("Bearer {}", auth.api_key))
+            }
+        }
+    }
+
+    fn needs_transform(&self, provider: &Provider) -> bool {
+        self.get_api_format(provider) == "openai_chat"
+    }
+
+    fn transform_request(
+        &self,
+        body: serde_json::Value,
+        _provider: &Provider,
+    ) -> Result<serde_json::Value, ProxyError> {
+        super::transform::anthropic_to_openai(body)
+    }
+
+    fn transform_response(&self, body: serde_json::Value) -> Result<serde_json::Value, ProxyError> {
+        super::transform::openai_to_anthropic(body)
+    }
+}

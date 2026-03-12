@@ -10,7 +10,6 @@ pub enum Route {
     Skills,
     SkillsDiscover,
     SkillsRepos,
-    SkillsUnmanaged,
     SkillDetail { directory: String },
     Settings,
 }

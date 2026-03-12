@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
-use cc_switch_lib::{update_settings, AppSettings, AppState, Database, MultiAppConfig};
+use cc_switch_lib::{
+    update_settings, AppSettings, AppState, Database, MultiAppConfig, ProxyService,
+};
 
 /// 为测试设置隔离的 HOME 目录，避免污染真实用户数据。
 pub fn ensure_test_home() -> &'static Path {
@@ -54,8 +56,10 @@ pub fn lock_test_mutex() -> MutexGuard<'static, ()> {
 
 pub fn state_from_config(config: MultiAppConfig) -> AppState {
     let _ = ensure_test_home();
+    let db = Arc::new(Database::init().expect("create database"));
     AppState {
-        db: Arc::new(Database::init().expect("create database")),
+        db: db.clone(),
         config: RwLock::new(config),
+        proxy_service: ProxyService::new(db),
     }
 }

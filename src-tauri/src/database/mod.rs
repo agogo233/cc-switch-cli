@@ -38,6 +38,7 @@ use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -73,6 +74,7 @@ pub(crate) use lock_conn;
 /// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
+    runtime_key: String,
 }
 
 impl Database {
@@ -95,6 +97,7 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            runtime_key: format!("file:{}", db_path.display()),
         };
         db.create_tables()?;
         db.apply_schema_migrations()?;
@@ -105,6 +108,8 @@ impl Database {
 
     /// 创建内存数据库（用于测试）
     pub fn memory() -> Result<Self, AppError> {
+        static NEXT_MEMORY_DB_ID: AtomicU64 = AtomicU64::new(1);
+
         let conn = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
 
         // 启用外键约束
@@ -113,6 +118,10 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            runtime_key: format!(
+                "memory:{}",
+                NEXT_MEMORY_DB_ID.fetch_add(1, Ordering::Relaxed)
+            ),
         };
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;
@@ -136,5 +145,9 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(count == 0)
+    }
+
+    pub(crate) fn runtime_key(&self) -> &str {
+        &self.runtime_key
     }
 }

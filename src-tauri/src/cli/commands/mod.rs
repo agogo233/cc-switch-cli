@@ -4,5 +4,6 @@ pub mod mcp;
 pub mod prompts;
 pub mod provider;
 pub mod provider_input;
+pub mod proxy;
 pub mod skills;
 pub mod update;

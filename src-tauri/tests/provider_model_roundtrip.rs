@@ -38,6 +38,7 @@ fn provider_model_roundtrip_preserves_phase2_fields() {
                             "code": "({request:{url:'https://example.com',method:'GET'},extractor:(_)=>({isValid:true})})",
                             "templateType": "newapi"
                         },
+                        "apiFormat": "openai_chat",
                         "endpointAutoSelect": true,
                         "limitDailyUsd": "10"
                     }
@@ -81,6 +82,13 @@ fn provider_model_roundtrip_preserves_phase2_fields() {
             .and_then(|v| v.as_bool()),
         Some(true),
         "meta.endpointAutoSelect should be preserved after load+save"
+    );
+    assert_eq!(
+        saved
+            .pointer("/claude/providers/p1/meta/apiFormat")
+            .and_then(|v| v.as_str()),
+        Some("openai_chat"),
+        "meta.apiFormat should be preserved after load+save"
     );
     assert_eq!(
         saved

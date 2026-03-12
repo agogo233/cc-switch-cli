@@ -2,6 +2,9 @@ use crate::settings::{get_settings, update_settings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 /// Supported languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
@@ -57,8 +60,36 @@ fn language_store() -> &'static RwLock<Language> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_LANGUAGE_OVERRIDE: RefCell<Option<Language>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct TestLanguageGuard(Option<Language>);
+
+#[cfg(test)]
+impl Drop for TestLanguageGuard {
+    fn drop(&mut self) {
+        TEST_LANGUAGE_OVERRIDE.with(|slot| {
+            *slot.borrow_mut() = self.0;
+        });
+    }
+}
+
+#[cfg(test)]
+fn use_test_language(lang: Language) -> TestLanguageGuard {
+    let previous = TEST_LANGUAGE_OVERRIDE.with(|slot| slot.replace(Some(lang)));
+    TestLanguageGuard(previous)
+}
+
 /// Get current language
 pub fn current_language() -> Language {
+    #[cfg(test)]
+    if let Some(lang) = TEST_LANGUAGE_OVERRIDE.with(|slot| *slot.borrow()) {
+        return lang;
+    }
+
     *language_store().read().expect("Failed to read language")
 }
 
@@ -696,11 +727,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_header_proxy_status(enabled: bool) -> String {
+        if is_chinese() {
+            format!("代理: {}", if enabled { "开" } else { "关" })
+        } else {
+            format!("Proxy: {}", if enabled { "On" } else { "Off" })
+        }
+    }
+
     pub fn tui_home_section_connection() -> &'static str {
         if is_chinese() {
-            "Connection Details"
+            "连接信息"
         } else {
             "Connection Details"
+        }
+    }
+
+    pub fn tui_home_section_proxy() -> &'static str {
+        if is_chinese() {
+            "代理仪表盘"
+        } else {
+            "Proxy Dashboard"
         }
     }
 
@@ -813,6 +860,278 @@ pub mod texts {
             "Offline"
         } else {
             "Offline"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_status_running() -> &'static str {
+        if is_chinese() {
+            "已启用"
+        } else {
+            "ACTIVE"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_status_stopped() -> &'static str {
+        if is_chinese() {
+            "本地"
+        } else {
+            "LOCAL"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_status_local_only() -> &'static str {
+        if is_chinese() {
+            "仅本地"
+        } else {
+            "LOCAL ONLY"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_status_unsupported() -> &'static str {
+        if is_chinese() {
+            "不支持"
+        } else {
+            "UNSUPPORTED"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_manual_routing_copy(app: &str) -> String {
+        if is_chinese() {
+            format!("手动路由：{app} 的流量会通过 cc-switch。")
+        } else {
+            format!("Manual routing only: traffic goes through cc-switch for {app}.")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_failover_copy() -> &'static str {
+        if is_chinese() {
+            "仅做手动路由，不会自动切换供应商。"
+        } else {
+            "automatic failover stays off; provider changes stay manual."
+        }
+    }
+
+    pub fn tui_proxy_dashboard_cta_start(app: &str) -> String {
+        if is_chinese() {
+            format!("按 P 启动托管代理，并让 {app} 走 cc-switch。")
+        } else {
+            format!("Press P to start the managed proxy and route {app} through cc-switch.")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_cta_stop(app: &str) -> String {
+        if is_chinese() {
+            format!("按 P 恢复 {app} 的 live 配置，并停止托管代理。")
+        } else {
+            format!("Press P to restore {app} to its live config and stop the managed proxy.")
+        }
+    }
+
+    pub fn tui_proxy_loading_title_start() -> &'static str {
+        if is_chinese() {
+            "启动代理中"
+        } else {
+            "Starting proxy"
+        }
+    }
+
+    pub fn tui_proxy_loading_title_stop() -> &'static str {
+        if is_chinese() {
+            "停止代理中"
+        } else {
+            "Stopping proxy"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_running_elsewhere() -> &'static str {
+        if is_chinese() {
+            "代理已在运行。请先停止当前路由，再从这里启动。"
+        } else {
+            "Proxy is already running. Stop the current route before starting it here."
+        }
+    }
+
+    pub fn tui_proxy_dashboard_current_app_on(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 已接入代理")
+        } else {
+            format!("{app} active")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_current_app_off(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 本地直连")
+        } else {
+            format!("{app} local")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_unsupported_app(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 仅本地")
+        } else {
+            format!("{app} local only")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_shared_runtime_ready() -> &'static str {
+        if is_chinese() {
+            "共享 runtime 就绪"
+        } else {
+            "Shared runtime ready"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_no_route_for_app(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 暂无路由")
+        } else {
+            format!("No route for {app} yet")
+        }
+    }
+
+    pub fn tui_proxy_dashboard_takeover_active() -> &'static str {
+        if is_chinese() {
+            "已接管"
+        } else {
+            "active"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_takeover_inactive() -> &'static str {
+        if is_chinese() {
+            "未接管"
+        } else {
+            "inactive"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_takeover_unsupported() -> &'static str {
+        if is_chinese() {
+            "不支持"
+        } else {
+            "not supported"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_uptime_stopped() -> &'static str {
+        if is_chinese() {
+            "未运行"
+        } else {
+            "--"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_requests_idle() -> &'static str {
+        if is_chinese() {
+            "暂无流量"
+        } else {
+            "No traffic yet"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_target_waiting() -> &'static str {
+        if is_chinese() {
+            "等待首个请求"
+        } else {
+            "Waiting for first request"
+        }
+    }
+
+    pub fn tui_proxy_dashboard_request_summary(total: u64, success_rate: f32) -> String {
+        if is_chinese() {
+            format!("{total} 总计 / {success_rate:.1}% 成功")
+        } else {
+            format!("{total} total / {success_rate:.1}% success")
+        }
+    }
+
+    pub fn tui_label_current_app_takeover() -> &'static str {
+        if is_chinese() {
+            "当前应用接管"
+        } else {
+            "Current app takeover"
+        }
+    }
+
+    pub fn tui_label_current_app_route() -> &'static str {
+        if is_chinese() {
+            "当前应用路由"
+        } else {
+            "Current app route"
+        }
+    }
+
+    pub fn tui_label_latest_proxy_route() -> &'static str {
+        if is_chinese() {
+            "最近代理路由"
+        } else {
+            "Latest proxy route"
+        }
+    }
+
+    pub fn tui_label_shared_runtime() -> &'static str {
+        if is_chinese() {
+            "共享 runtime"
+        } else {
+            "Shared runtime"
+        }
+    }
+
+    pub fn tui_label_listen() -> &'static str {
+        if is_chinese() {
+            "监听"
+        } else {
+            "Listen"
+        }
+    }
+
+    pub fn tui_label_uptime() -> &'static str {
+        if is_chinese() {
+            "运行时长"
+        } else {
+            "Uptime"
+        }
+    }
+
+    pub fn tui_label_requests() -> &'static str {
+        if is_chinese() {
+            "请求"
+        } else {
+            "Requests"
+        }
+    }
+
+    pub fn tui_label_proxy_requests() -> &'static str {
+        if is_chinese() {
+            "代理总请求"
+        } else {
+            "Proxy requests"
+        }
+    }
+
+    pub fn tui_label_active_target() -> &'static str {
+        if is_chinese() {
+            "当前路由目标"
+        } else {
+            "Active target"
+        }
+    }
+
+    pub fn tui_label_last_error() -> &'static str {
+        if is_chinese() {
+            "最近错误"
+        } else {
+            "Last error"
+        }
+    }
+
+    pub fn tui_label_last_proxy_error() -> &'static str {
+        if is_chinese() {
+            "最近一次代理错误"
+        } else {
+            "Last proxy error"
         }
     }
 
@@ -969,6 +1288,14 @@ pub mod texts {
             "API Key"
         } else {
             "API Key"
+        }
+    }
+
+    pub fn tui_label_claude_api_format() -> &'static str {
+        if is_chinese() {
+            "Claude API 格式"
+        } else {
+            "Claude API Format"
         }
     }
 
@@ -1496,6 +1823,38 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_start_proxy() -> &'static str {
+        if is_chinese() {
+            "启动代理"
+        } else {
+            "start proxy"
+        }
+    }
+
+    pub fn tui_key_stop_proxy() -> &'static str {
+        if is_chinese() {
+            "停止代理"
+        } else {
+            "stop proxy"
+        }
+    }
+
+    pub fn tui_key_proxy_on() -> &'static str {
+        if is_chinese() {
+            "代理开"
+        } else {
+            "proxy on"
+        }
+    }
+
+    pub fn tui_key_proxy_off() -> &'static str {
+        if is_chinese() {
+            "代理关"
+        } else {
+            "proxy off"
+        }
+    }
+
     pub fn tui_key_focus() -> &'static str {
         if is_chinese() {
             "切换窗口"
@@ -1621,6 +1980,14 @@ pub mod texts {
             "恢复"
         } else {
             "restore"
+        }
+    }
+
+    pub fn tui_key_takeover() -> &'static str {
+        if is_chinese() {
+            "接管"
+        } else {
+            "take over"
         }
     }
 
@@ -2168,6 +2535,14 @@ pub mod texts {
             "通用配置片段"
         } else {
             "Common Config Snippet"
+        }
+    }
+
+    pub fn tui_config_item_proxy() -> &'static str {
+        if is_chinese() {
+            "本地代理"
+        } else {
+            "Local Proxy"
         }
     }
 
@@ -3379,6 +3754,66 @@ pub mod texts {
             "WebDAV 同步设置已保存。"
         } else {
             "WebDAV sync settings saved."
+        }
+    }
+
+    pub fn tui_toast_proxy_takeover_requires_running() -> &'static str {
+        if is_chinese() {
+            "前台代理未运行，请先启动 `cc-switch proxy serve`。"
+        } else {
+            "Foreground proxy is not running. Start `cc-switch proxy serve` first."
+        }
+    }
+
+    pub fn tui_toast_proxy_takeover_updated(app: &str, enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("已将 {app} 接管到前台代理。")
+            } else {
+                format!("已将 {app} 恢复到 live 配置。")
+            }
+        } else if enabled {
+            format!("{app} now uses the foreground proxy.")
+        } else {
+            format!("{app} restored to its live config.")
+        }
+    }
+
+    pub fn tui_toast_proxy_managed_current_app_updated(app: &str, enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("{app} 已走 cc-switch 代理。")
+            } else {
+                format!("{app} 已恢复 live 配置。")
+            }
+        } else if enabled {
+            format!("{app} now routes through cc-switch.")
+        } else {
+            format!("{app} restored to its live config.")
+        }
+    }
+
+    pub fn tui_toast_proxy_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("代理任务不可用：{err}")
+        } else {
+            format!("Proxy worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_proxy_request_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("代理请求发送失败：{err}")
+        } else {
+            format!("Proxy request failed: {err}")
+        }
+    }
+
+    pub fn tui_error_proxy_worker_unavailable() -> &'static str {
+        if is_chinese() {
+            "代理任务不可用。"
+        } else {
+            "Proxy worker unavailable."
         }
     }
 
@@ -5576,6 +6011,18 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_mcp_short() -> &'static str {
+        "MCP:"
+    }
+
+    pub fn tui_label_skills() -> &'static str {
+        if is_chinese() {
+            "技能:"
+        } else {
+            "Skills:"
+        }
+    }
+
     pub fn prompts_label() -> &'static str {
         if is_chinese() {
             "提示词："
@@ -6550,25 +6997,9 @@ pub mod texts {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_store, texts, Language};
-
-    struct LanguageGuard(Language);
-
-    impl LanguageGuard {
-        fn set(lang: Language) -> Self {
-            let mut guard = language_store().write().expect("write language");
-            let prev = *guard;
-            *guard = lang;
-            Self(prev)
-        }
-    }
-
-    impl Drop for LanguageGuard {
-        fn drop(&mut self) {
-            let mut guard = language_store().write().expect("write language");
-            *guard = self.0;
-        }
-    }
+    use super::{texts, use_test_language, Language};
+    use std::sync::mpsc;
+    use std::thread;
 
     #[test]
     fn website_url_label_keeps_optional_with_abbrev() {
@@ -6580,7 +7011,7 @@ mod tests {
 
     #[test]
     fn chinese_tui_copy_avoids_key_mixed_english_labels() {
-        let _guard = LanguageGuard::set(Language::Chinese);
+        let _lang = use_test_language(Language::Chinese);
 
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
@@ -6601,5 +7032,44 @@ mod tests {
         assert!(!help.contains("Skills:"));
         assert!(!help.contains("Config:"));
         assert!(!help.contains("Settings:"));
+    }
+
+    #[test]
+    fn proxy_dashboard_copy_is_fully_localized_in_chinese() {
+        let _lang = use_test_language(Language::Chinese);
+
+        assert_eq!(texts::tui_home_section_connection(), "连接信息");
+        assert_eq!(
+            texts::tui_proxy_dashboard_failover_copy(),
+            "仅做手动路由，不会自动切换供应商。"
+        );
+        assert_eq!(
+            texts::tui_proxy_dashboard_manual_routing_copy("Claude"),
+            "手动路由：Claude 的流量会通过 cc-switch。"
+        );
+    }
+
+    #[test]
+    fn test_language_override_does_not_leak_across_threads() {
+        let _lang = use_test_language(Language::English);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let _lang = use_test_language(Language::Chinese);
+            ready_tx.send(()).expect("signal ready");
+            release_rx.recv().expect("wait for release");
+        });
+
+        ready_rx.recv().expect("wait for child language override");
+
+        assert_eq!(
+            texts::tui_home_section_connection(),
+            "Connection Details",
+            "child thread language override should not affect this test thread"
+        );
+
+        release_tx.send(()).expect("release child thread");
+        handle.join().expect("join child thread");
     }
 }

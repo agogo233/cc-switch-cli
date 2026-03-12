@@ -86,6 +86,9 @@ pub struct ProxyStatus {
     pub last_error: Option<String>,
     /// Provider故障转移次数
     pub failover_count: u64,
+    /// managed external session 身份令牌
+    #[serde(default)]
+    pub managed_session_token: Option<String>,
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,

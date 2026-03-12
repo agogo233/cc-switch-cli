@@ -53,6 +53,10 @@ pub enum Commands {
     #[command(subcommand)]
     Config(commands::config::ConfigCommand),
 
+    /// Manage local multi-app proxy
+    #[command(subcommand)]
+    Proxy(commands::proxy::ProxyCommand),
+
     /// Manage environment variables
     #[command(subcommand)]
     Env(commands::env::EnvCommand),
@@ -78,4 +82,72 @@ pub fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
     clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn parses_proxy_serve_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "proxy", "serve", "--listen-port", "0"]);
+
+        match cli.command {
+            Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Serve {
+                listen_port,
+                ..
+            })) => {
+                assert_eq!(listen_port, Some(0));
+            }
+            _ => panic!("expected proxy serve command"),
+        }
+    }
+
+    #[test]
+    fn parses_proxy_serve_takeover_flags() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "proxy",
+            "serve",
+            "--takeover",
+            "claude",
+            "--takeover",
+            "codex",
+        ]);
+
+        match cli.command {
+            Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Serve {
+                takeovers,
+                ..
+            })) => {
+                assert_eq!(
+                    takeovers,
+                    vec![super::AppType::Claude, super::AppType::Codex]
+                );
+            }
+            _ => panic!("expected proxy serve command with takeover flags"),
+        }
+    }
+
+    #[test]
+    fn parses_proxy_enable_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "proxy", "enable"]);
+
+        match cli.command {
+            Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Enable)) => {}
+            _ => panic!("expected proxy enable command"),
+        }
+    }
+
+    #[test]
+    fn parses_proxy_disable_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "proxy", "disable"]);
+
+        match cli.command {
+            Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Disable)) => {}
+            _ => panic!("expected proxy disable command"),
+        }
+    }
 }
