@@ -125,6 +125,23 @@ impl TuiTerminal {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Result<Self, AppError> {
+        let backend = CrosstermBackend::new(io::stdout());
+        let terminal = Terminal::new(backend).map_err(|e| {
+            AppError::localized(
+                "tui_terminal_error",
+                format!("终端错误: {}", e),
+                format!("Terminal error: {}", e),
+            )
+        })?;
+
+        Ok(Self {
+            terminal,
+            active: false,
+        })
+    }
+
     pub fn draw<F>(&mut self, f: F) -> Result<(), AppError>
     where
         F: FnOnce(&mut ratatui::Frame<'_>),
