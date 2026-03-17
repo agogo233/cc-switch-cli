@@ -1,15 +1,24 @@
+pub mod body_filter;
+pub mod cache_injector;
 pub mod circuit_breaker;
 pub mod error;
 pub mod forwarder;
 pub mod handler_context;
 pub mod handlers;
+pub mod http_client;
 pub mod metrics;
+pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;
 pub mod response;
 pub mod response_handler;
 pub mod server;
+pub mod session;
+pub mod thinking_budget_rectifier;
+pub mod thinking_optimizer;
+pub mod thinking_rectifier;
 pub mod types;
+pub mod usage;
 
 pub use server::ProxyServer;
 pub use types::{ProxyConfig, ProxyServerInfo, ProxyStatus};

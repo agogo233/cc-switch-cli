@@ -1,7 +1,7 @@
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
 
-pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
+pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
     if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
@@ -16,7 +16,11 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
         } else if let Some(arr) = system.as_array() {
             for msg in arr {
                 if let Some(text) = msg.get("text").and_then(|t| t.as_str()) {
-                    messages.push(json!({"role": "system", "content": text}));
+                    let mut system_message = json!({"role": "system", "content": text});
+                    if let Some(cache_control) = msg.get("cache_control") {
+                        system_message["cache_control"] = cache_control.clone();
+                    }
+                    messages.push(system_message);
                 }
             }
         }
@@ -53,14 +57,18 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
             .iter()
             .filter(|t| t.get("type").and_then(|v| v.as_str()) != Some("BatchTool"))
             .map(|t| {
-                json!({
+                let mut tool = json!({
                     "type": "function",
                     "function": {
                         "name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""),
                         "description": t.get("description"),
                         "parameters": clean_schema(t.get("input_schema").cloned().unwrap_or(json!({})))
                     }
-                })
+                });
+                if let Some(cache_control) = t.get("cache_control") {
+                    tool["cache_control"] = cache_control.clone();
+                }
+                tool
             })
             .collect();
 
@@ -71,6 +79,10 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
 
     if let Some(v) = body.get("tool_choice") {
         result["tool_choice"] = v.clone();
+    }
+
+    if let Some(key) = cache_key {
+        result["prompt_cache_key"] = json!(key);
     }
 
     Ok(result)
@@ -104,7 +116,11 @@ fn convert_message_to_openai(
             match block_type {
                 "text" => {
                     if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        content_parts.push(json!({"type": "text", "text": text}));
+                        let mut part = json!({"type": "text", "text": text});
+                        if let Some(cache_control) = block.get("cache_control") {
+                            part["cache_control"] = cache_control.clone();
+                        }
+                        content_parts.push(part);
                     }
                 }
                 "image" => {
@@ -160,7 +176,9 @@ fn convert_message_to_openai(
             if content_parts.is_empty() {
                 msg["content"] = Value::Null;
             } else if content_parts.len() == 1 {
-                if let Some(text) = content_parts[0].get("text") {
+                if content_parts[0].get("cache_control").is_some() {
+                    msg["content"] = json!(content_parts);
+                } else if let Some(text) = content_parts[0].get("text") {
                     msg["content"] = text.clone();
                 } else {
                     msg["content"] = json!(content_parts);
@@ -215,13 +233,47 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         .ok_or_else(|| ProxyError::TransformError("No message in choice".to_string()))?;
 
     let mut content = Vec::new();
-    if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
-        if !text.is_empty() {
-            content.push(json!({"type": "text", "text": text}));
+    let mut has_tool_use = false;
+
+    if let Some(msg_content) = message.get("content") {
+        if let Some(text) = msg_content.as_str() {
+            if !text.is_empty() {
+                content.push(json!({"type": "text", "text": text}));
+            }
+        } else if let Some(parts) = msg_content.as_array() {
+            for part in parts {
+                let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match part_type {
+                    "text" | "output_text" => {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                content.push(json!({"type": "text", "text": text}));
+                            }
+                        }
+                    }
+                    "refusal" => {
+                        if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
+                            if !refusal.is_empty() {
+                                content.push(json!({"type": "text", "text": refusal}));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if let Some(refusal) = message.get("refusal").and_then(|r| r.as_str()) {
+        if !refusal.is_empty() {
+            content.push(json!({"type": "text", "text": refusal}));
         }
     }
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
+        if !tool_calls.is_empty() {
+            has_tool_use = true;
+        }
         for tc in tool_calls {
             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
             let empty_obj = json!({});
@@ -241,15 +293,52 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         }
     }
 
+    if !has_tool_use {
+        if let Some(function_call) = message.get("function_call") {
+            let id = function_call
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or("");
+            let name = function_call
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let has_arguments = function_call.get("arguments").is_some();
+
+            let input = match function_call.get("arguments") {
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(json!({})),
+                Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => v.clone(),
+                _ => json!({}),
+            };
+
+            if !name.is_empty() || has_arguments {
+                content.push(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input
+                }));
+                has_tool_use = true;
+            }
+        }
+    }
+
     let stop_reason = choice
         .get("finish_reason")
         .and_then(|r| r.as_str())
         .map(|r| match r {
             "stop" => "end_turn",
             "length" => "max_tokens",
-            "tool_calls" => "tool_use",
-            other => other,
-        });
+            "tool_calls" | "function_call" => "tool_use",
+            "content_filter" => "end_turn",
+            other => {
+                log::warn!(
+                    "[Claude/OpenAI] Unknown finish_reason in non-streaming response: {other}"
+                );
+                "end_turn"
+            }
+        })
+        .or(if has_tool_use { Some("tool_use") } else { None });
 
     let usage = body.get("usage").cloned().unwrap_or(json!({}));
     let input_tokens = usage
@@ -261,6 +350,24 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
+    let mut usage_json = json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens
+    });
+
+    if let Some(cached) = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+    {
+        usage_json["cache_read_input_tokens"] = json!(cached);
+    }
+    if let Some(v) = usage.get("cache_read_input_tokens") {
+        usage_json["cache_read_input_tokens"] = v.clone();
+    }
+    if let Some(v) = usage.get("cache_creation_input_tokens") {
+        usage_json["cache_creation_input_tokens"] = v.clone();
+    }
+
     Ok(json!({
         "id": body.get("id").and_then(|i| i.as_str()).unwrap_or(""),
         "type": "message",
@@ -269,9 +376,90 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         "model": body.get("model").and_then(|m| m.as_str()).unwrap_or(""),
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": usage_json
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_to_openai_injects_prompt_cache_key() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, Some("provider-123")).unwrap();
+
+        assert_eq!(result["prompt_cache_key"], "provider-123");
+    }
+
+    #[test]
+    fn anthropic_to_openai_preserves_system_cache_control() {
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [{
+                "type": "text",
+                "text": "System prompt",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["role"], "system");
+        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_to_openai_preserves_text_block_cache_control_and_array_shape() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Hello",
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"}
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert!(result["messages"][0]["content"].is_array());
+        assert_eq!(
+            result["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            result["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "5m"
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_preserves_tool_cache_control() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
 }

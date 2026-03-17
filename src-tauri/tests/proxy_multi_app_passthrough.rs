@@ -111,6 +111,31 @@ async fn handle_retrying_codex_response(State(state): State<RetryUpstreamState>)
     }))
 }
 
+async fn handle_slow_codex_response(State(state): State<RetryUpstreamState>) -> Json<Value> {
+    state.attempts.fetch_add(1, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    Json(json!({
+        "id": "resp_slow",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "slow success"}]
+        }]
+    }))
+}
+
+async fn handle_error_codex_response() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {"message": "rate limited"}
+        })),
+    )
+}
+
 async fn handle_gemini_streaming(
     State(state): State<UpstreamState>,
     uri: Uri,
@@ -188,7 +213,7 @@ async fn proxy_codex_responses_passthroughs_current_provider() {
         .get_proxy_config_for_app("codex")
         .await
         .expect("get codex proxy config");
-    codex_proxy.auto_failover_enabled = true;
+    codex_proxy.auto_failover_enabled = false;
     db.update_proxy_config_for_app(codex_proxy)
         .await
         .expect("update codex proxy config");
@@ -239,6 +264,100 @@ async fn proxy_codex_responses_passthroughs_current_provider() {
     assert_eq!(
         upstream_state.authorization.lock().await.as_deref(),
         Some("Bearer sk-test-codex")
+    );
+
+    service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_codex_responses_compact_passthroughs_current_provider() {
+    let upstream_state = UpstreamState::default();
+    let upstream_router = Router::new()
+        .route("/v1/responses/compact", post(handle_responses))
+        .with_state(upstream_state.clone());
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let provider = Provider {
+        id: "codex-official-compact".to_string(),
+        name: "Codex Official Compact".to_string(),
+        settings_config: json!({
+            "auth": {"OPENAI_API_KEY": "sk-test-codex"},
+            "config": format!("base_url = \"http://{}\"\nwire_api = \"responses\"\n", upstream_addr)
+        }),
+        website_url: None,
+        category: Some("codex".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider("codex", &provider)
+        .expect("save codex provider");
+    db.set_current_provider("codex", &provider.id)
+        .expect("set current codex provider");
+
+    let mut codex_proxy = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("get codex proxy config");
+    codex_proxy.auto_failover_enabled = false;
+    db.update_proxy_config_for_app(codex_proxy)
+        .await
+        .expect("update codex proxy config");
+
+    let service = ProxyService::new(db);
+    let mut runtime_config = service.get_config().await.expect("read proxy config");
+    runtime_config.listen_port = 0;
+
+    let proxy = service
+        .start_with_runtime_config(runtime_config)
+        .await
+        .expect("start proxy service");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://{}:{}/v1/responses/compact",
+            proxy.address, proxy.port
+        ))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": "hello compact codex"
+        }))
+        .send()
+        .await
+        .expect("send codex compact request to proxy");
+
+    assert!(
+        response.status().is_success(),
+        "codex compact proxy route should return success"
+    );
+    let body: Value = response.json().await.expect("parse codex compact response");
+    assert_eq!(
+        body.pointer("/output/0/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("codex ok")
+    );
+
+    let upstream_body = upstream_state
+        .request_body
+        .lock()
+        .await
+        .clone()
+        .expect("codex compact upstream should receive body");
+    assert_eq!(
+        upstream_body.get("input").and_then(|v| v.as_str()),
+        Some("hello compact codex")
     );
 
     service.stop().await.expect("stop proxy service");
@@ -451,7 +570,7 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
         meta: None,
         icon: None,
         icon_color: None,
-        in_failover_queue: false,
+        in_failover_queue: true,
     };
     db.save_provider("codex", &provider)
         .expect("save codex provider");
@@ -462,6 +581,7 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
         .get_proxy_config_for_app("codex")
         .await
         .expect("get codex proxy config");
+    codex_proxy.auto_failover_enabled = true;
     codex_proxy.max_retries = 1;
     codex_proxy.non_streaming_timeout = 1;
     db.update_proxy_config_for_app(codex_proxy)
@@ -519,6 +639,192 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
 
 #[tokio::test]
 #[serial]
+async fn proxy_codex_non_streaming_bypasses_timeout_when_failover_disabled() {
+    let upstream_state = RetryUpstreamState::default();
+    let upstream_router = Router::new()
+        .route("/v1/responses", post(handle_slow_codex_response))
+        .with_state(upstream_state.clone());
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let provider = Provider {
+        id: "codex-timeout-bypass".to_string(),
+        name: "Codex Timeout Bypass".to_string(),
+        settings_config: json!({
+            "auth": {"OPENAI_API_KEY": "sk-test-codex"},
+            "config": format!("base_url = \"http://{}\"\nwire_api = \"responses\"\n", upstream_addr)
+        }),
+        website_url: None,
+        category: Some("codex".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider("codex", &provider)
+        .expect("save codex provider");
+    db.set_current_provider("codex", &provider.id)
+        .expect("set current codex provider");
+
+    let mut codex_proxy = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("get codex proxy config");
+    codex_proxy.auto_failover_enabled = false;
+    codex_proxy.max_retries = 0;
+    codex_proxy.non_streaming_timeout = 1;
+    db.update_proxy_config_for_app(codex_proxy)
+        .await
+        .expect("update codex proxy config");
+
+    let service = ProxyService::new(db);
+    let mut runtime_config = service.get_config().await.expect("read proxy config");
+    runtime_config.listen_port = 0;
+
+    let proxy = service
+        .start_with_runtime_config(runtime_config)
+        .await
+        .expect("start proxy service");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://{}:{}/v1/responses",
+            proxy.address, proxy.port
+        ))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": "hello codex"
+        }))
+        .send()
+        .await
+        .expect("send codex request to proxy");
+
+    assert!(response.status().is_success());
+    let body: Value = response.json().await.expect("parse response");
+    assert_eq!(
+        body.pointer("/output/0/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("slow success")
+    );
+    assert_eq!(upstream_state.attempts.load(Ordering::SeqCst), 1);
+
+    service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_codex_error_passthrough_does_not_sync_failover_state() {
+    let upstream_router = Router::new().route("/v1/responses", post(handle_error_codex_response));
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let current_provider = Provider {
+        id: "codex-current-error".to_string(),
+        name: "Codex Current Error".to_string(),
+        settings_config: json!({
+            "auth": {"OPENAI_API_KEY": "sk-test-current"},
+            "config": format!("base_url = \"http://{}\"\nwire_api = \"responses\"\n", upstream_addr)
+        }),
+        website_url: None,
+        category: Some("codex".to_string()),
+        created_at: None,
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    let failover_provider = Provider {
+        id: "codex-failover-error".to_string(),
+        name: "Codex Failover Error".to_string(),
+        settings_config: json!({
+            "auth": {"OPENAI_API_KEY": "sk-test-failover"},
+            "config": format!("base_url = \"http://{}\"\nwire_api = \"responses\"\n", upstream_addr)
+        }),
+        website_url: None,
+        category: Some("codex".to_string()),
+        created_at: None,
+        sort_index: Some(0),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: true,
+    };
+    db.save_provider("codex", &current_provider)
+        .expect("save current provider");
+    db.save_provider("codex", &failover_provider)
+        .expect("save failover provider");
+    db.set_current_provider("codex", &current_provider.id)
+        .expect("set current codex provider");
+
+    let mut codex_proxy = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("get codex proxy config");
+    codex_proxy.auto_failover_enabled = true;
+    codex_proxy.max_retries = 0;
+    db.update_proxy_config_for_app(codex_proxy)
+        .await
+        .expect("update codex proxy config");
+
+    let service = ProxyService::new(db.clone());
+    let mut runtime_config = service.get_config().await.expect("read proxy config");
+    runtime_config.listen_port = 0;
+
+    let proxy = service
+        .start_with_runtime_config(runtime_config)
+        .await
+        .expect("start proxy service");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://{}:{}/v1/responses",
+            proxy.address, proxy.port
+        ))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": "hello codex"
+        }))
+        .send()
+        .await
+        .expect("send codex request to proxy");
+
+    assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        db.get_current_provider("codex")
+            .expect("read current provider after codex error")
+            .as_deref(),
+        Some("codex-current-error")
+    );
+
+    let status = service.get_status().await;
+    assert_eq!(status.current_provider_id, None);
+    assert_eq!(status.current_provider, None);
+    assert_eq!(status.failover_count, 0);
+    assert!(status.active_targets.is_empty());
+
+    service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+#[serial]
 async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
     let upstream_state = UpstreamState::default();
     let upstream_router = Router::new()
@@ -549,7 +855,7 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
         meta: None,
         icon: None,
         icon_color: None,
-        in_failover_queue: false,
+        in_failover_queue: true,
     };
     db.save_provider("gemini", &provider)
         .expect("save gemini provider");
@@ -560,6 +866,7 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
         .get_proxy_config_for_app("gemini")
         .await
         .expect("get gemini proxy config");
+    gemini_proxy.auto_failover_enabled = true;
     gemini_proxy.max_retries = 0;
     gemini_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(gemini_proxy)

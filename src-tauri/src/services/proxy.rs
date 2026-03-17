@@ -451,6 +451,31 @@ impl ProxyService {
         self.db.update_proxy_config(config.clone()).await
     }
 
+    pub async fn update_circuit_breaker_configs(
+        &self,
+        config: crate::proxy::circuit_breaker::CircuitBreakerConfig,
+    ) -> Result<(), String> {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            server.update_circuit_breaker_configs(config).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn reset_provider_circuit_breaker(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+    ) -> Result<(), String> {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            server
+                .reset_provider_circuit_breaker(provider_id, app_type)
+                .await;
+        }
+
+        Ok(())
+    }
+
     pub async fn get_global_config(&self) -> Result<GlobalProxyConfig, AppError> {
         self.db.get_global_proxy_config().await
     }
@@ -1389,5 +1414,138 @@ impl ProxyService {
             "gemini" => Ok(AppType::Gemini),
             _ => Err(format!("proxy takeover not supported for app: {app_type}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::circuit_breaker::CircuitBreakerConfig;
+    use serial_test::serial;
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_updating_running_breaker_configs_refreshes_existing_breakers() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load app proxy config");
+        app_proxy.circuit_failure_threshold = 1;
+        app_proxy.circuit_timeout_seconds = 3600;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("persist initial breaker config");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start proxy");
+
+        let router = {
+            let server_guard = service.runtime.server.read().await;
+            server_guard
+                .as_ref()
+                .expect("running server")
+                .provider_router()
+        };
+
+        router
+            .record_result("p1", "claude", false, false, Some("fail".to_string()))
+            .await
+            .expect("open breaker");
+        assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+        let updated = CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 2,
+            timeout_seconds: 0,
+            error_rate_threshold: 1.0,
+            min_requests: u32::MAX,
+        };
+        db.update_circuit_breaker_config(&updated)
+            .await
+            .expect("persist updated breaker config");
+        service
+            .update_circuit_breaker_configs(updated)
+            .await
+            .expect("hot update running breaker config");
+
+        let permit = router.allow_provider_request("p1", "claude").await;
+        assert!(permit.allowed);
+        assert!(permit.used_half_open_permit);
+
+        service.stop().await.expect("stop proxy");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resetting_running_provider_breaker_clears_existing_breaker_state() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load app proxy config");
+        app_proxy.circuit_failure_threshold = 1;
+        app_proxy.circuit_timeout_seconds = 3600;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("persist breaker config");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start proxy");
+
+        let router = {
+            let server_guard = service.runtime.server.read().await;
+            server_guard
+                .as_ref()
+                .expect("running server")
+                .provider_router()
+        };
+
+        router
+            .record_result("p1", "claude", false, false, Some("fail".to_string()))
+            .await
+            .expect("open breaker");
+        assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+        service
+            .reset_provider_circuit_breaker("p1", "claude")
+            .await
+            .expect("reset running breaker");
+
+        let permit = router.allow_provider_request("p1", "claude").await;
+        assert!(permit.allowed);
+        assert!(!permit.used_half_open_permit);
+
+        service.stop().await.expect("stop proxy");
     }
 }

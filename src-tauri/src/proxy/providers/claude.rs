@@ -1,4 +1,5 @@
 use reqwest::RequestBuilder;
+use serde_json::json;
 
 use crate::{provider::Provider, proxy::error::ProxyError};
 
@@ -247,17 +248,52 @@ impl ProviderAdapter for ClaudeAdapter {
         body: serde_json::Value,
         provider: &Provider,
     ) -> Result<serde_json::Value, ProxyError> {
+        let cache_key = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.prompt_cache_key.as_deref())
+            .unwrap_or(&provider.id);
+
         match self.get_api_format(provider) {
-            "openai_responses" => super::transform_responses::anthropic_to_responses(body, None),
-            _ => super::transform::anthropic_to_openai(body),
+            "openai_responses" => {
+                super::transform_responses::anthropic_to_responses(body, Some(cache_key))
+            }
+            _ => super::transform::anthropic_to_openai(body, Some(cache_key)),
         }
     }
 
     fn transform_response(&self, body: serde_json::Value) -> Result<serde_json::Value, ProxyError> {
+        if body.get("error").is_some()
+            && body.get("choices").is_none()
+            && body.get("output").is_none()
+        {
+            return Ok(openai_error_to_anthropic(body));
+        }
+
         if body.get("output").is_some() {
             super::transform_responses::responses_to_anthropic(body)
         } else {
             super::transform::openai_to_anthropic(body)
         }
     }
+}
+
+fn openai_error_to_anthropic(body: serde_json::Value) -> serde_json::Value {
+    let error = body.get("error").cloned().unwrap_or_else(|| json!({}));
+    let message = error
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Upstream error");
+    let error_type = error
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("invalid_request_error");
+
+    json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message
+        }
+    })
 }

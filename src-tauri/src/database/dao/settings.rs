@@ -191,6 +191,25 @@ impl Database {
         self.set_setting("rectifier_config", &json)
     }
 
+    // --- 优化器配置 ---
+
+    pub fn get_optimizer_config(&self) -> Result<crate::proxy::types::OptimizerConfig, AppError> {
+        match self.get_setting("optimizer_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析优化器配置失败: {e}"))),
+            None => Ok(crate::proxy::types::OptimizerConfig::default()),
+        }
+    }
+
+    pub fn set_optimizer_config(
+        &self,
+        config: &crate::proxy::types::OptimizerConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化优化器配置失败: {e}")))?;
+        self.set_setting("optimizer_config", &json)
+    }
+
     // --- 日志配置 ---
 
     /// 获取日志配置
@@ -207,5 +226,31 @@ impl Database {
         let json = serde_json::to_string(config)
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optimizer_config_roundtrip_uses_settings_storage() {
+        let db = Database::memory().expect("create memory db");
+        let config = crate::proxy::types::OptimizerConfig {
+            enabled: true,
+            thinking_optimizer: false,
+            cache_injection: true,
+            cache_ttl: "5m".to_string(),
+        };
+
+        db.set_optimizer_config(&config)
+            .expect("persist optimizer config");
+
+        let loaded = db.get_optimizer_config().expect("load optimizer config");
+
+        assert!(loaded.enabled);
+        assert!(!loaded.thinking_optimizer);
+        assert!(loaded.cache_injection);
+        assert_eq!(loaded.cache_ttl, "5m");
     }
 }

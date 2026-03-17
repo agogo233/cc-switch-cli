@@ -14,8 +14,10 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::{app_config::AppType, database::Database, provider::Provider};
 
 use super::{
+    circuit_breaker::CircuitBreakerConfig,
     error::ProxyError,
     handlers,
+    provider_router::ProviderRouter,
     types::{ActiveTarget, ProxyConfig, ProxyServerInfo, ProxyStatus},
 };
 
@@ -28,6 +30,7 @@ pub struct ProxyServerState {
     pub status: Arc<RwLock<ProxyStatus>>,
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
+    pub provider_router: Arc<ProviderRouter>,
 }
 
 impl ProxyServerState {
@@ -93,6 +96,26 @@ impl ProxyServerState {
         status.current_provider_id = Some(provider.id.clone());
     }
 
+    pub async fn sync_successful_provider_selection(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        current_provider_id_at_start: &str,
+    ) {
+        self.record_active_target(app_type, provider).await;
+
+        if provider.id == current_provider_id_at_start {
+            return;
+        }
+
+        self.db
+            .set_current_provider(app_type.as_str(), &provider.id)
+            .ok();
+
+        let mut status = self.status.write().await;
+        status.failover_count = status.failover_count.saturating_add(1);
+    }
+
     pub async fn record_request_success(&self) {
         let mut status = self.status.write().await;
         status.active_connections = status.active_connections.saturating_sub(1);
@@ -113,12 +136,126 @@ impl ProxyServerState {
         status.last_error = Some(message);
     }
 
-    pub async fn record_upstream_failure(&self, status_code: reqwest::StatusCode) {
+    pub async fn record_upstream_failure(
+        &self,
+        status_code: reqwest::StatusCode,
+        summary: Option<String>,
+    ) {
         let mut status = self.status.write().await;
         status.active_connections = status.active_connections.saturating_sub(1);
         status.failed_requests += 1;
         update_success_rate(&mut status);
-        status.last_error = Some(format!("upstream returned {}", status_code.as_u16()));
+        status.last_error = Some(match summary {
+            Some(summary) if !summary.is_empty() => {
+                format!("upstream returned {}: {summary}", status_code.as_u16())
+            }
+            _ => format!("upstream returned {}", status_code.as_u16()),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    fn test_provider(id: &str, name: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            settings_config: json!({}),
+            website_url: None,
+            category: Some("claude".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn test_state(db: Arc<Database>) -> ProxyServerState {
+        ProxyServerState {
+            db: db.clone(),
+            config: Arc::new(RwLock::new(ProxyConfig::default())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db)),
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_successful_provider_selection_updates_state_after_failover() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", "Claude Current");
+        let failover = test_provider("claude-failover", "Claude Failover");
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
+            .await;
+
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-failover")
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("claude-failover")
+        );
+        assert_eq!(status.current_provider.as_deref(), Some("Claude Failover"));
+        assert_eq!(status.failover_count, 1);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].app_type, "claude");
+        assert_eq!(status.active_targets[0].provider_id, "claude-failover");
+    }
+
+    #[tokio::test]
+    async fn sync_successful_provider_selection_keeps_failover_count_when_provider_unchanged() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", "Claude Current");
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id)
+            .await;
+
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-current")
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("claude-current")
+        );
+        assert_eq!(status.current_provider.as_deref(), Some("Claude Current"));
+        assert_eq!(status.failover_count, 0);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "claude-current");
     }
 }
 
@@ -138,6 +275,7 @@ pub struct ProxyServer {
 
 impl ProxyServer {
     pub fn new(config: ProxyConfig, db: Arc<Database>) -> Self {
+        let provider_router = Arc::new(ProviderRouter::new(db.clone()));
         let managed_session_token = std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -153,6 +291,7 @@ impl ProxyServer {
                 status: Arc::new(RwLock::new(status)),
                 start_time: Arc::new(RwLock::new(None)),
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
+                provider_router,
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
@@ -181,6 +320,8 @@ impl ProxyServer {
         let local_addr = listener
             .local_addr()
             .map_err(|e| format!("read proxy listener address failed: {e}"))?;
+
+        super::http_client::set_proxy_port(local_addr.port());
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         *self.shutdown_tx.write().await = Some(shutdown_tx);
@@ -233,6 +374,22 @@ impl ProxyServer {
         self.state.snapshot_status().await
     }
 
+    pub async fn update_circuit_breaker_configs(&self, config: CircuitBreakerConfig) {
+        self.state.provider_router.update_all_configs(config).await;
+    }
+
+    pub async fn reset_provider_circuit_breaker(&self, provider_id: &str, app_type: &str) {
+        self.state
+            .provider_router
+            .reset_provider_breaker(provider_id, app_type)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_router(&self) -> Arc<ProviderRouter> {
+        self.state.provider_router.clone()
+    }
+
     fn build_router(&self) -> Router {
         let cors = CorsLayer::new()
             .allow_origin(Any)
@@ -261,6 +418,22 @@ impl ProxyServer {
             .route("/v1/responses", post(handlers::handle_responses))
             .route("/v1/v1/responses", post(handlers::handle_responses))
             .route("/codex/v1/responses", post(handlers::handle_responses))
+            .route(
+                "/responses/compact",
+                post(handlers::handle_responses_compact),
+            )
+            .route(
+                "/v1/responses/compact",
+                post(handlers::handle_responses_compact),
+            )
+            .route(
+                "/v1/v1/responses/compact",
+                post(handlers::handle_responses_compact),
+            )
+            .route(
+                "/codex/v1/responses/compact",
+                post(handlers::handle_responses_compact),
+            )
             .route("/v1beta/*path", post(handlers::handle_gemini))
             .route("/gemini/v1beta/*path", post(handlers::handle_gemini))
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))

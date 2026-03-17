@@ -204,17 +204,18 @@ pub struct AppProxyConfig {
 /// 整流器配置
 ///
 /// 存储在 settings 表中
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RectifierConfig {
-    /// 总开关：是否启用整流器
-    #[serde(default)]
+    /// 总开关：是否启用整流器（默认开启）
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 请求整流：启用 thinking 签名整流器
-    ///
-    /// 处理错误：Invalid 'signature' in 'thinking' block
-    #[serde(default)]
+    /// 请求整流：启用 thinking 签名整流器（默认开启）
+    #[serde(default = "default_true")]
     pub request_thinking_signature: bool,
+    /// 请求整流：启用 thinking budget 整流器（默认开启）
+    #[serde(default = "default_true")]
+    pub request_thinking_budget: bool,
 }
 
 fn default_true() -> bool {
@@ -223,6 +224,48 @@ fn default_true() -> bool {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+impl Default for RectifierConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_thinking_signature: true,
+            request_thinking_budget: true,
+        }
+    }
+}
+
+/// 请求优化器配置
+///
+/// 存储在 settings 表中，key = "optimizer_config"
+/// 仅对 Bedrock Claude provider 生效
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptimizerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub thinking_optimizer: bool,
+    #[serde(default = "default_true")]
+    pub cache_injection: bool,
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl: String,
+}
+
+fn default_cache_ttl() -> String {
+    "1h".to_string()
+}
+
+impl Default for OptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            thinking_optimizer: true,
+            cache_injection: true,
+            cache_ttl: "1h".to_string(),
+        }
+    }
 }
 
 /// 日志配置
@@ -270,32 +313,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rectifier_config_default_disabled() {
-        // 验证 RectifierConfig::default() 返回全禁用状态
+    fn test_rectifier_config_default_enabled() {
         let config = RectifierConfig::default();
-        assert!(!config.enabled, "整流器总开关默认应为 false");
+        assert!(config.enabled, "整流器总开关默认应为 true");
         assert!(
-            !config.request_thinking_signature,
-            "thinking 签名整流器默认应为 false"
+            config.request_thinking_signature,
+            "thinking 签名整流器默认应为 true"
+        );
+        assert!(
+            config.request_thinking_budget,
+            "thinking budget 整流器默认应为 true"
         );
     }
 
     #[test]
     fn test_rectifier_config_serde_default() {
-        // 验证反序列化缺字段时使用默认值 false
         let json = "{}";
         let config: RectifierConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.enabled);
-        assert!(!config.request_thinking_signature);
+        assert!(config.enabled);
+        assert!(config.request_thinking_signature);
+        assert!(config.request_thinking_budget);
     }
 
     #[test]
     fn test_rectifier_config_serde_explicit_true() {
-        // 验证显式设置 true 时正确反序列化
-        let json = r#"{"enabled": true, "requestThinkingSignature": true}"#;
+        let json =
+            r#"{"enabled": true, "requestThinkingSignature": true, "requestThinkingBudget": true}"#;
         let config: RectifierConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert!(config.request_thinking_signature);
+        assert!(config.request_thinking_budget);
+    }
+
+    #[test]
+    fn test_rectifier_config_serde_partial_fields() {
+        let json = r#"{"enabled": true, "requestThinkingSignature": false}"#;
+        let config: RectifierConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert!(!config.request_thinking_signature);
+        assert!(config.request_thinking_budget);
+    }
+
+    #[test]
+    fn test_rectifier_config_roundtrip_preserves_budget_flag() {
+        let config = RectifierConfig {
+            enabled: false,
+            request_thinking_signature: true,
+            request_thinking_budget: false,
+        };
+
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: RectifierConfig = serde_json::from_str(&encoded).unwrap();
+        assert!(!decoded.enabled);
+        assert!(decoded.request_thinking_signature);
+        assert!(!decoded.request_thinking_budget);
     }
 
     #[test]
@@ -303,6 +374,25 @@ mod tests {
         let config = LogConfig::default();
         assert!(config.enabled);
         assert_eq!(config.level, "info");
+    }
+
+    #[test]
+    fn test_optimizer_config_default() {
+        let config = OptimizerConfig::default();
+        assert!(!config.enabled);
+        assert!(config.thinking_optimizer);
+        assert!(config.cache_injection);
+        assert_eq!(config.cache_ttl, "1h");
+    }
+
+    #[test]
+    fn test_optimizer_config_serde_default() {
+        let json = "{}";
+        let config: OptimizerConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert!(config.thinking_optimizer);
+        assert!(config.cache_injection);
+        assert_eq!(config.cache_ttl, "1h");
     }
 
     #[test]

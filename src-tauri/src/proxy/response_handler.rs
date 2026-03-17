@@ -1,45 +1,74 @@
 use axum::{
     body::Body,
-    http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
+use bytes::Bytes;
 use futures::StreamExt;
-use serde_json::json;
+
+use crate::{app_config::AppType, provider::Provider};
 
 use super::{
     error::ProxyError,
     metrics::estimate_tokens_from_char_count,
     response::{PreparedResponse, StreamCompletion},
     server::ProxyServerState,
+    usage::{log_buffered_response, log_error_request, log_stream_response, RequestLogContext, StreamLogCollector},
 };
 
 pub struct ResponseHandler;
+
+#[derive(Clone)]
+pub struct SuccessSyncInfo {
+    pub app_type: AppType,
+    pub provider: Provider,
+    pub current_provider_id_at_start: String,
+}
 
 impl ResponseHandler {
     pub async fn finish_buffered(
         state: &ProxyServerState,
         response_result: Result<PreparedResponse, ProxyError>,
         status: reqwest::StatusCode,
+        success_sync: Option<SuccessSyncInfo>,
+        request_log: Option<RequestLogContext>,
     ) -> Response {
         match response_result {
             Ok(response) => {
                 let PreparedResponse {
                     response,
                     estimated_output_tokens,
+                    upstream_error_summary,
+                    body_bytes,
                     ..
                 } = response;
+                if let (Some(request_log), Some(body_bytes)) = (request_log.as_ref(), body_bytes.as_ref()) {
+                    log_buffered_response(state, request_log, status.as_u16(), body_bytes).await;
+                }
                 state
                     .record_estimated_output_tokens(estimated_output_tokens)
                     .await;
                 if status.is_success() {
+                    if let Some(success_sync) = success_sync {
+                        state
+                            .sync_successful_provider_selection(
+                                &success_sync.app_type,
+                                &success_sync.provider,
+                                &success_sync.current_provider_id_at_start,
+                            )
+                            .await;
+                    }
                     state.record_request_success().await;
                 } else {
-                    state.record_upstream_failure(status).await;
+                    state
+                        .record_upstream_failure(status, upstream_error_summary)
+                        .await;
                 }
                 response
             }
             Err(error) => {
+                if let Some(request_log) = request_log.as_ref() {
+                    log_error_request(state, request_log, &error).await;
+                }
                 state.record_request_error(&error).await;
                 proxy_error_response(error)
             }
@@ -50,10 +79,21 @@ impl ResponseHandler {
         state: &ProxyServerState,
         response_result: Result<PreparedResponse, ProxyError>,
         status: reqwest::StatusCode,
+        success_sync: Option<SuccessSyncInfo>,
+        request_log: Option<RequestLogContext>,
     ) -> Response {
         match response_result {
-            Ok(response) => track_streaming_response(state.clone(), response, status),
+            Ok(response) => track_streaming_response(
+                state.clone(),
+                response,
+                status,
+                success_sync,
+                request_log,
+            ),
             Err(error) => {
+                if let Some(request_log) = request_log.as_ref() {
+                    log_error_request(state, request_log, &error).await;
+                }
                 state.record_request_error(&error).await;
                 proxy_error_response(error)
             }
@@ -65,9 +105,26 @@ fn track_streaming_response(
     state: ProxyServerState,
     response: PreparedResponse,
     status: reqwest::StatusCode,
+    success_sync: Option<SuccessSyncInfo>,
+    request_log: Option<RequestLogContext>,
 ) -> Response {
-    let (parts, body) = response.response.into_parts();
-    let mut recorder = StreamingOutcomeRecorder::new(state, response.stream_completion, status);
+    let PreparedResponse {
+        response,
+        stream_completion,
+        upstream_error_summary,
+        body_bytes,
+        ..
+    } = response;
+    let (parts, body) = response.into_parts();
+    let mut recorder = StreamingOutcomeRecorder::new(
+        state,
+        stream_completion,
+        status,
+        upstream_error_summary,
+        body_bytes,
+        success_sync,
+        request_log,
+    );
     let tracked_stream = async_stream::stream! {
         let mut stream = body.into_data_stream();
 
@@ -95,6 +152,11 @@ struct StreamingOutcomeRecorder {
     state: ProxyServerState,
     stream_completion: Option<StreamCompletion>,
     status: reqwest::StatusCode,
+    upstream_error_summary: Option<String>,
+    body_bytes: Option<Bytes>,
+    success_sync: Option<SuccessSyncInfo>,
+    request_log: Option<RequestLogContext>,
+    log_collector: Option<StreamLogCollector>,
     output_char_count: u64,
     finished: bool,
 }
@@ -104,11 +166,23 @@ impl StreamingOutcomeRecorder {
         state: ProxyServerState,
         stream_completion: Option<StreamCompletion>,
         status: reqwest::StatusCode,
+        upstream_error_summary: Option<String>,
+        body_bytes: Option<Bytes>,
+        success_sync: Option<SuccessSyncInfo>,
+        request_log: Option<RequestLogContext>,
     ) -> Self {
+        let log_collector = request_log
+            .as_ref()
+            .map(|request_log| StreamLogCollector::new(request_log.started_at));
         Self {
             state,
             stream_completion,
             status,
+            upstream_error_summary,
+            body_bytes,
+            success_sync,
+            request_log,
+            log_collector,
             output_char_count: 0,
             finished: false,
         }
@@ -118,6 +192,9 @@ impl StreamingOutcomeRecorder {
         self.output_char_count = self
             .output_char_count
             .saturating_add(String::from_utf8_lossy(chunk).chars().count() as u64);
+        if let Some(log_collector) = self.log_collector.as_mut() {
+            log_collector.record_chunk(chunk);
+        }
     }
 
     fn finish(&mut self) {
@@ -128,13 +205,26 @@ impl StreamingOutcomeRecorder {
 
         let state = self.state.clone();
         let estimated_output_tokens = estimate_tokens_from_char_count(self.output_char_count);
+        let request_log = self.request_log.clone();
+        let log_collector = self.log_collector.clone();
+        let body_bytes = self.body_bytes.clone();
         if !self.status.is_success() {
             let status = self.status;
+            let upstream_error_summary = self.upstream_error_summary.clone();
             tokio::spawn(async move {
+                if let Some(request_log) = request_log.as_ref() {
+                    if let Some(body_bytes) = body_bytes.as_ref() {
+                        log_buffered_response(&state, request_log, status.as_u16(), body_bytes).await;
+                    } else if let Some(log_collector) = log_collector.as_ref() {
+                        log_stream_response(&state, request_log, status.as_u16(), log_collector).await;
+                    }
+                }
                 state
                     .record_estimated_output_tokens(estimated_output_tokens)
                     .await;
-                state.record_upstream_failure(status).await;
+                state
+                    .record_upstream_failure(status, upstream_error_summary)
+                    .await;
             });
             return;
         }
@@ -146,6 +236,9 @@ impl StreamingOutcomeRecorder {
         {
             Some(Err(message)) => {
                 tokio::spawn(async move {
+                    if let Some(request_log) = request_log.as_ref() {
+                        log_error_request(&state, request_log, &ProxyError::RequestFailed(message.clone())).await;
+                    }
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
@@ -153,15 +246,77 @@ impl StreamingOutcomeRecorder {
                 });
             }
             Some(Ok(())) => {
+                let success_sync = self.success_sync.clone();
                 tokio::spawn(async move {
+                    if let Some(request_log) = request_log.as_ref() {
+                        if let Some(body_bytes) = body_bytes.as_ref() {
+                            log_buffered_response(
+                                &state,
+                                request_log,
+                                reqwest::StatusCode::OK.as_u16(),
+                                body_bytes,
+                            )
+                            .await;
+                        } else if let Some(log_collector) = log_collector.as_ref() {
+                            log_stream_response(
+                                &state,
+                                request_log,
+                                reqwest::StatusCode::OK.as_u16(),
+                                log_collector,
+                            )
+                            .await;
+                        }
+                    }
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
+                    if let Some(success_sync) = success_sync {
+                        state
+                            .sync_successful_provider_selection(
+                                &success_sync.app_type,
+                                &success_sync.provider,
+                                &success_sync.current_provider_id_at_start,
+                            )
+                            .await;
+                    }
+                    state.record_request_success().await;
+                });
+            }
+            None if body_bytes.is_some() => {
+                let success_sync = self.success_sync.clone();
+                let status = self.status;
+                tokio::spawn(async move {
+                    if let Some(request_log) = request_log.as_ref() {
+                        if let Some(body_bytes) = body_bytes.as_ref() {
+                            log_buffered_response(&state, request_log, status.as_u16(), body_bytes)
+                                .await;
+                        }
+                    }
+                    state
+                        .record_estimated_output_tokens(estimated_output_tokens)
+                        .await;
+                    if let Some(success_sync) = success_sync {
+                        state
+                            .sync_successful_provider_selection(
+                                &success_sync.app_type,
+                                &success_sync.provider,
+                                &success_sync.current_provider_id_at_start,
+                            )
+                            .await;
+                    }
                     state.record_request_success().await;
                 });
             }
             None => {
                 tokio::spawn(async move {
+                    if let Some(request_log) = request_log.as_ref() {
+                        log_error_request(
+                            &state,
+                            request_log,
+                            &ProxyError::RequestFailed("stream terminated before completion".to_string()),
+                        )
+                        .await;
+                    }
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
@@ -183,18 +338,7 @@ impl Drop for StreamingOutcomeRecorder {
 }
 
 pub fn proxy_error_response(error: ProxyError) -> Response {
-    match error {
-        ProxyError::ConfigError(message) | ProxyError::AuthError(message) => {
-            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
-        }
-        ProxyError::RequestFailed(message) | ProxyError::TransformError(message) => {
-            (StatusCode::BAD_GATEWAY, Json(json!({ "error": message }))).into_response()
-        }
-        ProxyError::UpstreamError { status, body } => {
-            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-            (status, Json(json!({ "error": body }))).into_response()
-        }
-    }
+    error.into_response()
 }
 
 #[cfg(test)]
@@ -203,22 +347,28 @@ mod tests {
 
     use axum::{
         body::{to_bytes, Body},
+        http::StatusCode,
         response::Response,
     };
     use bytes::Bytes;
     use tokio::sync::RwLock;
 
-    use crate::{database::Database, proxy::types::ProxyConfig};
+    use crate::{
+        database::Database,
+        proxy::{provider_router::ProviderRouter, types::ProxyConfig},
+    };
 
     use super::*;
 
     fn test_state() -> ProxyServerState {
+        let db = Arc::new(Database::memory().expect("memory db"));
         ProxyServerState {
-            db: Arc::new(Database::memory().expect("memory db")),
+            db: db.clone(),
             config: Arc::new(RwLock::new(ProxyConfig::default())),
             status: Arc::new(RwLock::new(crate::proxy::types::ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db)),
         }
     }
 
@@ -238,12 +388,16 @@ mod tests {
                 .expect("response"),
             stream_completion: None,
             estimated_output_tokens: 9,
+            upstream_error_summary: None,
+            body_bytes: None,
         };
 
         let _ = ResponseHandler::finish_buffered(
             &state,
             Ok(response),
             reqwest::StatusCode::BAD_GATEWAY,
+            None,
+            None,
         )
         .await;
 
@@ -268,10 +422,19 @@ mod tests {
                 .expect("response"),
             stream_completion: None,
             estimated_output_tokens: 0,
+            upstream_error_summary: None,
+            body_bytes: None,
         };
 
         let response =
-            ResponseHandler::finish_streaming(&state, Ok(response), reqwest::StatusCode::OK).await;
+            ResponseHandler::finish_streaming(
+                &state,
+                Ok(response),
+                reqwest::StatusCode::OK,
+                None,
+                None,
+            )
+                .await;
         let _ = to_bytes(response.into_body(), usize::MAX).await;
         settle_tasks().await;
 
@@ -292,12 +455,16 @@ mod tests {
                 .expect("response"),
             stream_completion: None,
             estimated_output_tokens: 0,
+            upstream_error_summary: None,
+            body_bytes: None,
         };
 
         let response = ResponseHandler::finish_streaming(
             &state,
             Ok(response),
             reqwest::StatusCode::BAD_REQUEST,
+            None,
+            None,
         )
         .await;
         let _ = to_bytes(response.into_body(), usize::MAX)
@@ -307,6 +474,43 @@ mod tests {
 
         let snapshot = state.snapshot_status().await;
         assert_eq!(snapshot.failed_requests, 1);
+        assert!(snapshot.estimated_output_tokens_total > 0);
+    }
+
+    #[tokio::test]
+    async fn buffered_success_streaming_responses_do_not_record_termination_error() {
+        let state = test_state();
+        state.record_request_start().await;
+
+        let response = PreparedResponse {
+            response: Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("transformed buffered fallback"))
+                .expect("response"),
+            stream_completion: None,
+            estimated_output_tokens: 0,
+            upstream_error_summary: None,
+            body_bytes: Some(Bytes::from_static(b"transformed buffered fallback")),
+        };
+
+        let response = ResponseHandler::finish_streaming(
+            &state,
+            Ok(response),
+            reqwest::StatusCode::OK,
+            None,
+            None,
+        )
+        .await;
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(body, Bytes::from_static(b"transformed buffered fallback"));
+        settle_tasks().await;
+
+        let snapshot = state.snapshot_status().await;
+        assert_eq!(snapshot.success_requests, 1);
+        assert_eq!(snapshot.failed_requests, 0);
+        assert!(snapshot.last_error.is_none());
         assert!(snapshot.estimated_output_tokens_total > 0);
     }
 }
