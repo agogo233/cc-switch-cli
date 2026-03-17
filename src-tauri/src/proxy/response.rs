@@ -7,6 +7,11 @@ use std::{
     time::Duration,
 };
 
+mod error_summary;
+#[cfg(test)]
+mod tests;
+
+use self::error_summary::{summarize_upstream_body_bytes, summarize_upstream_json_value};
 use super::{
     error::ProxyError,
     metrics::estimate_tokens_from_bytes,
@@ -352,13 +357,6 @@ fn copy_headers(
     }
 }
 
-fn summarize_upstream_body_bytes(body: &[u8]) -> Option<String> {
-    std::str::from_utf8(body)
-        .ok()
-        .map(summarize_upstream_body)
-        .filter(|summary| !summary.is_empty())
-}
-
 fn build_buffered_json_response_inner<F>(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -429,10 +427,7 @@ where
         })
 }
 
-fn should_passthrough_transform_failure(
-    status: reqwest::StatusCode,
-    error: &ProxyError,
-) -> bool {
+fn should_passthrough_transform_failure(status: reqwest::StatusCode, error: &ProxyError) -> bool {
     !status.is_success() && matches!(error, ProxyError::TransformError(_))
 }
 
@@ -451,214 +446,5 @@ fn proxy_error_message(error: ProxyError) -> String {
         | ProxyError::Timeout(message)
         | ProxyError::Internal(message) => message,
         other => other.to_string(),
-    }
-}
-
-fn summarize_upstream_body(body: &str) -> String {
-    if let Ok(json_body) = serde_json::from_str::<Value>(body) {
-        if let Some(summary) = summarize_upstream_json_value(&json_body) {
-            return summary;
-        }
-    }
-
-    summarize_text_for_log(body, 180)
-}
-
-fn summarize_upstream_json_value(body: &Value) -> Option<String> {
-    if let Some(message) = extract_json_error_message(body) {
-        return Some(summarize_text_for_log(&message, 180));
-    }
-
-    serde_json::to_string(body)
-        .ok()
-        .map(|compact_json| summarize_text_for_log(&compact_json, 180))
-        .filter(|summary| !summary.is_empty())
-}
-
-fn extract_json_error_message(body: &Value) -> Option<String> {
-    [
-        body.pointer("/error/message"),
-        body.pointer("/message"),
-        body.pointer("/detail"),
-        body.pointer("/error"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|value| value.as_str().map(ToString::to_string))
-}
-
-fn summarize_text_for_log(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = normalized.trim();
-
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-
-    let truncated: String = trimmed.chars().take(max_chars).collect();
-    let truncated = truncated.trim_end();
-    format!("{truncated}...")
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::to_bytes,
-        http::StatusCode,
-    };
-    use bytes::Bytes;
-    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-    use serde_json::json;
-
-    use super::*;
-
-    async fn buffered_body(response: Response) -> Bytes {
-        to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read buffered response body")
-    }
-
-    #[tokio::test]
-    async fn non_success_parse_failures_fall_back_to_upstream_response() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        let prepared = build_buffered_json_response(
-            reqwest::StatusCode::BAD_REQUEST,
-            &headers,
-            Bytes::from_static(br#"{not-json"#),
-            |_| Ok(json!({"type": "error"})),
-        )
-        .expect("fallback to raw upstream response");
-
-        assert_eq!(prepared.response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            prepared
-                .response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("application/json")
-        );
-        assert_eq!(buffered_body(prepared.response).await, Bytes::from_static(br#"{not-json"#));
-    }
-
-    #[tokio::test]
-    async fn non_success_transform_failures_fall_back_to_upstream_response() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        let prepared = build_buffered_json_response(
-            reqwest::StatusCode::BAD_REQUEST,
-            &headers,
-            Bytes::from_static(br#"{"message":"upstream rejected the request"}"#),
-            |_| Err(ProxyError::TransformError("missing error envelope".to_string())),
-        )
-        .expect("fallback to raw upstream response");
-
-        assert_eq!(prepared.response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            buffered_body(prepared.response).await,
-            Bytes::from_static(br#"{"message":"upstream rejected the request"}"#)
-        );
-    }
-
-    #[test]
-    fn non_success_non_transform_failures_preserve_original_proxy_error() {
-        let headers = HeaderMap::new();
-        let result = build_buffered_json_response(
-            reqwest::StatusCode::BAD_REQUEST,
-            &headers,
-            Bytes::from_static(br#"{"message":"upstream rejected the request"}"#),
-            |_| Err(ProxyError::Timeout("proxy transform pipeline broke".to_string())),
-        );
-
-        match result {
-            Ok(_) => panic!("non-transform errors must not fall back to upstream passthrough"),
-            Err(ProxyError::Timeout(message)) => {
-                assert_eq!(message, "proxy transform pipeline broke");
-            }
-            Err(other) => panic!("expected original proxy error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn success_parse_failures_use_proxy_request_failed_errors() {
-        let headers = HeaderMap::new();
-        let result = build_buffered_json_response(
-            reqwest::StatusCode::OK,
-            &headers,
-            Bytes::from_static(br#"{not-json"#),
-            |_| Ok(json!({"type": "message"})),
-        );
-
-        match result {
-            Ok(_) => panic!("success responses should still fail on malformed upstream json"),
-            Err(ProxyError::RequestFailed(message)) => {
-                assert!(message.contains("parse upstream json failed"));
-            }
-            Err(other) => panic!("expected request failed error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn success_transform_failures_use_proxy_request_failed_errors() {
-        let headers = HeaderMap::new();
-        let result = build_buffered_json_response(
-            reqwest::StatusCode::OK,
-            &headers,
-            Bytes::from_static(br#"{"message":"upstream accepted the request"}"#),
-            |_| Err(ProxyError::TransformError("missing success envelope".to_string())),
-        );
-
-        match result {
-            Ok(_) => panic!("success responses must surface transform failures as proxy errors"),
-            Err(ProxyError::RequestFailed(message)) => {
-                assert!(message.contains("transform upstream json failed"));
-                assert!(message.contains("missing success envelope"));
-            }
-            Err(other) => panic!("expected request failed error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn non_success_standard_json_errors_can_still_transform() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        let prepared = build_buffered_json_response(
-            reqwest::StatusCode::BAD_REQUEST,
-            &headers,
-            Bytes::from_static(
-                br#"{"error":{"message":"upstream rejected the request","type":"invalid_request_error"}}"#,
-            ),
-            |body| {
-                assert_eq!(
-                    body,
-                    json!({
-                        "error": {
-                            "message": "upstream rejected the request",
-                            "type": "invalid_request_error"
-                        }
-                    })
-                );
-                Ok(json!({
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": "upstream rejected the request"
-                    }
-                }))
-            },
-        )
-        .expect("standard upstream json errors should still transform");
-
-        assert_eq!(prepared.response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            buffered_body(prepared.response).await,
-            Bytes::from_static(
-                br#"{"error":{"message":"upstream rejected the request","type":"invalid_request_error"},"type":"error"}"#,
-            )
-        );
     }
 }
