@@ -2,14 +2,14 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.0.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Command-Line Management Tool for Claude Code, Codex, Gemini & OpenCode CLI**
+**Command-Line Management Tool for Claude Code, Codex, Gemini, OpenCode & OpenClaw**
 
-Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.
+Unified management for Claude Code, Codex, Gemini, OpenCode, and OpenClaw provider configurations, plus app-specific support for MCP servers, skills, prompts, local proxy routes, and environment checks.
 
 [English](README.md) | [中文](README_ZH.md)
 
@@ -28,11 +28,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 🆕 What's New in 5.0.1
+## 🆕 What's New in 5.1.0
 
-- Self-update now follows GitHub release metadata more closely and has a safer signed upgrade path.
-- The v5 TUI palette now stays readable across Apple Terminal and ansi256 compatibility modes.
-- Claude and Codex now warn before a first switch would overwrite an existing live config, and show a one-time common-config tip after the first real provider change.
+<div align="center">
+  <h3><strong>🦞 OpenClaw (小龙虾) is now supported in CC-Switch CLI</strong></h3>
+</div>
+
+- OpenClaw now has first-class provider support with upstream-aligned `openclaw.json` handling, default model flows, prompt support, and dedicated TUI entries for `Env`, `Tools`, `Agents Defaults`, and config health warnings.
+- Provider and common-snippet syncing now stay closer to upstream behavior, especially for additive live-config apps.
+- WebDAV now rejects false-positive sync success results instead of reporting a misleading success.
+- TUI compatibility is better in SSH, ansi256, and `TERM=*-256color` sessions, and provider add/save works again after JSON edits.
 
 ---
 
@@ -107,8 +112,9 @@ cc-switch proxy show                 # Inspect proxy routes and status
 cc-switch --app claude provider list    # Manage Claude providers
 cc-switch --app codex mcp sync          # Sync Codex MCP servers
 cc-switch --app gemini prompts list     # List Gemini prompts
+cc-switch --app openclaw provider list  # Manage OpenClaw providers
 
-# Supported apps: `claude` (default), `codex`, `gemini`, `open-code`
+# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `openclaw`
 ```
 
 See the "Features" section for full command list.
@@ -222,9 +228,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 Provider Management
 
-Manage API configurations for **Claude Code**, **Codex**, **Gemini**, and **OpenCode**.
+Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, and **OpenClaw**.
 
-**Features:** One-click switching, multi-endpoint support, API key management, speed testing, stream health checks, remote model discovery.
+**Features:** One-click switching, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 
 ```bash
 cc-switch provider list              # List all providers
@@ -261,7 +267,7 @@ cc-switch mcp import --app claude    # Import from live config
 
 Manage system prompt presets for AI coding assistants.
 
-**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`).
+**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`), OpenClaw (`AGENTS.md`).
 
 ```bash
 cc-switch prompts list               # List prompt presets
@@ -396,7 +402,7 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 
 - **SQLite-backed state**: Core data lives in `~/.cc-switch/cc-switch.db`; legacy `~/.cc-switch/config.json` is kept only for older import and migration paths
 - **Skills SSOT**: Skill source files live in `~/.cc-switch/skills/`, while install state and app enablement stay in the database
-- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, or `~/.config/opencode` unexpectedly)
+- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/opencode`, or `~/.openclaw` unexpectedly)
 - **Atomic Writes**: Temp file + rename pattern prevents corruption
 - **Service Layer Reuse**: 100% reused from original GUI version
 - **Concurrency Safe**: RwLock with scoped guards
@@ -415,6 +421,7 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 - Codex: `~/.codex/auth.json` (auth state), `~/.codex/config.toml` (provider/common config + MCP), `~/.codex/AGENTS.md` (prompts)
 - Gemini: `~/.gemini/.env` (provider env), `~/.gemini/settings.json` (settings + MCP), `~/.gemini/GEMINI.md` (prompts)
 - OpenCode: `~/.config/opencode/opencode.json` (providers + MCP + runtime config), `~/.config/opencode/AGENTS.md` (prompts)
+- OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
 
 ---
 
@@ -425,7 +432,7 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 
 <br>
 
-First, make sure the target CLI has been initialized at least once (i.e. its config directory exists). CC-Switch may skip live sync for uninitialized apps; you will see a warning. Run the target CLI once (e.g. `claude --help`, `codex --help`, `gemini --help`, `opencode --help`), then switch again.
+First, make sure the target CLI has been initialized at least once (i.e. its config directory exists). CC-Switch may skip live sync for uninitialized apps; you will see a warning. Run the target CLI once (e.g. `claude --help`, `codex --help`, `gemini --help`, `opencode --help`, `openclaw --help`), then switch again.
 
 This is usually caused by **environment variable conflicts**. If you have API keys set in system environment variables (like `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), they will override CC-Switch's configuration.
 
@@ -459,11 +466,12 @@ This is usually caused by **environment variable conflicts**. If you have API ke
 
 <br>
 
-CC-Switch currently supports four AI coding assistants:
+CC-Switch currently supports five AI coding assistants:
 - **Claude Code** (`--app claude`, default)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
-- **OpenCode** (`--app open-code`)
+- **OpenCode** (`--app opencode`)
+- **OpenClaw** (`--app openclaw`)
 
 Use the global `--app` flag to specify which app to manage:
 ```bash

@@ -315,7 +315,9 @@ jobs:
           body: |
             ## CC Switch CLI ${{ github.ref_name }}
 
-            All-in-One Assistant for Claude Code, Codex & Gemini CLI
+            All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw
+
+            New in this release: OpenClaw support, tighter upstream parity, and safer WebDAV / TUI behavior.
 
             ### 📦 下载 / Downloads
 

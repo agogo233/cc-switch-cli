@@ -2,14 +2,14 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.0.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Claude Code、Codex、Gemini 与 OpenCode CLI 的命令行管理工具**
+**Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的命令行管理工具**
 
-统一管理 Claude Code、Codex、Gemini 与 OpenCode CLI 的供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查。
+统一管理 Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
 
 [English](README.md) | [中文](README_ZH.md)
 
@@ -26,11 +26,16 @@
 
 ---
 
-## 🆕 5.0.1 更新内容
+## 🆕 5.1.0 更新内容
 
-- 自更新流程进一步对齐 GitHub Release 元数据，签名升级和安装脚本升级路径更稳妥。
-- v5 TUI 配色在 Apple Terminal 和 ansi256 兼容模式下保持可读且一致。
-- Claude 与 Codex 在第一次切换可能覆盖现有 live 配置时会先提示，并在第一次真实切换后显示一次性“通用配置”提示。
+<div align="center">
+  <h3><strong>🦞 现已支持 OpenClaw（小龙虾）</strong></h3>
+</div>
+
+- OpenClaw 现已支持一等公民级别的供应商管理，包括对齐上游的 `openclaw.json` 读写、默认模型流程、提示词支持，以及 `Env`、`Tools`、`Agents Defaults` 与健康告警的专属 TUI 入口。
+- 供应商与通用配置片段的同步行为进一步向上游靠拢，尤其是 additive live-config 应用。
+- WebDAV 现在会拒绝误报的同步成功结果，不再把失败操作显示成“成功”。
+- TUI 在 SSH、ansi256 和 `TERM=*-256color` 场景下更稳定，JSON 编辑后的供应商新增/保存流程也恢复正常。
 
 ---
 
@@ -109,8 +114,9 @@ cc-switch proxy show                 # 查看代理路由和状态
 cc-switch --app claude provider list    # 管理 Claude 供应商
 cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
+cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`open-code`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`openclaw`
 ```
 
 完整命令列表请参考「功能特性」章节。
@@ -224,9 +230,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini** 与 **OpenCode** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode** 与 **OpenClaw** 的 API 配置。
 
-**功能：** 一键切换、多端点支持、API 密钥管理、速度测试、流式健康检查、远端模型发现。
+**功能：** 一键切换、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
 ```bash
 cc-switch provider list              # 列出所有供应商
@@ -263,7 +269,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设
@@ -398,7 +404,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 - **SQLite 持久化**：核心数据存放在 `~/.cc-switch/cc-switch.db`；旧版 `~/.cc-switch/config.json` 仅保留给兼容与迁移路径使用
 - **Skills SSOT**：技能源文件保存在 `~/.cc-switch/skills/`，安装状态和启用状态由数据库统一记录
-- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini` 或 `~/.config/opencode`）
+- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode` 或 `~/.openclaw`）
 - **原子写入**：临时文件 + 重命名模式防止损坏
 - **服务层复用**：100% 复用原 GUI 版本
 - **并发安全**：RwLock 配合作用域守卫
@@ -417,6 +423,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - Codex: `~/.codex/auth.json`（认证状态）, `~/.codex/config.toml`（供应商 / 通用配置 + MCP）, `~/.codex/AGENTS.md`（提示词）
 - Gemini: `~/.gemini/.env`（供应商环境变量）, `~/.gemini/settings.json`（设置 + MCP）, `~/.gemini/GEMINI.md`（提示词）
 - OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
+- OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 
 ---
 
@@ -427,7 +434,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 <br>
 
-首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help`），然后再切换一次供应商。
+首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help` / `openclaw --help`），然后再切换一次供应商。
 
 这通常是由**环境变量冲突**引起的。如果你在系统环境变量中设置了 API 密钥（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`），它们会覆盖 CC-Switch 的配置。
 
@@ -461,11 +468,12 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 <br>
 
-CC-Switch 目前支持四个 AI 编程助手：
+CC-Switch 目前支持五个 AI 编程助手：
 - **Claude Code** (`--app claude`，默认)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
-- **OpenCode** (`--app open-code`)
+- **OpenCode** (`--app opencode`)
+- **OpenClaw** (`--app openclaw`)
 
 使用全局 `--app` 参数指定要管理的应用：
 ```bash

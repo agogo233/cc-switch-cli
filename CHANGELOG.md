@@ -7,6 +7,50 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.0] - 2026-03-20
+
+### Added
+
+- **OpenClaw**: Add first-class OpenClaw support with upstream-aligned provider flows, additive `~/.openclaw/openclaw.json` sync, default model management, prompt support, and dedicated TUI entries for `Env`, `Tools`, `Agents Defaults`, and config health warnings.
+
+### Changed
+
+- **Provider / Config**: Align OpenClaw provider boundaries, config import/update/remove behavior, and common snippet live-sync handling more closely with upstream behavior.
+- **Proxy**: Align Claude backend behavior with upstream and split oversized proxy modules for easier maintenance without changing the release surface.
+
+### Fixed
+
+- **OpenClaw / TUI**: Close remaining live-config parity gaps, improve the ratatui flow, and restore provider add/save after JSON edits.
+- **Terminal Compatibility**: Improve ansi256 and `TERM=*-256color` fallback behavior, including SSH xterm sessions.
+- **WebDAV**: Reject false-positive sync success results instead of reporting a misleading successful sync.
+
+### Docs & Chore
+
+- **Docs / Repo Hygiene**: Remove branch-only OpenClaw planning notes from the PR payload and ignore the superpowers docs workspace.
+- **Internal Refactor**: Split oversized provider, i18n, and Claude proxy modules without intended behavior changes.
+
+### Commits (since v5.0.1)
+
+- 1aca886 feat(openclaw): add upstream-aligned provider support
+- dccb70d docs: remove openclaw plan notes from pr
+- 5f5c0c9 refactor: split oversized modules without behavior changes
+- b6d6564 fix(tui): honor TERM 256color fallbacks
+- b42e569 test(tui): isolate test terminals from real tty
+- da9298e fix(tui): fallback SSH xterm sessions to ansi256
+- 126d082 chore(git): ignore docs superpowers workspace
+- 3088a6b fix(tui): unblock provider add save after JSON edits
+- c4409be fix(provider): align common snippets with live sync
+- 56f8af7 fix(proxy): align Claude backend behavior with upstream
+- 4a8dd7c refactor(proxy): split Claude proxy modules and tests
+- 078deaf feat(openclaw): align config and provider parity flows
+- 969dcd0 feat(openclaw): align upstream provider boundaries
+- c4cce7c fix(webdav): reject false-positive sync success
+- cdb6c5a fix(openclaw): align live-config parity and TUI behavior
+
+### Thanks
+
+- Thanks `@saladday` for landing OpenClaw support, tightening provider/live-config parity, and cleaning up the upstream alignment work across the proxy and TUI layers.
+
 ## [5.0.1] - 2026-03-15
 
 ### Added
