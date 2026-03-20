@@ -1,6 +1,10 @@
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use serde_json::json;
+use serial_test::serial;
+use std::ffi::OsString;
+use std::path::Path;
 use std::sync::Mutex;
+use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
@@ -22,6 +26,7 @@ use crate::{
     },
     provider::Provider,
     services::skill::{InstalledSkill, SkillApps, SkillRepo, SyncMethod, UnmanagedSkill},
+    test_support::{lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock},
 };
 
 #[test]
@@ -221,6 +226,44 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 struct EnvGuard {
     key: &'static str,
     prev: Option<String>,
+}
+
+struct SettingsEnvGuard {
+    _lock: TestHomeSettingsLock,
+    old_home: Option<OsString>,
+    old_userprofile: Option<OsString>,
+}
+
+impl SettingsEnvGuard {
+    fn set_home(home: &Path) -> Self {
+        let lock = lock_test_home_and_settings();
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        set_test_home_override(Some(home));
+        crate::settings::reload_test_settings();
+        Self {
+            _lock: lock,
+            old_home,
+            old_userprofile,
+        }
+    }
+}
+
+impl Drop for SettingsEnvGuard {
+    fn drop(&mut self) {
+        match &self.old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        set_test_home_override(self.old_home.as_deref().map(Path::new));
+        crate::settings::reload_test_settings();
+    }
 }
 
 impl EnvGuard {
@@ -486,9 +529,68 @@ fn header_renders_proxy_chip_left_of_provider() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn header_hides_gemini_by_default() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    let app = App::new(Some(AppType::Claude));
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let header = line_at(&buf, 1);
+
+    assert!(header.contains(AppType::Claude.as_str()), "{header}");
+    assert!(header.contains(AppType::Codex.as_str()), "{header}");
+    assert!(!header.contains(AppType::Gemini.as_str()), "{header}");
+    assert!(header.contains(AppType::OpenCode.as_str()), "{header}");
+    assert!(header.contains(AppType::OpenClaw.as_str()), "{header}");
+    assert_eq!(visible_tab_labels(&header), 4, "{header}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn header_only_renders_selected_visible_apps() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: false,
+        codex: true,
+        gemini: false,
+        opencode: false,
+        openclaw: true,
+    })
+    .expect("save visible apps");
+
+    let app = App::new(Some(AppType::OpenClaw));
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let header = line_at(&buf, 1);
+
+    assert!(!header.contains(AppType::Claude.as_str()), "{header}");
+    assert!(header.contains(AppType::Codex.as_str()), "{header}");
+    assert!(!header.contains(AppType::Gemini.as_str()), "{header}");
+    assert!(!header.contains(AppType::OpenCode.as_str()), "{header}");
+    assert!(header.contains(AppType::OpenClaw.as_str()), "{header}");
+    assert_eq!(visible_tab_labels(&header), 2, "{header}");
+}
+
+#[test]
+#[serial(home_settings)]
 fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: true,
+        opencode: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
 
     let app = App::new(Some(AppType::Claude));
     let buf = render(&app, &minimal_data(&app.app_type));
@@ -500,6 +602,71 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
     assert!(header.contains(AppType::Gemini.as_str()), "{header}");
     assert!(header.contains(AppType::OpenCode.as_str()), "{header}");
     assert!(header.contains(AppType::OpenClaw.as_str()), "{header}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn settings_page_shows_visible_apps_row_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: false,
+        gemini: true,
+        opencode: false,
+        openclaw: true,
+    })
+    .expect("save visible apps");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_label()),
+        "{all}"
+    );
+    assert!(all.contains("claude, gemini, openclaw"), "{all}");
+}
+
+#[test]
+fn zero_selection_warning_toast_renders_after_picker_rejection() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::VisibleAppsPicker {
+        selected: 0,
+        apps: crate::settings::VisibleApps {
+            claude: false,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        },
+    };
+    app.push_toast(
+        texts::tui_toast_visible_apps_zero_selection_warning(),
+        crate::cli::tui::app::ToastKind::Warning,
+    );
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_title()),
+        "{all}"
+    );
+    assert!(all.contains(AppType::OpenClaw.as_str()), "{all}");
+    assert!(
+        all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
+        "{all}"
+    );
 }
 
 #[test]
@@ -557,7 +724,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
     assert!(header.contains(&proxy_label), "{header}");
     assert!(header.contains(&provider_label), "{header}");
     assert!(
-        spaces_before_substring(&header, &proxy_label) <= 6,
+        spaces_before_substring(&header, &proxy_label) <= 7,
         "expected proxy badge to stay near tabs without a fake blank block: {header}"
     );
 }

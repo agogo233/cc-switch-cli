@@ -166,6 +166,9 @@ pub enum Action {
         enabled: bool,
     },
     SetLanguage(Language),
+    SetVisibleApps {
+        apps: crate::settings::VisibleApps,
+    },
 
     CheckUpdate,
     ConfirmUpdate,
@@ -298,6 +301,7 @@ impl ConfigItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
     Language,
+    VisibleApps,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
@@ -305,8 +309,9 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 5] = [
+    pub const ALL: [SettingsItem; 6] = [
         SettingsItem::Language,
+        SettingsItem::VisibleApps,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::Proxy,

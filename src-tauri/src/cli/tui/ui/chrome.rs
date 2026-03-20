@@ -24,59 +24,26 @@ pub(super) fn render_header(
     )]))
     .alignment(Alignment::Left);
 
-    let selected = match app.app_type {
-        AppType::Claude => 0,
-        AppType::Codex => 1,
-        AppType::Gemini => 2,
-        AppType::OpenCode => 3,
-        AppType::OpenClaw => 4,
-    };
-    let tabs_line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", AppType::Claude.as_str()),
-            if selected == 0 {
-                active_chip_style(theme)
-            } else {
-                inactive_chip_style(theme)
-            },
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", AppType::Codex.as_str()),
-            if selected == 1 {
-                active_chip_style(theme)
-            } else {
-                inactive_chip_style(theme)
-            },
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", AppType::Gemini.as_str()),
-            if selected == 2 {
-                active_chip_style(theme)
-            } else {
-                inactive_chip_style(theme)
-            },
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", AppType::OpenCode.as_str()),
-            if selected == 3 {
-                active_chip_style(theme)
-            } else {
-                inactive_chip_style(theme)
-            },
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", AppType::OpenClaw.as_str()),
-            if selected == 4 {
-                active_chip_style(theme)
-            } else {
-                inactive_chip_style(theme)
-            },
-        ),
-    ]);
+    let visible_apps = crate::settings::get_visible_apps();
+    let tabs_line = Line::from(
+        super::config::ordered_visible_app_types(&visible_apps)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(idx, app_type)| {
+                let style = if app_type == app.app_type {
+                    active_chip_style(theme)
+                } else {
+                    inactive_chip_style(theme)
+                };
+                let mut spans = Vec::with_capacity(2);
+                if idx > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(format!(" {} ", app_type.as_str()), style));
+                spans
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let current_provider = data
         .providers

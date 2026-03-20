@@ -268,6 +268,13 @@ impl App {
                     };
                     Action::SetLanguage(next)
                 }
+                Some(SettingsItem::VisibleApps) => {
+                    self.overlay = Overlay::VisibleAppsPicker {
+                        selected: app_type_picker_index(&self.app_type),
+                        apps: crate::settings::get_visible_apps(),
+                    };
+                    Action::None
+                }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
                     let next = !current;

@@ -112,6 +112,15 @@ pub(crate) fn render_overlay(
             *selected,
             apps,
         ),
+        Overlay::VisibleAppsPicker { selected, apps } => {
+            super::pickers::render_visible_apps_picker_overlay(
+                frame,
+                content_area,
+                theme,
+                *selected,
+                apps,
+            )
+        }
         Overlay::SkillsAppsPicker {
             name,
             selected,

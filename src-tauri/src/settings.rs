@@ -7,6 +7,140 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibleApps {
+    #[serde(default = "default_visible_app_claude")]
+    pub claude: bool,
+    #[serde(default = "default_visible_app_codex")]
+    pub codex: bool,
+    #[serde(default = "default_visible_app_gemini")]
+    pub gemini: bool,
+    #[serde(default = "default_visible_app_opencode")]
+    pub opencode: bool,
+    #[serde(default = "default_visible_app_openclaw")]
+    pub openclaw: bool,
+}
+
+fn default_visible_app_claude() -> bool {
+    true
+}
+
+fn default_visible_app_codex() -> bool {
+    true
+}
+
+fn default_visible_app_gemini() -> bool {
+    false
+}
+
+fn default_visible_app_opencode() -> bool {
+    true
+}
+
+fn default_visible_app_openclaw() -> bool {
+    true
+}
+
+pub fn default_visible_apps() -> VisibleApps {
+    VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: false,
+        opencode: true,
+        openclaw: true,
+    }
+}
+
+impl Default for VisibleApps {
+    fn default() -> Self {
+        default_visible_apps()
+    }
+}
+
+impl VisibleApps {
+    pub fn ordered_enabled(&self) -> Vec<AppType> {
+        app_order()
+            .into_iter()
+            .filter(|app_type| self.is_enabled_for(app_type))
+            .collect()
+    }
+
+    pub fn is_enabled_for(&self, app_type: &AppType) -> bool {
+        match app_type {
+            AppType::Claude => self.claude,
+            AppType::Codex => self.codex,
+            AppType::Gemini => self.gemini,
+            AppType::OpenCode => self.opencode,
+            AppType::OpenClaw => self.openclaw,
+        }
+    }
+
+    pub fn set_enabled_for(&mut self, app_type: &AppType, enabled: bool) {
+        match app_type {
+            AppType::Claude => self.claude = enabled,
+            AppType::Codex => self.codex = enabled,
+            AppType::Gemini => self.gemini = enabled,
+            AppType::OpenCode => self.opencode = enabled,
+            AppType::OpenClaw => self.openclaw = enabled,
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        if self.ordered_enabled().is_empty() {
+            *self = default_visible_apps();
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.ordered_enabled().is_empty() {
+            return Err(AppError::InvalidInput(
+                "At least one app must remain visible".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn app_order() -> [AppType; 5] {
+    [
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::OpenCode,
+        AppType::OpenClaw,
+    ]
+}
+
+pub fn next_visible_app(
+    visible: &VisibleApps,
+    current: &AppType,
+    direction: i8,
+) -> Option<AppType> {
+    let ordered = app_order();
+    if ordered
+        .iter()
+        .all(|app_type| !visible.is_enabled_for(app_type))
+    {
+        return None;
+    }
+
+    let current_index = ordered.iter().position(|app_type| app_type == current)?;
+    let step = if direction < 0 { -1 } else { 1 };
+    let len = ordered.len() as isize;
+
+    for offset in 1..=ordered.len() {
+        let index = (current_index as isize + step * offset as isize).rem_euclid(len) as usize;
+        let candidate = &ordered[index];
+        if visible.is_enabled_for(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+
+    None
+}
+
 /// 自定义端点配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +324,8 @@ pub struct AppSettings {
     pub current_provider_opencode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
+    #[serde(default = "default_visible_apps")]
+    pub visible_apps: VisibleApps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// 是否开机自启
@@ -239,6 +375,7 @@ impl Default for AppSettings {
             current_provider_gemini: None,
             current_provider_opencode: None,
             current_provider_openclaw: None,
+            visible_apps: default_visible_apps(),
             language: None,
             launch_on_startup: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
@@ -261,7 +398,7 @@ impl AppSettings {
             .join("settings.json")
     }
 
-    fn normalize_paths(&mut self) {
+    fn normalize_common(&mut self) {
         self.claude_config_dir = self
             .claude_config_dir
             .as_ref()
@@ -309,12 +446,21 @@ impl AppSettings {
         }
     }
 
+    fn normalize_loaded(&mut self) {
+        self.normalize_common();
+        self.visible_apps.normalize();
+    }
+
+    fn validate(&self) -> Result<(), AppError> {
+        self.visible_apps.validate()
+    }
+
     pub fn load() -> Self {
         let path = Self::settings_path();
         if let Ok(content) = fs::read_to_string(&path) {
             match serde_json::from_str::<AppSettings>(&content) {
                 Ok(mut settings) => {
-                    settings.normalize_paths();
+                    settings.normalize_loaded();
                     settings
                 }
                 Err(err) => {
@@ -333,7 +479,8 @@ impl AppSettings {
 
     pub fn save(&self) -> Result<(), AppError> {
         let mut normalized = self.clone();
-        normalized.normalize_paths();
+        normalized.normalize_common();
+        normalized.validate()?;
         let path = Self::settings_path();
 
         if let Some(parent) = path.parent() {
@@ -381,7 +528,8 @@ pub fn get_settings() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
-    new_settings.normalize_paths();
+    new_settings.normalize_common();
+    new_settings.validate()?;
     new_settings.save()?;
 
     let mut guard = settings_store().write().expect("写入设置锁失败");
@@ -472,6 +620,21 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
     }
 
+    update_settings(settings)
+}
+
+pub fn get_visible_apps() -> VisibleApps {
+    settings_store()
+        .read()
+        .map(|settings| settings.visible_apps.clone())
+        .unwrap_or_else(|_| default_visible_apps())
+}
+
+pub fn set_visible_apps(visible_apps: VisibleApps) -> Result<(), AppError> {
+    visible_apps.validate()?;
+
+    let mut settings = get_settings();
+    settings.visible_apps = visible_apps;
     update_settings(settings)
 }
 

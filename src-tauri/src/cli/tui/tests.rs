@@ -1,15 +1,59 @@
 use std::sync::mpsc;
+use std::{ffi::OsString, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
 use serde_json::json;
+use serial_test::serial;
+use tempfile::TempDir;
 
 use super::app::{App, LoadingKind, Overlay, ToastKind};
 use super::data::UiData;
 use super::form::ProviderAddField;
 use super::*;
 use crate::cli::i18n::texts;
+use crate::test_support::{
+    lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+};
 use crate::{AppError, AppType};
+
+struct EnvGuard {
+    _lock: TestHomeSettingsLock,
+    old_home: Option<OsString>,
+    old_userprofile: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set_home(home: &Path) -> Self {
+        let lock = lock_test_home_and_settings();
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        set_test_home_override(Some(home));
+        crate::settings::reload_test_settings();
+        Self {
+            _lock: lock,
+            old_home,
+            old_userprofile,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        set_test_home_override(self.old_home.as_deref().map(Path::new));
+        crate::settings::reload_test_settings();
+    }
+}
 
 #[test]
 fn mcp_import_uses_info_toast_kind() {
@@ -571,6 +615,31 @@ fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
         urls,
         vec!["https://generativelanguage.googleapis.com/v1beta/models".to_string()]
     );
+}
+
+#[test]
+#[serial(home_settings)]
+fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_loading_data() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: false,
+        opencode: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
+
+    let mut loaded_app_type = None;
+    let (app, _data) = initialize_app_state_for_test(Some(AppType::Gemini), |app_type| {
+        loaded_app_type = Some(app_type.clone());
+        Ok(UiData::default())
+    })
+    .expect("bootstrap app state");
+
+    assert_eq!(loaded_app_type, Some(AppType::OpenCode));
+    assert_eq!(app.app_type, AppType::OpenCode);
 }
 
 #[test]

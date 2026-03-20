@@ -83,6 +83,52 @@ pub(super) fn set_proxy_takeover(
     Ok(())
 }
 
+pub(super) fn set_visible_apps(
+    ctx: &mut RuntimeActionContext<'_>,
+    apps: crate::settings::VisibleApps,
+) -> Result<(), AppError> {
+    set_visible_apps_with(ctx, apps, UiData::load)
+}
+
+pub(super) fn set_visible_apps_with<F>(
+    ctx: &mut RuntimeActionContext<'_>,
+    apps: crate::settings::VisibleApps,
+    load_data: F,
+) -> Result<(), AppError>
+where
+    F: FnOnce(&AppType) -> Result<UiData, AppError>,
+{
+    if apps.ordered_enabled().is_empty() {
+        ctx.app.push_toast(
+            texts::tui_toast_visible_apps_zero_selection_warning(),
+            super::super::app::ToastKind::Warning,
+        );
+        return Ok(());
+    }
+
+    if apps.is_enabled_for(&ctx.app.app_type) {
+        crate::settings::set_visible_apps(apps)?;
+        ctx.app.push_toast(
+            texts::tui_toast_visible_apps_saved(),
+            super::super::app::ToastKind::Success,
+        );
+        return Ok(());
+    }
+
+    let next = crate::settings::next_visible_app(&apps, &ctx.app.app_type, 1).ok_or_else(|| {
+        AppError::InvalidInput("At least one app must remain visible".to_string())
+    })?;
+    let next_data = load_data(&next)?;
+
+    crate::settings::set_visible_apps(apps)?;
+    super::apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
+    ctx.app.push_toast(
+        texts::tui_toast_visible_apps_saved(),
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
 fn update_proxy_config(
     ctx: &mut RuntimeActionContext<'_>,
     mutate: impl FnOnce(&mut crate::proxy::ProxyConfig),

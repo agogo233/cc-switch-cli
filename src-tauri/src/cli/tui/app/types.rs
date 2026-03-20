@@ -181,6 +181,10 @@ pub enum Overlay {
         selected: usize,
         apps: crate::app_config::McpApps,
     },
+    VisibleAppsPicker {
+        selected: usize,
+        apps: crate::settings::VisibleApps,
+    },
     SkillsAppsPicker {
         directory: String,
         name: String,

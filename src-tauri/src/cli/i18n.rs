@@ -2376,6 +2376,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_visible_apps_label() -> &'static str {
+        if is_chinese() {
+            "可见应用"
+        } else {
+            "Visible Apps"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_title() -> &'static str {
+        if is_chinese() {
+            "选择可见应用"
+        } else {
+            "Choose Visible Apps"
+        }
+    }
+
     pub fn tui_settings_proxy_title() -> &'static str {
         if is_chinese() {
             "本地代理"
@@ -2469,6 +2485,22 @@ pub mod texts {
             "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
         } else {
             "The local proxy is running. Stop it before editing listen address or port."
+        }
+    }
+
+    pub fn tui_toast_visible_apps_zero_selection_warning() -> &'static str {
+        if is_chinese() {
+            "至少保留一个可见应用。"
+        } else {
+            "Keep at least one app visible."
+        }
+    }
+
+    pub fn tui_toast_visible_apps_saved() -> &'static str {
+        if is_chinese() {
+            "可见应用已保存。"
+        } else {
+            "Visible apps saved."
         }
     }
 

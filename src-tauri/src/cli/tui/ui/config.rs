@@ -55,6 +55,23 @@ pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> 
     }
 }
 
+pub(super) fn ordered_visible_app_types(apps: &crate::settings::VisibleApps) -> Vec<AppType> {
+    apps.ordered_enabled()
+}
+
+fn visible_apps_summary(apps: &crate::settings::VisibleApps) -> String {
+    let labels = ordered_visible_app_types(apps)
+        .into_iter()
+        .map(|app_type| app_type.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    if labels.is_empty() {
+        texts::none().to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
 pub(super) fn render_config(
     frame: &mut Frame<'_>,
     app: &App,
@@ -327,6 +344,7 @@ pub(super) fn render_settings(
     theme: &super::theme::Theme,
 ) {
     let language = crate::cli::i18n::current_language();
+    let visible_apps = crate::settings::get_visible_apps();
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
 
@@ -336,6 +354,10 @@ pub(super) fn render_settings(
             super::app::SettingsItem::Language => (
                 texts::tui_settings_header_language().to_string(),
                 language.display_name().to_string(),
+            ),
+            super::app::SettingsItem::VisibleApps => (
+                texts::tui_settings_visible_apps_label().to_string(),
+                visible_apps_summary(&visible_apps),
             ),
             super::app::SettingsItem::SkipClaudeOnboarding => (
                 texts::skip_claude_onboarding_label().to_string(),

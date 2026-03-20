@@ -359,6 +359,36 @@ pub(super) fn render_mcp_apps_picker_overlay(
         texts::tui_mcp_apps_title(name),
         selected,
         apps,
+        &[
+            crate::app_config::AppType::Claude,
+            crate::app_config::AppType::Codex,
+            crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::OpenCode,
+        ],
+    );
+}
+
+pub(super) fn render_visible_apps_picker_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    apps: &crate::settings::VisibleApps,
+) {
+    render_apps_picker_overlay(
+        frame,
+        content_area,
+        theme,
+        texts::tui_settings_visible_apps_title().to_string(),
+        selected,
+        apps,
+        &[
+            crate::app_config::AppType::Claude,
+            crate::app_config::AppType::Codex,
+            crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::OpenClaw,
+        ],
     );
 }
 
@@ -377,6 +407,12 @@ pub(super) fn render_skills_apps_picker_overlay(
         texts::tui_skill_apps_title(name),
         selected,
         apps,
+        &[
+            crate::app_config::AppType::Claude,
+            crate::app_config::AppType::Codex,
+            crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::OpenCode,
+        ],
     );
 }
 
@@ -550,6 +586,7 @@ fn render_apps_picker_overlay<A>(
     title: String,
     selected: usize,
     apps: &A,
+    app_types: &[crate::app_config::AppType],
 ) where
     A: AppToggleState,
 {
@@ -581,15 +618,8 @@ fn render_apps_picker_overlay<A>(
     );
 
     let body_area = inset_top(chunks[1], 1);
-    let items = [
-        crate::app_config::AppType::Claude,
-        crate::app_config::AppType::Codex,
-        crate::app_config::AppType::Gemini,
-        crate::app_config::AppType::OpenCode,
-    ]
-    .into_iter()
-    .map(|app_type| {
-        let marker = if apps.is_enabled_for(&app_type) {
+    let items = app_types.iter().map(|app_type| {
+        let marker = if apps.is_enabled_for(app_type) {
             texts::tui_marker_active()
         } else {
             texts::tui_marker_inactive()
@@ -606,7 +636,7 @@ fn render_apps_picker_overlay<A>(
         .highlight_symbol(highlight_symbol(theme));
 
     let mut state = ListState::default();
-    state.select(Some(selected));
+    state.select(Some(selected.min(app_types.len().saturating_sub(1))));
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
@@ -621,6 +651,12 @@ impl AppToggleState for crate::app_config::McpApps {
 }
 
 impl AppToggleState for crate::app_config::SkillApps {
+    fn is_enabled_for(&self, app_type: &crate::app_config::AppType) -> bool {
+        self.is_enabled_for(app_type)
+    }
+}
+
+impl AppToggleState for crate::settings::VisibleApps {
     fn is_enabled_for(&self, app_type: &crate::app_config::AppType) -> bool {
         self.is_enabled_for(app_type)
     }

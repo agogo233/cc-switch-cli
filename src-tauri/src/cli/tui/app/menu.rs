@@ -252,8 +252,16 @@ impl App {
                 self.filter.active = true;
                 return Action::None;
             }
-            KeyCode::Char('[') => return Action::SetAppType(cycle_app_type(&self.app_type, -1)),
-            KeyCode::Char(']') => return Action::SetAppType(cycle_app_type(&self.app_type, 1)),
+            KeyCode::Char('[') => {
+                return cycle_app_type(&self.app_type, -1)
+                    .map(Action::SetAppType)
+                    .unwrap_or(Action::None);
+            }
+            KeyCode::Char(']') => {
+                return cycle_app_type(&self.app_type, 1)
+                    .map(Action::SetAppType)
+                    .unwrap_or(Action::None);
+            }
             KeyCode::Left => {
                 self.focus = Focus::Nav;
                 return Action::None;

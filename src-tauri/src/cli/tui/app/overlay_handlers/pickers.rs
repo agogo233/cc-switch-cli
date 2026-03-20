@@ -21,6 +21,9 @@ impl App {
         if let Some(action) = self.handle_mcp_apps_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_visible_apps_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_skills_apps_picker_key(key, data) {
             return Some(action);
         }
@@ -412,6 +415,52 @@ impl App {
                     Action::None
                 } else {
                     Action::McpSetApps { id, apps: next }
+                }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_visible_apps_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::VisibleAppsPicker { selected, apps } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(4);
+                Action::None
+            }
+            KeyCode::Char('x') | KeyCode::Char(' ') => {
+                let app_type = app_type_for_picker_index(*selected);
+                let enabled = apps.is_enabled_for(&app_type);
+                apps.set_enabled_for(&app_type, !enabled);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let next = apps.clone();
+                if next.ordered_enabled().is_empty() {
+                    self.push_toast(
+                        texts::tui_toast_visible_apps_zero_selection_warning(),
+                        ToastKind::Warning,
+                    );
+                    return Some(Action::None);
+                }
+
+                let unchanged = crate::settings::get_visible_apps() == next;
+                self.overlay = Overlay::None;
+                if unchanged {
+                    Action::None
+                } else {
+                    Action::SetVisibleApps { apps: next }
                 }
             }
             _ => Action::None,
