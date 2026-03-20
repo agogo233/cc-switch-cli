@@ -5,8 +5,53 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use tempfile::TempDir;
 
     use crate::cli::i18n::texts;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -192,7 +237,10 @@ mod tests {
     }
 
     #[test]
+    #[serial(home_settings)]
     fn app_cycles_left_right() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
         let mut app = App::new(Some(AppType::Claude));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
@@ -205,7 +253,10 @@ mod tests {
     }
 
     #[test]
+    #[serial(home_settings)]
     fn app_cycles_through_opencode() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
         let mut app = App::new(Some(AppType::Gemini));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
@@ -219,7 +270,7 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
-            Action::SetAppType(AppType::Gemini)
+            Action::SetAppType(AppType::Codex)
         ));
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -230,6 +281,98 @@ mod tests {
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
             Action::SetAppType(AppType::OpenCode)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn app_cycle_skips_hidden_apps_from_settings() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: true,
+            openclaw: true,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::Claude));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(']')), &data()),
+            Action::SetAppType(AppType::OpenCode)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn app_cycle_noops_when_only_one_app_is_visible() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: false,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::Codex));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(']')), &data()),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('[')), &data()),
+            Action::None
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn app_cycle_backwards_skips_hidden_apps_and_wraps() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            openclaw: true,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::Claude));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('[')), &data()),
+            Action::SetAppType(AppType::OpenClaw)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn hidden_current_app_wraps_to_first_visible_replacement() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(']')), &data()),
+            Action::SetAppType(AppType::Claude)
         ));
     }
 

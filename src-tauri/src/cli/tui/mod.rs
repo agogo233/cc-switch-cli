@@ -49,6 +49,41 @@ use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
 pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
 
+fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
+    let requested = app_override.unwrap_or(AppType::Claude);
+    let visible_apps = crate::settings::get_visible_apps();
+
+    if visible_apps.is_enabled_for(&requested) {
+        return requested;
+    }
+
+    crate::settings::next_visible_app(&visible_apps, &requested, 1).unwrap_or(requested)
+}
+
+fn initialize_app_state_with<F>(
+    app_override: Option<AppType>,
+    load_data: F,
+) -> Result<(App, data::UiData), AppError>
+where
+    F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
+{
+    let app_type = resolve_initial_app_type(app_override);
+    let app = App::new(Some(app_type));
+    let data = load_data(&app.app_type)?;
+    Ok((app, data))
+}
+
+#[cfg(test)]
+fn initialize_app_state_for_test<F>(
+    app_override: Option<AppType>,
+    load_data: F,
+) -> Result<(App, data::UiData), AppError>
+where
+    F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
+{
+    initialize_app_state_with(app_override, load_data)
+}
+
 #[derive(Default)]
 struct ProxyOpenFlash {
     effect: Option<tachyonfx::Effect>,
@@ -94,8 +129,7 @@ impl ProxyOpenFlash {
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
-    let mut app = App::new(app_override);
-    let mut data = data::UiData::load(&app.app_type)?;
+    let (mut app, mut data) = initialize_app_state_with(app_override, data::UiData::load)?;
     let mut proxy_open_flash = ProxyOpenFlash::default();
     app.reset_proxy_activity(
         data.proxy.estimated_input_tokens_total,

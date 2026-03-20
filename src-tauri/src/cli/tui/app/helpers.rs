@@ -213,20 +213,13 @@ pub(crate) fn webdav_config_item_label(item: &WebDavConfigItem) -> &'static str 
     }
 }
 
-pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> AppType {
-    match (current, dir) {
-        (AppType::Claude, 1) => AppType::Codex,
-        (AppType::Codex, 1) => AppType::Gemini,
-        (AppType::Gemini, 1) => AppType::OpenCode,
-        (AppType::OpenCode, 1) => AppType::OpenClaw,
-        (AppType::OpenClaw, 1) => AppType::Claude,
-        (AppType::Claude, -1) => AppType::OpenClaw,
-        (AppType::Codex, -1) => AppType::Claude,
-        (AppType::Gemini, -1) => AppType::Codex,
-        (AppType::OpenCode, -1) => AppType::Gemini,
-        (AppType::OpenClaw, -1) => AppType::OpenCode,
-        (other, _) => other.clone(),
+pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> Option<AppType> {
+    let visible_apps = crate::settings::get_visible_apps();
+    if visible_apps.ordered_enabled().len() <= 1 {
+        return None;
     }
+
+    crate::settings::next_visible_app(&visible_apps, current, dir).filter(|next| next != current)
 }
 
 pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
