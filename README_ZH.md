@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.1.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -26,16 +26,16 @@
 
 ---
 
-## 🆕 5.1.0 更新内容
+## 🆕 5.1.1 更新内容
 
 <div align="center">
-  <h3><strong>🦞 现已支持 OpenClaw（小龙虾）</strong></h3>
+  <h3><strong>可见应用控制与 TUI 细节打磨</strong></h3>
 </div>
 
-- OpenClaw 现已支持一等公民级别的供应商管理，包括对齐上游的 `openclaw.json` 读写、默认模型流程、提示词支持，以及 `Env`、`Tools`、`Agents Defaults` 与健康告警的专属 TUI 入口。
-- 供应商与通用配置片段的同步行为进一步向上游靠拢，尤其是 additive live-config 应用。
-- WebDAV 现在会拒绝误报的同步成功结果，不再把失败操作显示成“成功”。
-- TUI 在 SSH、ansi256 和 `TERM=*-256color` 场景下更稳定，JSON 编辑后的供应商新增/保存流程也恢复正常。
+- TUI 设置中新增了“可见应用”选择器，可以自行决定哪些应用显示在界面里。
+- 可见应用设置现在会持久化保存，重启后不会再恢复默认状态。
+- 隐藏的应用现在会在启动、顶部标签和键盘切换过程中被一致地处理。
+- 终端体验也更稳定了，包括更均衡的顶部标签布局、`xterm-256color` 下更准确的真彩显示，以及与上游一致的 OpenClaw 移除行为。
 
 ---
 

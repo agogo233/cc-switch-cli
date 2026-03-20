@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.1.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -11,7 +11,7 @@
 
 Unified management for Claude Code, Codex, Gemini, OpenCode, and OpenClaw provider configurations, plus app-specific support for MCP servers, skills, prompts, local proxy routes, and environment checks.
 
-[English](README.md) | [中文](README_ZH.md)
+[English](README.md) | [Chinese](README_ZH.md)
 
 </div>
 
@@ -28,16 +28,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 🆕 What's New in 5.1.0
+## 🆕 What's New in 5.1.1
 
 <div align="center">
-  <h3><strong>🦞 OpenClaw (小龙虾) is now supported in CC-Switch CLI</strong></h3>
+  <h3><strong>Visible app controls and TUI polish</strong></h3>
 </div>
 
-- OpenClaw now has first-class provider support with upstream-aligned `openclaw.json` handling, default model flows, prompt support, and dedicated TUI entries for `Env`, `Tools`, `Agents Defaults`, and config health warnings.
-- Provider and common-snippet syncing now stay closer to upstream behavior, especially for additive live-config apps.
-- WebDAV now rejects false-positive sync success results instead of reporting a misleading success.
-- TUI compatibility is better in SSH, ansi256, and `TERM=*-256color` sessions, and provider add/save works again after JSON edits.
+- Added a visible apps picker in TUI settings, so you can choose which apps appear in the interface.
+- Your visible app choices now persist between sessions instead of resetting on restart.
+- Hidden apps are now handled consistently during startup, in the header tabs, and while switching with the keyboard.
+- Terminal behavior is more polished overall, with better header tab balance, truecolor handling on `xterm-256color`, and OpenClaw removal aligned with upstream behavior.
 
 ---
 

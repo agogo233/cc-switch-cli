@@ -7,6 +7,37 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.1] - 2026-03-20
+
+### Added
+
+- **TUI Settings**: Add a visible apps picker so you can choose which apps appear in the interactive interface, and persist those choices across restarts.
+
+### Changed
+
+- **TUI Navigation**: Apply visible app settings consistently during startup, in the header tabs, and while switching or cycling between apps.
+
+### Fixed
+
+- **Terminal / Header**: Rebalance header tab spacing and keep truecolor rendering in `xterm-256color` terminals, including Termius-style sessions.
+- **OpenClaw**: Align provider removal behavior more closely with upstream handling.
+
+### Commits (since v5.1.0)
+
+- b1311cd Merge branch 'feat/tui-app-visibility-settings'
+- 5f3beab feat(tui): apply visible app settings across header and switching
+- 8db0dff fix(openclaw): align provider removal with upstream
+- 16e8a41 feat(tui): add visible apps picker in settings
+- 565aaa7 feat(tui): honor visible apps in startup and key cycling
+- 6bf3912 feat(tui): persist visible app settings
+- 7d0c51f Merge branch 'fix-termius-truecolor-detection'
+- 0b0f14f fix(tui): keep truecolor for xterm-256color terminals
+- acc8066 fix(tui): rebalance header tab layout
+
+### Thanks
+
+- Thanks `@saladday` for tightening the visible-app flow across the TUI, polishing terminal rendering, and keeping OpenClaw behavior aligned with upstream.
+
 ## [5.1.0] - 2026-03-20
 
 ### Added
