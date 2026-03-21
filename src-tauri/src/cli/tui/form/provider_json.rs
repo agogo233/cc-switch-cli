@@ -35,7 +35,7 @@ impl ProviderAddFormState {
         }
         if let Some(meta_obj) = meta_value.as_object_mut() {
             meta_obj.insert(
-                "applyCommonConfig".to_string(),
+                "commonConfigEnabled".to_string(),
                 json!(if matches!(self.app_type, AppType::OpenClaw) {
                     false
                 } else {
