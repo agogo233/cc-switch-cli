@@ -1283,6 +1283,11 @@ fn render_openclaw_workspace(
         data.config.openclaw_workspace.directory_path.display()
     )];
     workspace_lines.push(String::new());
+    let max_filename_len = crate::commands::workspace::ALLOWED_FILES
+        .iter()
+        .map(|f| f.len())
+        .max()
+        .unwrap_or(0);
     for (index, filename) in crate::commands::workspace::ALLOWED_FILES.iter().enumerate() {
         let exists = data
             .config
@@ -1292,13 +1297,15 @@ fn render_openclaw_workspace(
             .copied()
             .unwrap_or(false);
         workspace_lines.push(format!(
-            "{}{filename}  {}",
+            "{}{:<width$}  {}",
             selected_workspace(index),
+            filename,
             if exists {
                 texts::tui_openclaw_workspace_status_exists()
             } else {
                 texts::tui_openclaw_workspace_status_missing()
-            }
+            },
+            width = max_filename_len,
         ));
     }
 
