@@ -170,7 +170,7 @@ pub fn tui_mcp_env_editor_hint() -> &'static str {
     if is_chinese() {
         "按 Enter 管理环境变量"
     } else {
-        "Press Enter to manage env vars"
+        "Press Enter to manage env entries"
     }
 }
 

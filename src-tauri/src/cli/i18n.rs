@@ -1568,7 +1568,7 @@ pub mod texts {
         if is_chinese() {
             "按 Enter 管理环境变量"
         } else {
-            "Press Enter to manage env vars"
+            "Press Enter to manage env entries"
         }
     }
 

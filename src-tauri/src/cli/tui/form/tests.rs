@@ -822,31 +822,8 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
 }
 
 #[test]
-fn mcp_env_form_exposes_env_field_and_summary() {
+fn mcp_env_form_summary_uses_none_one_and_many_copy() {
     let mut form = McpAddFormState::new();
-    let fields = form.fields();
-    assert!(
-        fields.contains(&McpAddField::Env),
-        "MCP form fields should expose Env section"
-    );
-    let args_idx = fields
-        .iter()
-        .position(|field| *field == McpAddField::Args)
-        .expect("MCP Args field should exist");
-    let env_idx = fields
-        .iter()
-        .position(|field| *field == McpAddField::Env)
-        .expect("MCP Env field should exist");
-    let app_claude_idx = fields
-        .iter()
-        .position(|field| *field == McpAddField::AppClaude)
-        .expect("MCP AppClaude field should exist");
-    assert!(
-        args_idx < env_idx && env_idx < app_claude_idx,
-        "MCP Env field should appear between Args and AppClaude"
-    );
-    assert!(form.input(McpAddField::Env).is_none());
-    assert!(form.input_mut(McpAddField::Env).is_none());
     assert_eq!(form.env_summary(), crate::cli::i18n::texts::none());
 
     form.env_rows.push(McpEnvVarRow {
@@ -866,6 +843,35 @@ fn mcp_env_form_exposes_env_field_and_summary() {
         form.env_summary(),
         crate::cli::i18n::texts::tui_mcp_env_entry_count(2)
     );
+}
+
+#[test]
+fn mcp_env_form_places_env_between_args_and_apps() {
+    let form = McpAddFormState::new();
+    let fields = form.fields();
+    assert!(
+        fields.contains(&McpAddField::Env),
+        "MCP form fields should expose Env section"
+    );
+
+    let args_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Args)
+        .expect("MCP Args field should exist");
+    let env_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Env)
+        .expect("MCP Env field should exist");
+    let app_claude_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::AppClaude)
+        .expect("MCP AppClaude field should exist");
+
+    assert!(
+        args_idx < env_idx && env_idx < app_claude_idx,
+        "MCP Env field should appear between Args and AppClaude"
+    );
+    assert!(form.input(McpAddField::Env).is_none());
 }
 
 #[test]
