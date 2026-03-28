@@ -522,6 +522,14 @@ pub fn tui_key_launch_temp() -> &'static str {
     }
 }
 
+pub fn tui_temp_launch_failed(message: &str) -> String {
+    if is_chinese() {
+        format!("临时启动失败: {message}")
+    } else {
+        format!("Temporary launch failed: {message}")
+    }
+}
+
 pub fn tui_stream_check_status_operational() -> &'static str {
     if is_chinese() {
         "正常"

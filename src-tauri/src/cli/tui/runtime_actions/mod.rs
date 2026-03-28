@@ -12,6 +12,7 @@ use super::runtime_systems::{
 };
 use super::terminal::TuiTerminal;
 
+mod claude_temp_launch;
 mod config;
 mod editor;
 mod helpers;
@@ -212,8 +213,7 @@ pub(crate) fn handle_action(
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),
-        // Temporary wiring for Task 1; Task 3 will add the real runtime handler.
-        Action::ProviderLaunchTemporary { .. } => Ok(()),
+        Action::ProviderLaunchTemporary { id } => claude_temp_launch::launch(&mut ctx, id),
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),
         Action::ProviderModelFetch {
             base_url,

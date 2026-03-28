@@ -4073,6 +4073,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_temp_launch_failed(message: &str) -> String {
+        if is_chinese() {
+            format!("临时启动失败: {}", message)
+        } else {
+            format!("Temporary launch failed: {}", message)
+        }
+    }
+
     pub fn tui_confirm_delete_provider_title() -> &'static str {
         if is_chinese() {
             "删除供应商"
