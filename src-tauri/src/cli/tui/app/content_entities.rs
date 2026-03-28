@@ -442,4 +442,19 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('o')), &data);
         assert!(matches!(action, Action::None));
     }
+
+    #[test]
+    fn non_claude_provider_detail_o_key_is_noop() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(action, Action::None));
+    }
 }
