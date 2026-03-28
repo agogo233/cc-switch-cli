@@ -145,6 +145,31 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
     Handoff: FnOnce(&mut TuiTerminal, &PreparedClaudeLaunch) -> Result<(), AppError>,
 {
+    try_launch_with_platform_check(
+        ctx,
+        id,
+        temp_dir,
+        ensure_temp_launch_supported,
+        resolve_claude_binary,
+        handoff,
+    )
+}
+
+fn try_launch_with_platform_check<Support, Resolve, Handoff>(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: &str,
+    temp_dir: &Path,
+    ensure_supported: Support,
+    resolve_claude_binary: Resolve,
+    handoff: Handoff,
+) -> Result<(), AppError>
+where
+    Support: FnOnce() -> Result<(), AppError>,
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+    Handoff: FnOnce(&mut TuiTerminal, &PreparedClaudeLaunch) -> Result<(), AppError>,
+{
+    ensure_supported()?;
+
     let provider = ctx
         .data
         .providers
@@ -173,6 +198,21 @@ where
             format!("Failed to launch Claude: {err}; also failed to remove the temporary settings file: {cleanup_err}"),
         )),
     }
+}
+
+#[cfg(unix)]
+fn ensure_temp_launch_supported() -> Result<(), AppError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_temp_launch_supported() -> Result<(), AppError> {
+    Err(AppError::localized(
+        "claude.temp_launch_unsupported_platform",
+        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
+        "Temporary Claude launch in the current terminal is not supported on this platform."
+            .to_string(),
+    ))
 }
 
 fn write_temp_settings_file(
@@ -500,6 +540,58 @@ mod tests {
         assert!(
             fixture.app.toast.is_none(),
             "ignored non-Claude dispatch should stay silent"
+        );
+    }
+
+    #[test]
+    fn unsupported_platform_fails_before_writing_temp_settings_file() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let mut fixture = LaunchFixture::new(
+            AppType::Claude,
+            "current",
+            vec![provider_row(
+                "candidate",
+                json!({
+                    "ANTHROPIC_AUTH_TOKEN": "sk-candidate"
+                }),
+            )],
+        );
+        let resolve_called = Cell::new(false);
+
+        let err = try_launch_with_platform_check(
+            &mut fixture.ctx(),
+            "candidate",
+            temp_dir.path(),
+            || {
+                Err(AppError::localized(
+                    "claude.temp_launch_unsupported_platform",
+                    "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
+                    "Temporary Claude launch in the current terminal is not supported on this platform."
+                        .to_string(),
+                ))
+            },
+            || {
+                resolve_called.set(true);
+                Ok(PathBuf::from("/usr/bin/claude"))
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("unsupported platforms should fail before preparing temp settings");
+
+        assert!(
+            err.to_string().contains("not supported"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !resolve_called.get(),
+            "unsupported platforms should fail before resolving the Claude binary"
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read temp dir")
+                .next()
+                .is_none(),
+            "unsupported platforms should not create a temp settings file"
         );
     }
 }
