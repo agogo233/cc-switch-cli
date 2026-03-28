@@ -80,6 +80,9 @@ pub(super) fn render_providers(
                 ("d", texts::tui_key_delete()),
                 ("t", texts::tui_key_speedtest()),
             ]);
+            if matches!(app.app_type, crate::app_config::AppType::Claude) {
+                keys.push(("o", texts::tui_key_launch_temp()));
+            }
             keys.push(("c", texts::tui_key_stream_check()));
         }
         render_key_bar_center(frame, chunks[0], theme, &keys);
@@ -187,6 +190,9 @@ pub(super) fn render_provider_detail(
         if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
             keys.push(("x", texts::tui_key_set_default()));
         } else if !matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
+            if matches!(app.app_type, crate::app_config::AppType::Claude) {
+                keys.push(("o", texts::tui_key_launch_temp()));
+            }
             keys.push(("c", texts::tui_key_stream_check()));
         }
         render_key_bar_center(frame, chunks[0], theme, &keys);
@@ -297,4 +303,55 @@ pub(super) fn render_provider_detail(
             .wrap(Wrap { trim: false }),
         inset_left(chunks[1], CONTENT_INSET_LEFT),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_config::AppType;
+    use ratatui::buffer::Buffer;
+
+    fn all_text(buf: &Buffer) -> String {
+        let mut all = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                all.push_str(buf[(x, y)].symbol());
+            }
+            all.push('\n');
+        }
+        all
+    }
+
+    #[test]
+    fn claude_provider_list_key_bar_shows_launch_temp_hint() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(
+            all.contains(&format!("o {}", texts::tui_key_launch_temp())),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn codex_provider_list_key_bar_hides_launch_temp_hint() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(!all.contains(texts::tui_key_launch_temp()), "{all}");
+    }
 }
