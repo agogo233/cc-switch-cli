@@ -10,6 +10,7 @@ pub enum ProviderType {
     Claude,
     ClaudeAuth,
     OpenRouter,
+    GitHubCopilot,
 }
 
 pub struct ClaudeAdapter;
@@ -61,6 +62,9 @@ impl ClaudeAdapter {
     }
 
     pub fn provider_type(&self, provider: &Provider) -> ProviderType {
+        if self.is_github_copilot(provider) {
+            return ProviderType::GitHubCopilot;
+        }
         if self.is_openrouter(provider) {
             return ProviderType::OpenRouter;
         }
@@ -73,6 +77,18 @@ impl ClaudeAdapter {
     fn is_openrouter(&self, provider: &Provider) -> bool {
         self.extract_base_url(provider)
             .map(|base_url| base_url.contains("openrouter.ai"))
+            .unwrap_or(false)
+    }
+
+    fn is_github_copilot(&self, provider: &Provider) -> bool {
+        if let Some(meta) = provider.meta.as_ref() {
+            if meta.provider_type.as_deref() == Some("github_copilot") {
+                return true;
+            }
+        }
+
+        self.extract_base_url(provider)
+            .map(|base_url| base_url.contains("githubcopilot.com"))
             .unwrap_or(false)
     }
 
@@ -192,7 +208,16 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
-        let strategy = match self.provider_type(provider) {
+        let provider_type = self.provider_type(provider);
+
+        if provider_type == ProviderType::GitHubCopilot {
+            return Some(AuthInfo::new(
+                "copilot_placeholder".to_string(),
+                AuthStrategy::GitHubCopilot,
+            ));
+        }
+
+        let strategy = match provider_type {
             ProviderType::OpenRouter => AuthStrategy::Bearer,
             ProviderType::ClaudeAuth => AuthStrategy::ClaudeAuth,
             _ => AuthStrategy::Anthropic,
@@ -230,6 +255,11 @@ impl ProviderAdapter for ClaudeAdapter {
             AuthStrategy::ClaudeAuth => {
                 request.header("Authorization", format!("Bearer {}", auth.api_key))
             }
+            AuthStrategy::GitHubCopilot => request
+                .header("Authorization", format!("Bearer {}", auth.api_key))
+                .header("Editor-Version", "vscode/1.85.0")
+                .header("Editor-Plugin-Version", "copilot/1.150.0")
+                .header("Copilot-Integration-Id", "vscode-chat"),
             AuthStrategy::Bearer | AuthStrategy::Google | AuthStrategy::GoogleOAuth => {
                 request.header("Authorization", format!("Bearer {}", auth.api_key))
             }
@@ -237,6 +267,10 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn needs_transform(&self, provider: &Provider) -> bool {
+        if self.is_github_copilot(provider) {
+            return true;
+        }
+
         matches!(
             self.get_api_format(provider),
             "openai_chat" | "openai_responses"
@@ -296,4 +330,40 @@ fn openai_error_to_anthropic(body: serde_json::Value) -> serde_json::Value {
             "message": message
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::Provider;
+    use serde_json::json;
+
+    #[test]
+    fn provider_meta_provider_type_github_copilot_uses_upstream_runtime_behavior() {
+        let adapter = ClaudeAdapter::new();
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "copilot-meta",
+            "name": "Copilot Meta",
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://relay.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token-1"
+                }
+            },
+            "meta": {
+                "providerType": "github_copilot"
+            }
+        }))
+        .expect("provider should deserialize");
+
+        assert_eq!(
+            format!("{:?}", adapter.provider_type(&provider)),
+            "GitHubCopilot"
+        );
+        let auth = adapter
+            .extract_auth(&provider)
+            .expect("github copilot should resolve auth");
+        assert_eq!(format!("{:?}", auth.strategy), "GitHubCopilot");
+        assert!(adapter.needs_transform(&provider));
+    }
 }

@@ -192,6 +192,7 @@ impl ProviderService {
 
     pub(super) fn migrate_codex_common_config_snippet(
         config: &mut MultiAppConfig,
+        strict_current_provider_id: Option<&str>,
         old_snippet: &str,
     ) -> Result<(), AppError> {
         let old_snippet = old_snippet.trim();
@@ -199,12 +200,13 @@ impl ProviderService {
             return Ok(());
         }
 
-        let Some(current_provider_id) = config.get_manager(&AppType::Codex).and_then(|manager| {
-            if manager.current.is_empty() || !manager.providers.contains_key(&manager.current) {
-                None
-            } else {
-                Some(manager.current.clone())
-            }
+        let Some(current_provider_id) = strict_current_provider_id.and_then(|provider_id| {
+            config.get_manager(&AppType::Codex).and_then(|manager| {
+                manager
+                    .providers
+                    .contains_key(provider_id)
+                    .then(|| provider_id.to_string())
+            })
         }) else {
             let Some(manager) = config.get_manager_mut(&AppType::Codex) else {
                 return Ok(());

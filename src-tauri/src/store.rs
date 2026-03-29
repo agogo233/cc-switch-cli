@@ -105,6 +105,15 @@ impl AppState {
         persist_multi_app_config_to_db(&self.db, &config)
     }
 
+    /// 将内存中的 config 快照持久化到 SQLite，但保留指定应用当前供应商的 DB 选择。
+    pub fn save_preserving_current_providers(
+        &self,
+        app_types: &[crate::app_config::AppType],
+    ) -> Result<(), AppError> {
+        let config = self.config.read().map_err(AppError::from)?;
+        persist_multi_app_config_to_db_preserving_current_providers(&self.db, &config, app_types)
+    }
+
     fn from_parts(db: Arc<Database>, config: MultiAppConfig) -> Result<Self, AppError> {
         let proxy_service = ProxyService::new(db.clone());
 
@@ -158,7 +167,20 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
 }
 
 fn persist_multi_app_config_to_db(db: &Database, config: &MultiAppConfig) -> Result<(), AppError> {
+    persist_multi_app_config_to_db_preserving_current_providers(db, config, &[])
+}
+
+fn persist_multi_app_config_to_db_preserving_current_providers(
+    db: &Database,
+    config: &MultiAppConfig,
+    app_types: &[crate::app_config::AppType],
+) -> Result<(), AppError> {
     use crate::app_config::AppType;
+
+    let preserved_current_apps = app_types
+        .iter()
+        .map(crate::app_config::AppType::as_str)
+        .collect::<std::collections::HashSet<_>>();
 
     for app in [
         AppType::Claude,
@@ -186,7 +208,7 @@ fn persist_multi_app_config_to_db(db: &Database, config: &MultiAppConfig) -> Res
                 db.save_provider(app_key, provider)?;
             }
 
-            if !m.current.trim().is_empty() {
+            if !preserved_current_apps.contains(app_key) && !m.current.trim().is_empty() {
                 db.set_current_provider(app_key, &m.current)?;
             }
         }

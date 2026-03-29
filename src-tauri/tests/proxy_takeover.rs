@@ -31,6 +31,19 @@ fn seed_claude_live(value: &Value) {
     .expect("write claude live config");
 }
 
+fn claude_token(value: &Value) -> Option<&str> {
+    value.get("env").and_then(|env| {
+        [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+        ]
+        .into_iter()
+        .find_map(|key| env.get(key).and_then(Value::as_str))
+    })
+}
+
 fn seed_codex_live(auth: &Value, config_text: &str) {
     if let Some(parent) = get_codex_config_path().parent() {
         std::fs::create_dir_all(parent).expect("create codex live dir");
@@ -352,6 +365,71 @@ async fn app_state_try_new_recovers_stale_takeover_from_backup() {
 
 #[tokio::test]
 #[serial]
+async fn disabling_claude_takeover_without_backup_restores_synced_live_token() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let db = Arc::new(Database::init().expect("create database"));
+    let provider = Provider::with_id(
+        "claude-provider".to_string(),
+        "Claude Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "stale-provider-token"
+            }
+        }),
+        Some("claude".to_string()),
+    );
+    db.save_provider("claude", &provider)
+        .expect("save claude provider");
+    db.set_current_provider("claude", &provider.id)
+        .expect("set current claude provider");
+
+    seed_claude_live(&json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+        }
+    }));
+
+    let service = ProxyService::new(db.clone());
+    let mut config = service.get_config().await.expect("read proxy config");
+    config.listen_port = find_free_port();
+    service
+        .update_config(&config)
+        .await
+        .expect("update proxy config");
+
+    service
+        .set_takeover_for_app("claude", true)
+        .await
+        .expect("enable claude takeover");
+
+    db.delete_live_backup("claude")
+        .await
+        .expect("delete claude backup to force provider restore fallback");
+
+    service
+        .set_takeover_for_app("claude", false)
+        .await
+        .expect("disable claude takeover");
+
+    let restored: Value =
+        read_json_file(&get_claude_settings_path()).expect("read restored claude live config");
+    assert_eq!(
+        claude_token(&restored),
+        Some("fresh-live-token"),
+        "fallback restore should use the live Claude token captured when takeover started, not the stale provider token"
+    );
+    assert_ne!(
+        claude_token(&restored),
+        Some("stale-provider-token"),
+        "fallback restore must not regress to the stale provider credential when the backup is missing"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn startup_recovery_guard_ignores_stale_external_session_marker() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -620,7 +698,7 @@ async fn app_state_try_new_restores_claude_from_current_provider_with_common_sni
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn stopping_managed_proxy_session_restores_current_app_takeover_state() {
+async fn disabling_managed_proxy_session_restores_current_app_takeover_state() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -667,9 +745,9 @@ async fn stopping_managed_proxy_session_restores_current_app_takeover_state() {
 
     state
         .proxy_service
-        .stop()
+        .set_managed_session_for_app("claude", false)
         .await
-        .expect("stop managed proxy session");
+        .expect("disable managed proxy session");
 
     let restored: Value =
         read_json_file(&get_claude_settings_path()).expect("read restored claude live config");
@@ -694,6 +772,136 @@ async fn stopping_managed_proxy_session_restores_current_app_takeover_state() {
             .expect("read claude live backup after managed stop")
             .is_none(),
         "stopping the managed proxy should clear the saved live backup"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let original_live = json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "live-key"
+        },
+        "workspace": {
+            "path": "/tmp/workspace"
+        }
+    });
+    seed_claude_live(&original_live);
+
+    let state = AppState::try_new().expect("create app state");
+    let mut config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("read proxy config");
+    config.listen_port = find_free_port();
+    state
+        .proxy_service
+        .update_config(&config)
+        .await
+        .expect("persist proxy config");
+
+    state
+        .proxy_service
+        .start_managed_session("claude")
+        .await
+        .expect("start managed proxy session");
+    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&state));
+
+    let managed_proxy_url = format!("http://127.0.0.1:{}", config.listen_port);
+    let taken_over: Value =
+        read_json_file(&get_claude_settings_path()).expect("read taken over claude live config");
+    assert_eq!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(managed_proxy_url.as_str()),
+        "managed startup should route Claude through the proxy URL"
+    );
+    assert_eq!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "managed startup should place Claude in proxy takeover mode"
+    );
+
+    let runtime_session_raw = state
+        .db
+        .get_setting("proxy_runtime_session")
+        .expect("read runtime session marker")
+        .expect("runtime session marker should exist");
+    let mut runtime_session: Value =
+        serde_json::from_str(&runtime_session_raw).expect("parse runtime session marker");
+    let original_port = runtime_session
+        .get("port")
+        .and_then(Value::as_u64)
+        .expect("runtime session marker port") as u16;
+    let mut unreachable_port = find_free_port();
+    while unreachable_port == original_port {
+        unreachable_port = find_free_port();
+    }
+    runtime_session["port"] = json!(unreachable_port);
+    state
+        .db
+        .set_setting("proxy_runtime_session", &runtime_session.to_string())
+        .expect("tamper runtime session marker port");
+
+    drop(state);
+
+    let recovered =
+        AppState::try_new_with_startup_recovery().expect("recreate app state after restart");
+
+    let live_after_restart: Value =
+        read_json_file(&get_claude_settings_path()).expect("read claude live config after restart");
+    assert_eq!(
+        live_after_restart
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(managed_proxy_url.as_str()),
+        "startup recovery must be skipped while owned managed runtime is still alive"
+    );
+    assert_eq!(
+        live_after_restart
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "startup recovery must not restore live config while managed runtime still exists"
+    );
+    assert!(
+        recovered
+            .db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read claude proxy config after restart")
+            .enabled,
+        "startup recovery must not clear enabled takeover state for active managed runtime"
+    );
+    assert!(
+        recovered
+            .db
+            .get_live_backup("claude")
+            .await
+            .expect("read claude live backup after restart")
+            .is_some(),
+        "startup recovery must not clear Claude backup while managed runtime still exists"
+    );
+    let runtime_after_restart = recovered
+        .db
+        .get_setting("proxy_runtime_session")
+        .expect("read runtime session marker after restart");
+    assert!(
+        runtime_after_restart.is_some(),
+        "startup recovery must not clear runtime marker for owned managed runtime"
     );
 }
 
@@ -948,8 +1156,8 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_removes_stal
         "startup recovery should restore the current Codex provider config"
     );
     assert!(
-        !restored_config.contains("disable_response_storage = true"),
-        "startup recovery should not auto-merge the Codex common snippet for a clean current-provider restore"
+        restored_config.contains("disable_response_storage = true"),
+        "startup recovery should reapply the Codex common snippet when restoring from the current provider"
     );
     assert!(
         !restored_config.contains("127.0.0.1"),

@@ -25,7 +25,7 @@ use crate::config::{
     write_json_file,
 };
 use crate::error::AppError;
-use crate::provider::{Provider, ProviderManager};
+use crate::provider::Provider;
 use crate::store::AppState;
 
 use gemini_auth::GeminiAuthType;
@@ -160,6 +160,61 @@ impl ProviderService {
         Ok(result)
     }
 
+    fn run_transaction_preserving_current_providers<R, F>(
+        state: &AppState,
+        preserved_current_apps: &[AppType],
+        f: F,
+    ) -> Result<R, AppError>
+    where
+        F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
+    {
+        let mut guard = state.config.write().map_err(AppError::from)?;
+        let original = guard.clone();
+        let (result, action) = match f(&mut guard) {
+            Ok(value) => value,
+            Err(err) => {
+                *guard = original;
+                return Err(err);
+            }
+        };
+        drop(guard);
+
+        if let Err(save_err) = state.save_preserving_current_providers(preserved_current_apps) {
+            if let Err(rollback_err) = Self::restore_config_only_preserving_current_providers(
+                state,
+                original.clone(),
+                preserved_current_apps,
+            ) {
+                return Err(AppError::localized(
+                    "config.save.rollback_failed",
+                    format!("保存配置失败: {save_err}；回滚失败: {rollback_err}"),
+                    format!("Failed to save config: {save_err}; rollback failed: {rollback_err}"),
+                ));
+            }
+            return Err(save_err);
+        }
+
+        if let Some(action) = action {
+            if let Err(err) = Self::apply_post_commit(state, &action) {
+                if let Err(rollback_err) = Self::rollback_after_failure_preserving_current_providers(
+                    state,
+                    original.clone(),
+                    preserved_current_apps,
+                    action.backup.clone(),
+                ) {
+                    return Err(AppError::localized(
+                        "post_commit.rollback_failed",
+                        format!("后置操作失败: {err}；回滚失败: {rollback_err}"),
+                        format!("Post-commit step failed: {err}; rollback failed: {rollback_err}"),
+                    ));
+                }
+                return Err(err);
+            }
+        }
+
+        Ok(result)
+    }
+
     fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
         {
             let mut guard = state.config.write().map_err(AppError::from)?;
@@ -168,12 +223,38 @@ impl ProviderService {
         state.save()
     }
 
+    fn restore_config_only_preserving_current_providers(
+        state: &AppState,
+        snapshot: MultiAppConfig,
+        preserved_current_apps: &[AppType],
+    ) -> Result<(), AppError> {
+        {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            *guard = snapshot;
+        }
+        state.save_preserving_current_providers(preserved_current_apps)
+    }
+
     fn rollback_after_failure(
         state: &AppState,
         snapshot: MultiAppConfig,
         backup: LiveSnapshot,
     ) -> Result<(), AppError> {
         Self::restore_config_only(state, snapshot)?;
+        backup.restore()
+    }
+
+    fn rollback_after_failure_preserving_current_providers(
+        state: &AppState,
+        snapshot: MultiAppConfig,
+        preserved_current_apps: &[AppType],
+        backup: LiveSnapshot,
+    ) -> Result<(), AppError> {
+        Self::restore_config_only_preserving_current_providers(
+            state,
+            snapshot,
+            preserved_current_apps,
+        )?;
         backup.restore()
     }
 
@@ -501,6 +582,7 @@ impl ProviderService {
     fn migrate_old_common_config_snippet_best_effort(
         config: &mut MultiAppConfig,
         app_type: &AppType,
+        strict_current_provider_id: Option<&str>,
         old_snippet: Option<&str>,
     ) -> Result<(), AppError> {
         let Some(old_snippet) = old_snippet.map(str::trim) else {
@@ -512,8 +594,16 @@ impl ProviderService {
 
         let result = match app_type {
             AppType::Claude => Self::migrate_claude_common_config_snippet(config, old_snippet),
-            AppType::Codex => Self::migrate_codex_common_config_snippet(config, old_snippet),
-            AppType::Gemini => Self::migrate_gemini_common_config_snippet(config, old_snippet),
+            AppType::Codex => Self::migrate_codex_common_config_snippet(
+                config,
+                strict_current_provider_id,
+                old_snippet,
+            ),
+            AppType::Gemini => Self::migrate_gemini_common_config_snippet(
+                config,
+                strict_current_provider_id,
+                old_snippet,
+            ),
             AppType::OpenCode | AppType::OpenClaw => Ok(()),
         };
 
@@ -530,17 +620,16 @@ impl ProviderService {
     }
 
     fn build_common_config_post_commit_action(
-        config: &mut MultiAppConfig,
+        config: &MultiAppConfig,
         app_type: &AppType,
+        current_provider_id: Option<&str>,
         takeover_active: bool,
     ) -> Result<Option<PostCommitAction>, AppError> {
         if app_type.is_additive_mode() {
             return Ok(None);
         }
 
-        let Some(current_provider_id) =
-            Self::self_heal_current_provider(config, app_type, "set_common_config_snippet")
-        else {
+        let Some(current_provider_id) = current_provider_id else {
             return Ok(None);
         };
 
@@ -680,14 +769,16 @@ impl ProviderService {
     fn normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
         config: &mut MultiAppConfig,
         app_type: &AppType,
+        strict_current_provider_id: Option<&str>,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        let Some(current_provider_id) = config.get_manager(app_type).and_then(|manager| {
-            if manager.current.is_empty() || !manager.providers.contains_key(&manager.current) {
-                None
-            } else {
-                Some(manager.current.clone())
-            }
+        let Some(current_provider_id) = strict_current_provider_id.and_then(|provider_id| {
+            config.get_manager(app_type).and_then(|manager| {
+                manager
+                    .providers
+                    .contains_key(provider_id)
+                    .then(|| provider_id.to_string())
+            })
         }) else {
             return Self::normalize_existing_provider_snapshots_for_storage(
                 config,
@@ -725,47 +816,23 @@ impl ProviderService {
         Ok(())
     }
 
-    fn self_heal_current_provider(
+    fn hydrate_missing_provider_snapshots_from_db(
         config: &mut MultiAppConfig,
         app_type: &AppType,
-        log_context: &str,
-    ) -> Option<String> {
-        let manager = config.get_manager_mut(app_type)?;
+        db_providers: &IndexMap<String, Provider>,
+    ) -> Result<(), AppError> {
+        let manager = config
+            .get_manager_mut(app_type)
+            .ok_or_else(|| Self::app_not_found(app_type))?;
 
-        if manager.providers.is_empty() {
-            manager.current.clear();
-            return None;
+        for (provider_id, provider) in db_providers {
+            manager
+                .providers
+                .entry(provider_id.clone())
+                .or_insert_with(|| provider.clone());
         }
 
-        if manager.current.is_empty() || !manager.providers.contains_key(&manager.current) {
-            let previous_current = manager.current.clone();
-            manager.current = Self::fallback_current_provider_id(manager);
-            if manager.current.is_empty() {
-                return None;
-            }
-            log::warn!(
-                "{log_context}: {app_type} current provider '{}' is invalid, self-healed to '{}'",
-                previous_current,
-                manager.current
-            );
-        }
-
-        Some(manager.current.clone())
-    }
-
-    fn fallback_current_provider_id(manager: &ProviderManager) -> String {
-        let mut provider_list: Vec<_> = manager.providers.iter().collect();
-        provider_list.sort_by(|(_, a), (_, b)| match (a.sort_index, b.sort_index) {
-            (Some(idx_a), Some(idx_b)) => idx_a.cmp(&idx_b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.created_at.cmp(&b.created_at),
-        });
-
-        provider_list
-            .first()
-            .map(|(id, _)| (*id).clone())
-            .unwrap_or_default()
+        Ok(())
     }
 
     pub fn set_common_config_snippet(
@@ -784,6 +851,14 @@ impl ProviderService {
         Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
 
         let app_type_clone = app_type.clone();
+        let (effective_current_provider, db_providers) = if app_type.is_additive_mode() {
+            (None, None)
+        } else {
+            (
+                crate::settings::get_effective_current_provider(&state.db, &app_type)?,
+                Some(state.db.get_all_providers(app_type.as_str())?),
+            )
+        };
         let takeover_active = if app_type.is_additive_mode() {
             false
         } else {
@@ -801,51 +876,58 @@ impl ProviderService {
             }
         };
 
-        Self::run_transaction(state, move |config| {
-            config.ensure_app(&app_type_clone);
+        Self::run_transaction_preserving_current_providers(
+            state,
+            std::slice::from_ref(&app_type),
+            move |config| {
+                config.ensure_app(&app_type_clone);
 
-            if !app_type_clone.is_additive_mode() {
-                Self::self_heal_current_provider(
+                if let Some(db_providers) = db_providers.as_ref() {
+                    Self::hydrate_missing_provider_snapshots_from_db(
+                        config,
+                        &app_type_clone,
+                        db_providers,
+                    )?;
+                }
+
+                let old_snippet = config
+                    .common_config_snippets
+                    .get(&app_type_clone)
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty());
+
+                Self::migrate_old_common_config_snippet_best_effort(
                     config,
                     &app_type_clone,
-                    "set_common_config_snippet",
-                );
-            }
+                    effective_current_provider.as_deref(),
+                    old_snippet.as_deref(),
+                )?;
 
-            let old_snippet = config
-                .common_config_snippets
-                .get(&app_type_clone)
-                .cloned()
-                .filter(|value| !value.trim().is_empty());
+                config
+                    .common_config_snippets
+                    .set(&app_type_clone, normalized_snippet.clone());
 
-            Self::migrate_old_common_config_snippet_best_effort(
-                config,
-                &app_type_clone,
-                old_snippet.as_deref(),
-            )?;
-
-            config
-                .common_config_snippets
-                .set(&app_type_clone, normalized_snippet.clone());
-
-            if matches!(
-                app_type_clone,
-                AppType::Claude | AppType::Codex | AppType::Gemini
-            ) {
-                Self::normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
+                if matches!(
+                    app_type_clone,
+                    AppType::Claude | AppType::Codex | AppType::Gemini
+                ) {
+                    Self::normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
                     config,
                     &app_type_clone,
+                    effective_current_provider.as_deref(),
                     normalized_snippet.as_deref(),
                 )?;
-            }
+                }
 
-            let action = Self::build_common_config_post_commit_action(
-                config,
-                &app_type_clone,
-                takeover_active,
-            )?;
-            Ok(((), action))
-        })
+                let action = Self::build_common_config_post_commit_action(
+                    config,
+                    &app_type_clone,
+                    effective_current_provider.as_deref(),
+                    takeover_active,
+                )?;
+                Ok(((), action))
+            },
+        )
     }
 
     pub fn clear_common_config_snippet(
@@ -877,32 +959,8 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-
-        {
-            let config = state.config.read().map_err(AppError::from)?;
-            let manager = config
-                .get_manager(&app_type)
-                .ok_or_else(|| Self::app_not_found(&app_type))?;
-
-            if manager.current.is_empty() || manager.providers.contains_key(&manager.current) {
-                return Ok(manager.current.clone());
-            }
-        }
-
-        let app_type_clone = app_type.clone();
-        Self::run_transaction(state, move |config| {
-            let manager = config
-                .get_manager_mut(&app_type_clone)
-                .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
-
-            if manager.current.is_empty() || manager.providers.contains_key(&manager.current) {
-                return Ok((manager.current.clone(), None));
-            }
-
-            manager.current = Self::fallback_current_provider_id(manager);
-
-            Ok((manager.current.clone(), None))
-        })
+        crate::settings::get_effective_current_provider(&state.db, &app_type)
+            .map(|opt| opt.unwrap_or_default())
     }
 
     /// 新增供应商
@@ -914,6 +972,11 @@ impl ProviderService {
 
         let app_type_clone = app_type.clone();
         let provider_clone = provider.clone();
+        let stored_current_provider = if app_type.is_additive_mode() {
+            None
+        } else {
+            state.db.get_current_provider(app_type.as_str())?
+        };
 
         Self::run_transaction(state, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
@@ -932,37 +995,28 @@ impl ProviderService {
             }
 
             config.ensure_app(&app_type_clone);
-            let previous_current = config
-                .get_manager(&app_type_clone)
-                .map(|manager| manager.current.clone())
-                .unwrap_or_default();
-            let healed_current = if !app_type_clone.is_additive_mode() {
-                Self::self_heal_current_provider(config, &app_type_clone, "add")
-            } else {
-                None
-            };
             let manager = config
                 .get_manager_mut(&app_type_clone)
                 .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
+
+            if !app_type_clone.is_additive_mode() {
+                manager.current = stored_current_provider.clone().unwrap_or_default();
+            }
 
             let was_empty = manager.providers.is_empty();
             manager
                 .providers
                 .insert(provider_to_store.id.clone(), provider_to_store.clone());
 
-            if !app_type_clone.is_additive_mode() && was_empty && manager.current.is_empty() {
+            if !app_type_clone.is_additive_mode()
+                && stored_current_provider.is_none()
+                && (was_empty || manager.current.is_empty())
+            {
                 manager.current = provider_to_store.id.clone();
             }
 
             let is_current =
                 app_type_clone.is_additive_mode() || manager.current == provider_to_store.id;
-            let current_was_healed = !app_type_clone.is_additive_mode()
-                && healed_current.as_deref() != Some(previous_current.as_str());
-            let current_provider_id = if current_was_healed && !is_current {
-                Some(manager.current.clone())
-            } else {
-                None
-            };
             let action = if is_current {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
                 Some(PostCommitAction {
@@ -976,13 +1030,6 @@ impl ProviderService {
                     common_config_snippet,
                     takeover_active: false,
                 })
-            } else if let Some(current_provider_id) = current_provider_id {
-                Self::build_post_commit_action_for_current_provider(
-                    config,
-                    &app_type_clone,
-                    &current_provider_id,
-                    false,
-                )?
             } else {
                 None
             };
@@ -1004,18 +1051,17 @@ impl ProviderService {
         let provider_id = provider.id.clone();
         let app_type_clone = app_type.clone();
         let provider_clone = provider.clone();
+        let (effective_current_provider, stored_current_provider) = if app_type.is_additive_mode() {
+            (None, None)
+        } else {
+            (
+                crate::settings::get_effective_current_provider(&state.db, &app_type)?,
+                state.db.get_current_provider(app_type.as_str())?,
+            )
+        };
 
         Self::run_transaction(state, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
-            let previous_current = config
-                .get_manager(&app_type_clone)
-                .map(|manager| manager.current.clone())
-                .unwrap_or_default();
-            let healed_current = if !app_type_clone.is_additive_mode() {
-                Self::self_heal_current_provider(config, &app_type_clone, "update")
-            } else {
-                None
-            };
             let manager = config
                 .get_manager_mut(&app_type_clone)
                 .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
@@ -1028,7 +1074,12 @@ impl ProviderService {
                 ));
             }
 
-            let is_current = app_type_clone.is_additive_mode() || manager.current == provider_id;
+            if !app_type_clone.is_additive_mode() {
+                manager.current = stored_current_provider.clone().unwrap_or_default();
+            }
+
+            let is_current = app_type_clone.is_additive_mode()
+                || effective_current_provider.as_deref() == Some(provider_id.as_str());
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1065,13 +1116,6 @@ impl ProviderService {
                 .providers
                 .insert(provider_id.clone(), merged.clone());
 
-            let current_was_healed = !app_type_clone.is_additive_mode()
-                && healed_current.as_deref() != Some(previous_current.as_str());
-            let current_provider_id = if current_was_healed && !is_current {
-                Some(manager.current.clone())
-            } else {
-                None
-            };
             let action = if is_current {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
                 Some(PostCommitAction {
@@ -1085,13 +1129,6 @@ impl ProviderService {
                     common_config_snippet,
                     takeover_active: false,
                 })
-            } else if let Some(current_provider_id) = current_provider_id {
-                Self::build_post_commit_action_for_current_provider(
-                    config,
-                    &app_type_clone,
-                    &current_provider_id,
-                    false,
-                )?
             } else {
                 None
             };
@@ -1378,29 +1415,32 @@ impl ProviderService {
             let guard = state.config.read().map_err(AppError::from)?;
             let mut result = Vec::new();
             for app_type in AppType::all() {
-                if let Some(manager) = guard.get_manager(&app_type) {
-                    if app_type.is_additive_mode() {
+                if app_type.is_additive_mode() {
+                    if let Some(manager) = guard.get_manager(&app_type) {
                         let snippet = guard.common_config_snippets.get(&app_type).cloned();
                         for provider in manager.providers.values() {
                             result.push((app_type.clone(), provider.clone(), snippet.clone()));
                         }
-                        continue;
                     }
+                    continue;
+                }
 
-                    if manager.current.is_empty() {
-                        continue;
+                let current_id =
+                    match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                let providers = state.db.get_all_providers(app_type.as_str())?;
+                match providers.get(&current_id) {
+                    Some(provider) => {
+                        let snippet = state.db.get_config_snippet(app_type.as_str())?;
+                        result.push((app_type.clone(), provider.clone(), snippet));
                     }
-                    match manager.providers.get(&manager.current) {
-                        Some(provider) => {
-                            let snippet = guard.common_config_snippets.get(&app_type).cloned();
-                            result.push((app_type.clone(), provider.clone(), snippet));
-                        }
-                        None => {
-                            log::warn!(
-                                "sync_current_to_live: {app_type} 当前供应商 {} 不存在，跳过",
-                                manager.current
-                            );
-                        }
+                    None => {
+                        log::warn!(
+                            "sync_current_to_live: {app_type} 当前供应商 {} 不存在于数据库，跳过",
+                            current_id
+                        );
                     }
                 }
             }
@@ -1551,7 +1591,13 @@ impl ProviderService {
             };
 
             Ok(((), Some(action)))
-        })
+        })?;
+
+        if !app_type.is_additive_mode() {
+            crate::settings::set_current_provider(&app_type, Some(provider_id))?;
+        }
+
+        Ok(())
     }
 
     fn write_live_snapshot(
@@ -2032,13 +2078,24 @@ impl ProviderService {
     }
 
     pub fn delete(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        let (local_current_provider, stored_current_provider) = if app_type.is_additive_mode() {
+            (None, None)
+        } else {
+            (
+                crate::settings::get_current_provider(&app_type),
+                state.db.get_current_provider(app_type.as_str())?,
+            )
+        };
         let provider_snapshot = {
             let config = state.config.read().map_err(AppError::from)?;
             let manager = config
                 .get_manager(&app_type)
                 .ok_or_else(|| Self::app_not_found(&app_type))?;
 
-            if !app_type.is_additive_mode() && manager.current == provider_id {
+            if !app_type.is_additive_mode()
+                && (local_current_provider.as_deref() == Some(provider_id)
+                    || stored_current_provider.as_deref() == Some(provider_id))
+            {
                 return Err(AppError::localized(
                     "provider.delete.current",
                     "不能删除当前正在使用的供应商",
@@ -2113,12 +2170,19 @@ impl ProviderService {
                 .get_manager_mut(&app_type)
                 .ok_or_else(|| Self::app_not_found(&app_type))?;
 
-            if !app_type.is_additive_mode() && manager.current == provider_id {
+            if !app_type.is_additive_mode()
+                && (local_current_provider.as_deref() == Some(provider_id)
+                    || stored_current_provider.as_deref() == Some(provider_id))
+            {
                 return Err(AppError::localized(
                     "provider.delete.current",
                     "不能删除当前正在使用的供应商",
                     "Cannot delete the provider currently in use",
                 ));
+            }
+
+            if !app_type.is_additive_mode() && manager.current == provider_id {
+                manager.current = stored_current_provider.clone().unwrap_or_default();
             }
 
             manager.providers.shift_remove(provider_id);

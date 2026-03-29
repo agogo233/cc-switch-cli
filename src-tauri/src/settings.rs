@@ -653,7 +653,7 @@ pub fn get_effective_current_provider(
             local_id,
             app_type.as_str()
         );
-        set_current_provider(app_type, None)?;
+        let _ = set_current_provider(app_type, None);
     }
 
     db.get_current_provider(app_type.as_str())

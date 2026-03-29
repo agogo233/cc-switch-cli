@@ -30,4 +30,5 @@ pub enum AuthStrategy {
     Bearer,
     Google,
     GoogleOAuth,
+    GitHubCopilot,
 }

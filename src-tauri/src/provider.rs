@@ -191,6 +191,31 @@ pub struct ProviderProxyConfig {
     pub proxy_password: Option<String>,
 }
 
+/// 认证绑定来源
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthBindingSource {
+    /// 从 provider 自身配置读取认证信息（默认）
+    #[default]
+    ProviderConfig,
+    /// 使用托管账号认证（如 GitHub Copilot OAuth）
+    ManagedAccount,
+}
+
+/// 通用认证绑定
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthBinding {
+    /// 认证来源
+    #[serde(default)]
+    pub source: AuthBindingSource,
+    /// 托管认证供应商标识（如 github_copilot）
+    #[serde(rename = "authProvider", skip_serializing_if = "Option::is_none")]
+    pub auth_provider: Option<String>,
+    /// 托管账号 ID；为空表示跟随该认证供应商的默认账号
+    #[serde(rename = "accountId", skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -249,6 +274,38 @@ pub struct ProviderMeta {
     /// OpenAI 兼容端点使用的 prompt cache key。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// 通用认证绑定（provider_config / managed_account）
+    #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<AuthBinding>,
+    /// Claude 认证字段名（"ANTHROPIC_AUTH_TOKEN" 或 "ANTHROPIC_API_KEY"）
+    #[serde(rename = "apiKeyField", skip_serializing_if = "Option::is_none")]
+    pub api_key_field: Option<String>,
+    /// 供应商类型标识（用于特殊供应商检测）
+    /// - "github_copilot": GitHub Copilot 供应商
+    #[serde(rename = "providerType", skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    /// GitHub Copilot 关联账号 ID（仅 github_copilot 供应商使用）
+    /// 用于多账号支持，关联到特定的 GitHub 账号
+    #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]
+    pub github_account_id: Option<String>,
+}
+
+impl ProviderMeta {
+    pub fn managed_account_id_for(&self, auth_provider: &str) -> Option<String> {
+        if let Some(binding) = self.auth_binding.as_ref() {
+            if binding.source == AuthBindingSource::ManagedAccount
+                && binding.auth_provider.as_deref() == Some(auth_provider)
+            {
+                return binding.account_id.clone();
+            }
+        }
+
+        if auth_provider == "github_copilot" {
+            return self.github_account_id.clone();
+        }
+
+        None
+    }
 }
 
 impl ProviderManager {
@@ -355,7 +412,7 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderMeta;
+    use super::{AuthBinding, AuthBindingSource, ProviderMeta};
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -376,6 +433,47 @@ mod tests {
         }))
         .expect("deserialize legacy alias");
         assert_eq!(deserialized.apply_common_config, Some(false));
+    }
+
+    #[test]
+    fn provider_meta_managed_account_id_for_prefers_binding_and_falls_back_to_legacy_github_id() {
+        let managed_meta = ProviderMeta {
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("github_copilot".to_string()),
+                account_id: Some("binding-account".to_string()),
+            }),
+            github_account_id: Some("legacy-account".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            managed_meta.managed_account_id_for("github_copilot"),
+            Some("binding-account".to_string())
+        );
+
+        let legacy_meta = ProviderMeta {
+            github_account_id: Some("legacy-account".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy_meta.managed_account_id_for("github_copilot"),
+            Some("legacy-account".to_string())
+        );
+        assert_eq!(legacy_meta.managed_account_id_for("other_provider"), None);
+
+        let provider_config_meta = ProviderMeta {
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ProviderConfig,
+                auth_provider: Some("github_copilot".to_string()),
+                account_id: Some("provider-config-account".to_string()),
+            }),
+            github_account_id: Some("legacy-account".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider_config_meta.managed_account_id_for("github_copilot"),
+            Some("legacy-account".to_string())
+        );
     }
 }
 
@@ -430,5 +528,63 @@ mod issue_71_tests {
         let provider: Provider =
             serde_json::from_value(provider_json).expect("should deserialize provider");
         assert_eq!(provider.meta.unwrap().apply_common_config, Some(true));
+    }
+
+    #[test]
+    fn provider_roundtrip_preserves_upstream_meta_fields_for_auth_and_type() {
+        let provider_json = json!({
+            "id": "test",
+            "name": "Test",
+            "settingsConfig": {},
+            "meta": {
+                "authBinding": {
+                    "source": "managed_account",
+                    "authProvider": "github_copilot",
+                    "accountId": "acc-1"
+                },
+                "apiKeyField": "ANTHROPIC_AUTH_TOKEN",
+                "providerType": "github_copilot",
+                "githubAccountId": "gh-123"
+            }
+        });
+
+        let provider: Provider =
+            serde_json::from_value(provider_json).expect("provider should deserialize");
+        let serialized = serde_json::to_value(&provider).expect("provider should serialize");
+        let meta = serialized
+            .get("meta")
+            .and_then(|value| value.as_object())
+            .expect("meta should exist after roundtrip");
+
+        assert_eq!(
+            meta.get("authBinding")
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str()),
+            Some("managed_account")
+        );
+        assert_eq!(
+            meta.get("authBinding")
+                .and_then(|value| value.get("authProvider"))
+                .and_then(|value| value.as_str()),
+            Some("github_copilot")
+        );
+        assert_eq!(
+            meta.get("authBinding")
+                .and_then(|value| value.get("accountId"))
+                .and_then(|value| value.as_str()),
+            Some("acc-1")
+        );
+        assert_eq!(
+            meta.get("apiKeyField").and_then(|value| value.as_str()),
+            Some("ANTHROPIC_AUTH_TOKEN")
+        );
+        assert_eq!(
+            meta.get("providerType").and_then(|value| value.as_str()),
+            Some("github_copilot")
+        );
+        assert_eq!(
+            meta.get("githubAccountId").and_then(|value| value.as_str()),
+            Some("gh-123")
+        );
     }
 }

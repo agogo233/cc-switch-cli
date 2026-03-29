@@ -2,8 +2,9 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_settings_path, read_json_file, update_settings, write_codex_live_atomic, AppError,
+    AppSettings, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
+    ProviderService,
 };
 
 #[path = "support.rs"]
@@ -335,7 +336,7 @@ command = "echo"
 }
 
 #[test]
-fn update_codex_provider_self_heals_dangling_current_and_rewrites_live() {
+fn update_current_codex_provider_uses_db_current_even_if_config_current_drifted() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -379,6 +380,23 @@ command = "echo"
     insert_codex_managed_mcp(&mut config);
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Codex.as_str(),
+            &codex_provider(
+                "current-provider",
+                "Current",
+                "stored-key",
+                "current",
+                "https://api.before.example/v1",
+            ),
+        )
+        .expect("save current provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "current-provider")
+        .expect("set db current provider");
 
     ProviderService::update(
         &state,
@@ -391,7 +409,7 @@ command = "echo"
             "https://api.after.example/v1",
         ),
     )
-    .expect("update should succeed after self-healing dangling current");
+    .expect("update should succeed when db current points at the edited provider");
 
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
@@ -410,12 +428,12 @@ command = "echo"
         .expect("codex manager after update");
     assert_eq!(
         manager.current, "current-provider",
-        "update should self-heal dangling current before deciding post-commit actions"
+        "update should resync the config snapshot to the stored db current provider"
     );
 }
 
 #[test]
-fn add_first_codex_provider_self_heals_dangling_current_and_rewrites_live() {
+fn add_first_codex_provider_sets_db_current_and_rewrites_live_when_db_current_missing() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -461,7 +479,17 @@ command = "echo"
             "https://api.new.example/v1",
         ),
     )
-    .expect("add should succeed after self-healing dangling current");
+    .expect("add should succeed when db current is missing");
+
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read db current provider after add")
+            .as_deref(),
+        Some("new-provider"),
+        "first add should promote the new provider in the database when no db current exists"
+    );
 
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
@@ -480,30 +508,26 @@ command = "echo"
         .expect("codex manager after add");
     assert_eq!(
         manager.current, "new-provider",
-        "first add should self-heal dangling current before deciding post-commit actions"
+        "first add should resync the config snapshot to the promoted db current provider"
     );
 }
 
 #[test]
-fn update_non_current_codex_provider_self_heals_current_and_rewrites_live() {
+fn update_non_current_codex_provider_does_not_self_heal_or_rewrite_live_from_db_current() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "current" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "current"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.current]
+base_url = "https://api.current.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
-
-[mcp_servers.echo-server]
-type = "stdio"
-command = "echo"
 "#;
     write_codex_live_atomic(&live_auth, Some(live_config))
         .expect("seed existing codex live config");
@@ -539,6 +563,36 @@ command = "echo"
     insert_codex_managed_mcp(&mut config);
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Codex.as_str(),
+            &codex_provider(
+                "current-provider",
+                "Current",
+                "current",
+                "current",
+                "https://api.current.example/v1",
+            ),
+        )
+        .expect("save current provider to db");
+    state
+        .db
+        .save_provider(
+            AppType::Codex.as_str(),
+            &codex_provider(
+                "other-provider",
+                "Other",
+                "other",
+                "other",
+                "https://api.other-before.example/v1",
+            ),
+        )
+        .expect("save other provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "current-provider")
+        .expect("set db current provider");
 
     ProviderService::update(
         &state,
@@ -551,21 +605,21 @@ command = "echo"
             "https://api.other-after.example/v1",
         ),
     )
-    .expect("update non-current provider should succeed after self-healing dangling current");
+    .expect("update non-current provider should succeed without self-healing stale config.current");
 
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
         config_text.contains("base_url = \"https://api.current.example/v1\""),
-        "live config should be rewritten from the healed current provider rather than the updated non-current provider"
+        "live config should remain pointed at the actual current provider from db"
     );
     assert!(
         !config_text.contains("https://api.other-after.example/v1"),
-        "live config should not be rewritten from the updated non-current provider"
+        "updating a non-current provider should not rewrite live config from the edited provider"
     );
     assert!(
-        config_text.contains("[mcp_servers.echo-server]"),
-        "managed MCP table should remain after rewriting healed current provider"
+        !config_text.contains("[mcp_servers.echo-server]"),
+        "updating a non-current provider should not trigger a live rewrite that injects managed MCP"
     );
 
     let guard = state.config.read().expect("read config after update");
@@ -574,30 +628,26 @@ command = "echo"
         .expect("codex manager after update");
     assert_eq!(
         manager.current, "current-provider",
-        "update should persist healed current even when editing another provider"
+        "update may resync the local config snapshot to the stored db current provider, but should not rewrite live config"
     );
 }
 
 #[test]
-fn add_non_current_codex_provider_self_heals_current_and_rewrites_live() {
+fn add_non_current_codex_provider_does_not_self_heal_or_rewrite_live_from_db_current() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "current" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "current"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.current]
+base_url = "https://api.current.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
-
-[mcp_servers.echo-server]
-type = "stdio"
-command = "echo"
 "#;
     write_codex_live_atomic(&live_auth, Some(live_config))
         .expect("seed existing codex live config");
@@ -623,6 +673,23 @@ command = "echo"
     insert_codex_managed_mcp(&mut config);
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Codex.as_str(),
+            &codex_provider(
+                "current-provider",
+                "Current",
+                "current",
+                "current",
+                "https://api.current.example/v1",
+            ),
+        )
+        .expect("save current provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "current-provider")
+        .expect("set db current provider");
 
     ProviderService::add(
         &state,
@@ -635,21 +702,21 @@ command = "echo"
             "https://api.new.example/v1",
         ),
     )
-    .expect("add non-current provider should succeed after self-healing dangling current");
+    .expect("add non-current provider should succeed without self-healing stale config.current");
 
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
         config_text.contains("base_url = \"https://api.current.example/v1\""),
-        "live config should be rewritten from the healed current provider rather than the added non-current provider"
+        "live config should remain pointed at the actual current provider from db"
     );
     assert!(
         !config_text.contains("https://api.new.example/v1"),
-        "live config should not be rewritten from the added non-current provider"
+        "adding a non-current provider should not rewrite live config from the new provider"
     );
     assert!(
-        config_text.contains("[mcp_servers.echo-server]"),
-        "managed MCP table should remain after rewriting healed current provider"
+        !config_text.contains("[mcp_servers.echo-server]"),
+        "adding a non-current provider should not trigger a live rewrite that injects managed MCP"
     );
 
     let guard = state.config.read().expect("read config after add");
@@ -658,7 +725,7 @@ command = "echo"
         .expect("codex manager after add");
     assert_eq!(
         manager.current, "current-provider",
-        "add should persist healed current even when inserting another provider"
+        "add may resync the local config snapshot to the stored db current provider, but should not rewrite live config"
     );
 }
 
@@ -3999,6 +4066,55 @@ fn provider_service_delete_current_provider_returns_error() {
     reset_test_fs();
     ensure_test_home();
 
+    let keep = Provider::with_id(
+        "keep".to_string(),
+        "Keep".to_string(),
+        json!({
+            "env": { "ANTHROPIC_API_KEY": "keep-key" }
+        }),
+        None,
+    );
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "keep".to_string();
+        manager.providers.insert("keep".to_string(), keep.clone());
+    }
+
+    let app_state = state_from_config(config);
+    app_state
+        .db
+        .save_provider(AppType::Claude.as_str(), &keep)
+        .expect("save keep provider to db");
+    app_state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "keep")
+        .expect("set db current provider");
+
+    let err = ProviderService::delete(&app_state, AppType::Claude, "keep")
+        .expect_err("deleting current provider should fail");
+    match err {
+        AppError::Localized { zh, .. } => assert!(
+            zh.contains("不能删除当前正在使用的供应商"),
+            "unexpected message: {zh}"
+        ),
+        AppError::Config(msg) => assert!(
+            msg.contains("不能删除当前正在使用的供应商"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Config error, got {other:?}"),
+    }
+}
+
+#[test]
+fn provider_service_delete_provider_selected_in_local_settings_returns_error() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
     let mut config = MultiAppConfig::default();
     {
         let manager = config
@@ -4016,12 +4132,27 @@ fn provider_service_delete_current_provider_returns_error() {
                 None,
             ),
         );
+        manager.providers.insert(
+            "delete".to_string(),
+            Provider::with_id(
+                "delete".to_string(),
+                "Delete".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "delete-key" }
+                }),
+                None,
+            ),
+        );
     }
+
+    let mut settings = AppSettings::default();
+    settings.current_provider_claude = Some("delete".to_string());
+    update_settings(settings).expect("set local current provider override");
 
     let app_state = state_from_config(config);
 
-    let err = ProviderService::delete(&app_state, AppType::Claude, "keep")
-        .expect_err("deleting current provider should fail");
+    let err = ProviderService::delete(&app_state, AppType::Claude, "delete")
+        .expect_err("deleting local-settings current provider should fail");
     match err {
         AppError::Localized { zh, .. } => assert!(
             zh.contains("不能删除当前正在使用的供应商"),
@@ -4033,4 +4164,142 @@ fn provider_service_delete_current_provider_returns_error() {
         ),
         other => panic!("expected Config error, got {other:?}"),
     }
+}
+
+#[test]
+fn provider_service_delete_db_current_provider_returns_error_even_if_config_current_drifted() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let keep = Provider::with_id(
+        "keep".to_string(),
+        "Keep".to_string(),
+        json!({
+            "env": { "ANTHROPIC_API_KEY": "keep-key" }
+        }),
+        None,
+    );
+    let delete = Provider::with_id(
+        "delete".to_string(),
+        "Delete".to_string(),
+        json!({
+            "env": { "ANTHROPIC_API_KEY": "delete-key" }
+        }),
+        None,
+    );
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "keep".to_string();
+        manager.providers.insert("keep".to_string(), keep.clone());
+        manager
+            .providers
+            .insert("delete".to_string(), delete.clone());
+    }
+
+    let app_state = state_from_config(config);
+    app_state
+        .db
+        .save_provider(AppType::Claude.as_str(), &keep)
+        .expect("save keep provider to db");
+    app_state
+        .db
+        .save_provider(AppType::Claude.as_str(), &delete)
+        .expect("save delete provider to db");
+    app_state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "delete")
+        .expect("set db current provider");
+
+    let err = ProviderService::delete(&app_state, AppType::Claude, "delete")
+        .expect_err("deleting db current provider should fail");
+    match err {
+        AppError::Localized { zh, .. } => assert!(
+            zh.contains("不能删除当前正在使用的供应商"),
+            "unexpected message: {zh}"
+        ),
+        AppError::Config(msg) => assert!(
+            msg.contains("不能删除当前正在使用的供应商"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Config error, got {other:?}"),
+    }
+}
+
+#[test]
+fn provider_service_delete_non_current_provider_succeeds_when_only_config_current_drifted() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let keep = Provider::with_id(
+        "keep".to_string(),
+        "Keep".to_string(),
+        json!({
+            "env": { "ANTHROPIC_API_KEY": "keep-key" }
+        }),
+        None,
+    );
+    let delete = Provider::with_id(
+        "delete".to_string(),
+        "Delete".to_string(),
+        json!({
+            "env": { "ANTHROPIC_API_KEY": "delete-key" }
+        }),
+        None,
+    );
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "delete".to_string();
+        manager.providers.insert("keep".to_string(), keep.clone());
+        manager
+            .providers
+            .insert("delete".to_string(), delete.clone());
+    }
+
+    let app_state = state_from_config(config);
+    app_state
+        .db
+        .save_provider(AppType::Claude.as_str(), &keep)
+        .expect("save keep provider to db");
+    app_state
+        .db
+        .save_provider(AppType::Claude.as_str(), &delete)
+        .expect("save delete provider to db");
+    app_state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "keep")
+        .expect("set db current provider");
+
+    ProviderService::delete(&app_state, AppType::Claude, "delete")
+        .expect("deleting non-current provider should succeed when only config.current drifted");
+
+    let stored_current = app_state
+        .db
+        .get_current_provider(AppType::Claude.as_str())
+        .expect("read db current provider after delete");
+    assert_eq!(
+        stored_current.as_deref(),
+        Some("keep"),
+        "delete should preserve the actual current provider stored in db"
+    );
+
+    let cfg = app_state.config.read().expect("read config after delete");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "keep",
+        "delete should resync stale config.current to the stored db current provider"
+    );
+    assert!(
+        !manager.providers.contains_key("delete"),
+        "deleted provider should be removed from config snapshot"
+    );
 }

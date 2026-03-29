@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use axum::{
     body::{to_bytes, Body},
@@ -6,17 +6,83 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
+use serde_json::json;
+use serial_test::serial;
+use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use crate::{
+    app_config::AppType,
     database::Database,
+    provider::Provider,
     proxy::{provider_router::ProviderRouter, types::ProxyConfig},
 };
 
 use super::*;
 
-fn test_state() -> ProxyServerState {
-    let db = Arc::new(Database::memory().expect("memory db"));
+struct TempHome {
+    #[allow(dead_code)]
+    dir: TempDir,
+    original_home: Option<String>,
+    original_userprofile: Option<String>,
+}
+
+impl TempHome {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("create temp home");
+        let original_home = env::var("HOME").ok();
+        let original_userprofile = env::var("USERPROFILE").ok();
+
+        env::set_var("HOME", dir.path());
+        env::set_var("USERPROFILE", dir.path());
+        crate::settings::reload_test_settings();
+
+        Self {
+            dir,
+            original_home,
+            original_userprofile,
+        }
+    }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        match &self.original_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        match &self.original_userprofile {
+            Some(value) => env::set_var("USERPROFILE", value),
+            None => env::remove_var("USERPROFILE"),
+        }
+
+        crate::settings::reload_test_settings();
+    }
+}
+
+fn test_provider_with_settings(
+    id: &str,
+    name: &str,
+    settings_config: serde_json::Value,
+) -> Provider {
+    Provider {
+        id: id.to_string(),
+        name: name.to_string(),
+        settings_config,
+        website_url: None,
+        category: Some("claude".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    }
+}
+
+fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
     ProxyServerState {
         db: db.clone(),
         config: Arc::new(RwLock::new(ProxyConfig::default())),
@@ -25,6 +91,21 @@ fn test_state() -> ProxyServerState {
         current_providers: Arc::new(RwLock::new(HashMap::new())),
         provider_router: Arc::new(ProviderRouter::new(db)),
     }
+}
+
+fn test_state() -> ProxyServerState {
+    test_state_with_db(Arc::new(Database::memory().expect("memory db")))
+}
+
+async fn set_takeover_enabled(db: &Database, app_type: &str, enabled: bool) {
+    let mut config = db
+        .get_proxy_config_for_app(app_type)
+        .await
+        .expect("read app proxy config");
+    config.enabled = enabled;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("update app proxy config");
 }
 
 async fn settle_tasks() {
@@ -166,4 +247,106 @@ async fn buffered_success_streaming_responses_do_not_record_termination_error() 
     assert_eq!(snapshot.failed_requests, 0);
     assert!(snapshot.last_error.is_none());
     assert!(snapshot.estimated_output_tokens_total > 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn streaming_success_syncs_failover_state_after_body_drains() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().expect("memory db"));
+    let current = test_provider_with_settings(
+        "claude-current",
+        "Claude Current",
+        json!({"apiKey": "current-key", "base_url": "https://current.example"}),
+    );
+    let failover = test_provider_with_settings(
+        "claude-failover",
+        "Claude Failover",
+        json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
+    );
+
+    db.save_provider("claude", &current)
+        .expect("save current provider");
+    db.save_provider("claude", &failover)
+        .expect("save failover provider");
+    db.set_current_provider("claude", &current.id)
+        .expect("set current provider");
+    crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
+        .expect("set local current provider");
+    db.save_live_backup(
+        "claude",
+        &serde_json::to_string(&current.settings_config).expect("serialize current backup"),
+    )
+    .await
+    .expect("save current live backup");
+    set_takeover_enabled(&db, "claude", true).await;
+
+    let state = test_state_with_db(db.clone());
+    state.record_request_start().await;
+
+    let stream_completion = StreamCompletion::default();
+    stream_completion.record_success();
+    let response = PreparedResponse {
+        response: Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(futures::stream::empty::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .expect("response"),
+        stream_completion: Some(stream_completion),
+        estimated_output_tokens: 0,
+        upstream_error_summary: None,
+        body_bytes: None,
+    };
+
+    let response = ResponseHandler::finish_streaming(
+        &state,
+        Ok(response),
+        reqwest::StatusCode::OK,
+        Some(SuccessSyncInfo {
+            app_type: AppType::Claude,
+            provider: failover.clone(),
+            current_provider_id_at_start: current.id.clone(),
+        }),
+        None,
+    )
+    .await;
+
+    let status = state.snapshot_status().await;
+    assert_eq!(status.current_provider_id, None);
+
+    let _ = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("drain response body");
+    settle_tasks().await;
+
+    let status = state.snapshot_status().await;
+    assert_eq!(
+        status.current_provider_id.as_deref(),
+        Some("claude-failover")
+    );
+    assert_eq!(
+        db.get_current_provider("claude")
+            .expect("read current provider")
+            .as_deref(),
+        Some("claude-failover")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+        Some("claude-failover")
+    );
+
+    let backup = db
+        .get_live_backup("claude")
+        .await
+        .expect("read live backup")
+        .expect("live backup should remain present");
+    let backup_snapshot: serde_json::Value =
+        serde_json::from_str(&backup.original_config).expect("parse live backup");
+    assert_eq!(
+        backup_snapshot
+            .get("base_url")
+            .and_then(serde_json::Value::as_str),
+        Some("https://failover.example")
+    );
 }

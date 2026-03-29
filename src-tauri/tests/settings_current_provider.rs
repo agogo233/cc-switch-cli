@@ -284,7 +284,7 @@ fn settings_current_provider_openclaw_matches_upstream_placeholder_behavior() {
 
 #[test]
 #[serial]
-fn settings_current_provider_openclaw_propagates_cleanup_errors() {
+fn settings_current_provider_openclaw_falls_back_to_db_when_cleanup_fails() {
     let home = HomeGuard::new();
 
     set_current_provider(&AppType::OpenClaw, Some("missing-openclaw"))
@@ -294,12 +294,14 @@ fn settings_current_provider_openclaw_propagates_cleanup_errors() {
     std::fs::remove_dir_all(&settings_dir).expect("remove settings dir before blocking writes");
     std::fs::write(&settings_dir, "block settings writes").expect("create file to block cleanup");
 
-    let db = Database::default();
-    let err = get_effective_current_provider(&db, &AppType::OpenClaw)
-        .expect_err("cleanup failure should be returned to caller");
+    let mut db = Database::default();
+    db.insert_provider("openclaw", "db-openclaw");
+    db.set_db_current("openclaw", "db-openclaw");
 
-    assert!(
-        err.to_string().contains(".cc-switch"),
-        "cleanup error should surface the settings write failure, got: {err}"
+    assert_eq!(
+        get_effective_current_provider(&db, &AppType::OpenClaw)
+            .expect("cleanup failure should still fall back to database current")
+            .as_deref(),
+        Some("db-openclaw")
     );
 }

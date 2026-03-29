@@ -73,6 +73,7 @@ impl ProviderService {
 
     pub(super) fn migrate_gemini_common_config_snippet(
         config: &mut MultiAppConfig,
+        strict_current_provider_id: Option<&str>,
         old_snippet: &str,
     ) -> Result<(), AppError> {
         let old_snippet = old_snippet.trim();
@@ -80,12 +81,45 @@ impl ProviderService {
             return Ok(());
         }
 
+        let Some(current_provider_id) = strict_current_provider_id.and_then(|provider_id| {
+            config.get_manager(&AppType::Gemini).and_then(|manager| {
+                manager
+                    .providers
+                    .contains_key(provider_id)
+                    .then(|| provider_id.to_string())
+            })
+        }) else {
+            let Some(manager) = config.get_manager_mut(&AppType::Gemini) else {
+                return Ok(());
+            };
+
+            for provider in manager.providers.values_mut() {
+                Self::strip_common_gemini_config_from_provider(provider, Some(old_snippet))?;
+            }
+
+            return Ok(());
+        };
+
         let Some(manager) = config.get_manager_mut(&AppType::Gemini) else {
             return Ok(());
         };
 
-        for provider in manager.providers.values_mut() {
-            Self::strip_common_gemini_config_from_provider(provider, Some(old_snippet))?;
+        if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
+            Self::strip_common_gemini_config_from_provider(current_provider, Some(old_snippet))?;
+        }
+
+        for (provider_id, provider) in manager.providers.iter_mut() {
+            if provider_id == &current_provider_id {
+                continue;
+            }
+
+            if let Err(err) =
+                Self::strip_common_gemini_config_from_provider(provider, Some(old_snippet))
+            {
+                log::warn!(
+                    "skip migrating Gemini non-current provider snapshot '{provider_id}' from stored common config snippet: {err}"
+                );
+            }
         }
 
         Ok(())

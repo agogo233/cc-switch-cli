@@ -72,6 +72,134 @@ async fn single_provider_bypasses_open_breaker() {
 }
 
 #[tokio::test]
+async fn single_provider_bypasses_open_breaker_even_without_explicit_bypass_option() {
+    let (base_url, hits, server) = spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
+    let provider = claude_provider("p1", &base_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &provider)
+        .expect("save provider for health tracking");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.circuit_timeout_seconds = 3600;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("update proxy timeout");
+
+    router
+        .record_result(
+            "p1",
+            "claude",
+            false,
+            false,
+            Some("open breaker".to_string()),
+        )
+        .await
+        .expect("open breaker");
+    assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![provider.clone()],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("single provider request should succeed even without explicit bypass");
+
+    assert_eq!(result.provider.id, provider.id);
+    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn single_streaming_provider_bypasses_open_breaker_even_without_explicit_bypass_option() {
+    let (base_url, hits, bodies, server) = spawn_scripted_streaming_upstream(vec![(
+        StatusCode::OK,
+        ScriptedStreamingBody::Sse(
+            "data: {\"id\":\"msg_123\",\"type\":\"message_start\"}\n\ndata: [DONE]\n\n",
+        ),
+    )])
+    .await;
+    let provider = claude_provider("p1", &base_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &provider)
+        .expect("save provider for health tracking");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.circuit_timeout_seconds = 3600;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("update proxy timeout");
+
+    router
+        .record_result(
+            "p1",
+            "claude",
+            false,
+            false,
+            Some("open breaker".to_string()),
+        )
+        .await
+        .expect("open breaker");
+    assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+    let body = json!({
+        "model": "claude-3-7-sonnet-20250219",
+        "stream": true,
+        "max_tokens": 32,
+        "messages": [{
+            "role": "user",
+            "content": [{ "type": "text", "text": "hello" }]
+        }]
+    });
+
+    let result = forwarder
+        .forward_response(
+            &AppType::Claude,
+            "/v1/messages",
+            body,
+            &HeaderMap::new(),
+            vec![provider.clone()],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("single provider streaming request should succeed even without explicit bypass");
+
+    assert_eq!(result.provider.id, provider.id);
+    assert_eq!(result.response.status(), StatusCode::OK);
+    assert!(matches!(
+        &result.response,
+        StreamingResponse::Live(response) if is_sse_response(response)
+    ));
+    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(bodies.lock().await.len(), 1);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint() {
     let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -340,7 +468,7 @@ async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
 }
 
 #[tokio::test]
-async fn single_candidate_with_failover_enabled_still_honors_open_breaker() {
+async fn single_candidate_with_failover_enabled_still_bypasses_open_breaker() {
     let (base_url, hits, server) = spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
     let provider = claude_provider("p1", &base_url, None);
     let (db, router) = test_router().await;
@@ -368,13 +496,13 @@ async fn single_candidate_with_failover_enabled_still_honors_open_breaker() {
         .await
         .expect("open breaker");
 
-    let error = forwarder
+    let result = forwarder
         .forward_buffered_response(
             &AppType::Claude,
             "/v1/messages",
             claude_request_body(),
             &HeaderMap::new(),
-            vec![provider],
+            vec![provider.clone()],
             ForwardOptions {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
@@ -383,10 +511,10 @@ async fn single_candidate_with_failover_enabled_still_honors_open_breaker() {
             RectifierConfig::default(),
         )
         .await
-        .expect_err("failover-enabled single candidate should still honor breaker");
+        .expect("single candidate should still bypass breaker when it is the only provider");
 
-    assert!(matches!(error, ProxyError::NoAvailableProvider));
-    assert_eq!(hits.count.load(Ordering::SeqCst), 0);
+    assert_eq!(result.provider.id, provider.id);
+    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
 
     server.abort();
 }

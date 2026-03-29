@@ -6725,6 +6725,44 @@ mod tests {
     }
 
     #[test]
+    fn proxy_help_overlay_t_starts_managed_proxy_when_stopped_for_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        let data = UiData::default();
+
+        app.open_proxy_help_view(&data, None);
+        let action = app.on_key(key(KeyCode::Char('t')), &data);
+
+        assert!(matches!(
+            action,
+            Action::SetManagedProxyForCurrentApp {
+                app_type: AppType::Claude,
+                enabled: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn proxy_help_overlay_hides_primary_action_when_foreground_runtime_is_running_elsewhere() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.managed_runtime = false;
+        data.proxy.codex_takeover = true;
+
+        app.open_proxy_help_view(&data, None);
+
+        let Overlay::TextView(view) = &app.overlay else {
+            panic!("expected proxy help overlay");
+        };
+        assert!(view.action.is_none());
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('t')), &data),
+            Action::None
+        ));
+    }
+
+    #[test]
     fn settings_menu_exposes_proxy_item() {
         assert!(
             SettingsItem::ALL

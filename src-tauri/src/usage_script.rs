@@ -1,8 +1,7 @@
-use reqwest::Client;
 use rquickjs::{Context, Function, Runtime};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
+use url::{Host, Url};
 
 use crate::error::AppError;
 
@@ -14,18 +13,13 @@ pub async fn execute_usage_script(
     timeout_secs: u64,
     access_token: Option<&str>,
     user_id: Option<&str>,
+    template_type: Option<&str>,
 ) -> Result<Value, AppError> {
-    // 1. 替换变量
-    let mut replaced = script_code
-        .replace("{{apiKey}}", api_key)
-        .replace("{{baseUrl}}", base_url);
+    let is_custom_template = template_type.map(|t| t == "custom").unwrap_or(false);
+    let replaced = build_script_with_vars(script_code, api_key, base_url, access_token, user_id);
 
-    // 替换 accessToken 和 userId
-    if let Some(token) = access_token {
-        replaced = replaced.replace("{{accessToken}}", token);
-    }
-    if let Some(uid) = user_id {
-        replaced = replaced.replace("{{userId}}", uid);
+    if !base_url.is_empty() {
+        validate_base_url(base_url)?;
     }
 
     // 2. 在独立作用域中提取 request 配置（确保 Runtime/Context 在 await 前释放）
@@ -102,6 +96,8 @@ pub async fn execute_usage_script(
             format!("Invalid request config format: {e}"),
         )
     })?;
+
+    validate_request_url(&request.url, base_url, is_custom_template)?;
 
     // 4. 发送 HTTP 请求
     let response_data = send_http_request(&request, timeout_secs).await?;
@@ -217,18 +213,8 @@ struct RequestConfig {
 
 /// 发送 HTTP 请求
 async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<String, AppError> {
-    // 约束超时范围，防止异常配置导致长时间阻塞
-    let timeout = timeout_secs.clamp(2, 30);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| {
-            AppError::localized(
-                "usage_script.client_create_failed",
-                format!("创建客户端失败: {e}"),
-                format!("Failed to create client: {e}"),
-            )
-        })?;
+    let client = crate::proxy::http_client::get();
+    let request_timeout = std::time::Duration::from_secs(timeout_secs.clamp(2, 30));
 
     // 严格校验 HTTP 方法，非法值不回退为 GET
     let method: reqwest::Method = config.method.parse().map_err(|_| {
@@ -239,7 +225,9 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
         )
     })?;
 
-    let mut req = client.request(method.clone(), &config.url);
+    let mut req = client
+        .request(method.clone(), &config.url)
+        .timeout(request_timeout);
 
     // 添加请求头
     for (k, v) in &config.headers {
@@ -271,7 +259,11 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
 
     if !status.is_success() {
         let preview = if text.len() > 200 {
-            format!("{}...", &text[..200])
+            let mut safe_cut = 200usize;
+            while !text.is_char_boundary(safe_cut) {
+                safe_cut = safe_cut.saturating_sub(1);
+            }
+            format!("{}...", &text[..safe_cut])
         } else {
             text.clone()
         };
@@ -283,6 +275,219 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     }
 
     Ok(text)
+}
+
+fn build_script_with_vars(
+    script_code: &str,
+    api_key: &str,
+    base_url: &str,
+    access_token: Option<&str>,
+    user_id: Option<&str>,
+) -> String {
+    let mut replaced = script_code
+        .replace("{{apiKey}}", api_key)
+        .replace("{{baseUrl}}", base_url);
+
+    if let Some(token) = access_token {
+        replaced = replaced.replace("{{accessToken}}", token);
+    }
+    if let Some(uid) = user_id {
+        replaced = replaced.replace("{{userId}}", uid);
+    }
+
+    replaced
+}
+
+fn validate_base_url(base_url: &str) -> Result<(), AppError> {
+    if base_url.is_empty() {
+        return Err(AppError::localized(
+            "usage_script.base_url_empty",
+            "base_url 不能为空",
+            "base_url cannot be empty",
+        ));
+    }
+
+    let parsed_url = Url::parse(base_url).map_err(|e| {
+        AppError::localized(
+            "usage_script.base_url_invalid",
+            format!("无效的 base_url: {e}"),
+            format!("Invalid base_url: {e}"),
+        )
+    })?;
+
+    if parsed_url.scheme() != "https" && !is_loopback_host(&parsed_url) {
+        return Err(AppError::localized(
+            "usage_script.base_url_https_required",
+            "base_url 必须使用 HTTPS 协议（localhost 除外）",
+            "base_url must use HTTPS (localhost allowed)",
+        ));
+    }
+
+    parsed_url.host_str().ok_or_else(|| {
+        AppError::localized(
+            "usage_script.base_url_hostname_missing",
+            "base_url 必须包含有效的主机名",
+            "base_url must include a valid hostname",
+        )
+    })?;
+
+    Ok(())
+}
+
+fn validate_request_url(
+    request_url: &str,
+    base_url: &str,
+    is_custom_template: bool,
+) -> Result<(), AppError> {
+    let parsed_request = Url::parse(request_url).map_err(|e| {
+        AppError::localized(
+            "usage_script.request_url_invalid",
+            format!("无效的请求 URL: {e}"),
+            format!("Invalid request URL: {e}"),
+        )
+    })?;
+
+    let is_request_loopback = is_loopback_host(&parsed_request);
+
+    if !is_custom_template && parsed_request.scheme() != "https" && !is_request_loopback {
+        return Err(AppError::localized(
+            "usage_script.request_https_required",
+            "请求 URL 必须使用 HTTPS 协议（localhost 除外）",
+            "Request URL must use HTTPS (localhost allowed)",
+        ));
+    }
+
+    if !base_url.is_empty() && !is_custom_template {
+        let parsed_base = Url::parse(base_url).map_err(|e| {
+            AppError::localized(
+                "usage_script.base_url_invalid",
+                format!("无效的 base_url: {e}"),
+                format!("Invalid base_url: {e}"),
+            )
+        })?;
+
+        if parsed_request.host_str() != parsed_base.host_str() {
+            return Err(AppError::localized(
+                "usage_script.request_host_mismatch",
+                format!(
+                    "请求域名 {} 与 base_url 域名 {} 不匹配（必须是同源请求）",
+                    parsed_request.host_str().unwrap_or("unknown"),
+                    parsed_base.host_str().unwrap_or("unknown")
+                ),
+                format!(
+                    "Request host {} must match base_url host {} (same-origin required)",
+                    parsed_request.host_str().unwrap_or("unknown"),
+                    parsed_base.host_str().unwrap_or("unknown")
+                ),
+            ));
+        }
+
+        match (
+            parsed_request.port_or_known_default(),
+            parsed_base.port_or_known_default(),
+        ) {
+            (Some(request_port), Some(base_port)) if request_port == base_port => Ok(()),
+            (Some(request_port), Some(base_port)) => Err(AppError::localized(
+                "usage_script.request_port_mismatch",
+                format!("请求端口 {request_port} 必须与 base_url 端口 {base_port} 匹配"),
+                format!("Request port {request_port} must match base_url port {base_port}"),
+            )),
+            _ => Err(AppError::localized(
+                "usage_script.request_port_unknown",
+                "无法确定端口号",
+                "Unable to determine port number",
+            )),
+        }?;
+
+        if let Some(host) = parsed_request.host_str() {
+            let base_host = parsed_base.host_str().unwrap_or("");
+            if !is_private_ip(base_host) && is_private_ip(host) {
+                return Err(AppError::localized(
+                    "usage_script.private_ip_blocked",
+                    "禁止访问私有 IP 地址",
+                    "Access to private IP addresses is blocked",
+                ));
+            }
+        }
+    } else if let Some(host) = parsed_request.host_str() {
+        if is_private_ip(host) && !is_request_loopback {
+            return Err(AppError::localized(
+                "usage_script.private_ip_blocked",
+                "禁止访问私有 IP 地址（localhost 除外）",
+                "Access to private IP addresses is blocked (localhost allowed)",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    if let Ok(ip_addr) = host.parse::<std::net::IpAddr>() {
+        return is_private_ip_addr(ip_addr);
+    }
+
+    false
+}
+
+fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+
+            if octets[0] == 0 {
+                return true;
+            }
+            if octets[0] == 10 {
+                return true;
+            }
+            if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+                return true;
+            }
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            if octets[0] == 169 && octets[1] == 254 {
+                return true;
+            }
+            if octets[0] == 127 {
+                return true;
+            }
+
+            false
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            if ipv6.is_loopback() {
+                return true;
+            }
+
+            let first_segment = ipv6.segments()[0];
+            if (first_segment & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            if (first_segment & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            if ipv6.is_unspecified() {
+                return true;
+            }
+
+            false
+        }
+    }
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
 }
 
 /// 验证脚本返回值（支持单对象或数组）
@@ -393,4 +598,161 @@ fn validate_single_usage(result: &Value) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{execute_usage_script, send_http_request, validate_request_url, RequestConfig};
+    use axum::{http::StatusCode, routing::get, Router};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn proxy_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[tokio::test]
+    async fn send_http_request_http_error_preview_handles_multibyte_truncation() {
+        let _guard = proxy_test_lock();
+        crate::proxy::http_client::apply_proxy(None).expect("reset proxy to direct");
+
+        let body = "你".repeat(70);
+        let app = Router::new().route(
+            "/",
+            get({
+                let body = body.clone();
+                move || async move { (StatusCode::INTERNAL_SERVER_ERROR, body.clone()) }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let request = RequestConfig {
+            url: format!("http://{address}/"),
+            method: "GET".to_string(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let err = send_http_request(&request, 2)
+            .await
+            .expect_err("http error should return AppError");
+        assert!(err.to_string().contains("HTTP 500"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn send_http_request_uses_shared_proxy_aware_client() {
+        let _guard = proxy_test_lock();
+
+        let app = Router::new().route("/", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        crate::proxy::http_client::apply_proxy(Some("http://127.0.0.1:9"))
+            .expect("apply unreachable proxy");
+
+        let request = RequestConfig {
+            url: format!("http://{address}/"),
+            method: "GET".to_string(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let result = send_http_request(&request, 2).await;
+
+        crate::proxy::http_client::apply_proxy(None).expect("reset proxy to direct");
+        server.abort();
+
+        let err = result.expect_err("proxy-aware client should fail through unreachable proxy");
+        let message = err.to_string();
+        assert!(
+            message.contains("请求失败") || message.contains("Request failed"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_usage_script_custom_template_skips_same_origin_check() {
+        let _guard = proxy_test_lock();
+        crate::proxy::http_client::apply_proxy(None).expect("reset proxy to direct");
+
+        let app = Router::new().route("/", get(|| async { axum::Json(json!({ "total": 1 })) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let script = format!(
+            r#"({{
+                request: {{
+                    url: "http://{address}/",
+                    method: "GET"
+                }},
+                extractor: function(response) {{
+                    return {{ total: response.total }};
+                }}
+            }})"#
+        );
+
+        let non_custom =
+            execute_usage_script(&script, "", "https://api.example.com", 2, None, None, None).await;
+        let err = non_custom.expect_err("non-custom template should enforce same-origin");
+        let message = err.to_string();
+        assert!(
+            message.contains("同源请求") || message.contains("same-origin"),
+            "unexpected error message: {message}"
+        );
+
+        let custom = execute_usage_script(
+            &script,
+            "",
+            "https://api.example.com",
+            2,
+            None,
+            None,
+            Some("custom"),
+        )
+        .await
+        .expect("custom template should skip same-origin restriction");
+        assert_eq!(
+            custom.get("total").and_then(|value| value.as_i64()),
+            Some(1)
+        );
+
+        server.abort();
+    }
+
+    #[test]
+    fn validate_request_url_blocks_private_ip_but_allows_loopback() {
+        let err = validate_request_url("https://10.0.0.1/api", "", true)
+            .expect_err("private IP target should be blocked");
+        let message = err.to_string();
+        assert!(
+            message.contains("私有 IP") || message.contains("private IP"),
+            "unexpected error message: {message}"
+        );
+
+        validate_request_url("http://127.0.0.1/api", "", true)
+            .expect("loopback target should remain allowed");
+    }
 }

@@ -8,18 +8,19 @@ use cc_switch_lib::{
 /// 为测试设置隔离的 HOME 目录，避免污染真实用户数据。
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
-    HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join("cc-switch-test-home");
+    let home = HOME.get_or_init(|| {
+        // 每个测试进程使用独立目录，避免 integration test 二进制并行时互相清理文件。
+        let base = std::env::temp_dir().join(format!("cc-switch-test-home-{}", std::process::id()));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
         std::fs::create_dir_all(&base).expect("create test home");
-        std::env::set_var("HOME", &base);
-        #[cfg(windows)]
-        std::env::set_var("USERPROFILE", &base);
         base
-    })
-    .as_path()
+    });
+    std::env::set_var("HOME", home);
+    #[cfg(windows)]
+    std::env::set_var("USERPROFILE", home);
+    home.as_path()
 }
 
 /// 清理测试目录中生成的配置文件与缓存。

@@ -5,8 +5,8 @@ use std::{
 };
 
 use cc_switch_lib::{
-    get_claude_settings_path, get_codex_config_path, write_codex_live_atomic, AppState, Database,
-    ProxyService,
+    get_claude_settings_path, get_codex_config_path, write_codex_live_atomic, AppState, AppType,
+    Database, ProxyService,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -151,6 +151,32 @@ async fn proxy_service_starts_and_stops_without_takeover() {
         !service.is_running().await,
         "proxy should report stopped after stop"
     );
+}
+
+#[tokio::test]
+async fn proxy_service_stop_returns_error_when_runtime_is_not_running() {
+    let db = Arc::new(Database::memory().expect("create database"));
+    let service = ProxyService::new(db);
+
+    let error = service
+        .stop()
+        .await
+        .expect_err("stop should return an explicit not-running error");
+    assert!(
+        error.contains("not running"),
+        "unexpected stop error message: {error}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_service_stop_with_restore_swallows_not_running_stop_error() {
+    let db = Arc::new(Database::memory().expect("create database"));
+    let service = ProxyService::new(db);
+
+    service
+        .stop_with_restore()
+        .await
+        .expect("stop_with_restore should continue when stop reports not-running");
 }
 
 #[tokio::test]
@@ -394,7 +420,11 @@ async fn proxy_service_does_not_kill_unrelated_process_for_stale_external_marker
     .expect("persist stale external runtime session marker");
 
     let service = ProxyService::new(db.clone());
-    service.stop().await.expect("stop proxy with stale marker");
+    let err = service
+        .stop()
+        .await
+        .expect_err("stale external marker should report not running");
+    assert_eq!(err, "proxy server is not running");
 
     assert!(
         is_process_alive(unrelated_pid),
@@ -793,6 +823,96 @@ async fn managed_session_allows_second_supported_app_to_reuse_existing_runtime()
         .expect("disable managed proxy for codex");
 }
 
+#[tokio::test]
+#[serial]
+async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    seed_claude_live_config(json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "original-key",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+        }
+    }));
+
+    let state = AppState::try_new().expect("create app state");
+    let mut config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("get proxy config");
+    config.listen_port = 0;
+    state
+        .proxy_service
+        .update_config(&config)
+        .await
+        .expect("persist proxy config with ephemeral port");
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", true)
+        .await
+        .expect("enable claude takeover");
+
+    state
+        .proxy_service
+        .stop()
+        .await
+        .expect("stop proxy runtime only");
+
+    assert!(
+        !state.proxy_service.is_running().await,
+        "stop should still stop the runtime"
+    );
+
+    let takeover = state
+        .proxy_service
+        .get_takeover_status()
+        .await
+        .expect("read takeover status after stop");
+    assert!(
+        takeover.claude,
+        "stop should preserve the claude takeover flag until an explicit restore path runs"
+    );
+    assert!(
+        state
+            .db
+            .get_live_backup("claude")
+            .await
+            .expect("load claude live backup after stop")
+            .is_some(),
+        "stop should preserve the claude live backup for later restore"
+    );
+    assert!(
+        state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&AppType::Claude),
+        "stop should leave the claude live config rewritten for takeover"
+    );
+
+    let live_after_stop: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(get_claude_settings_path())
+            .expect("read claude live config after stop"),
+    )
+    .expect("parse claude live config after stop");
+    assert_eq!(
+        live_after_stop
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "stop should not restore the original Claude token"
+    );
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", false)
+        .await
+        .expect("explicit restore after stop");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
@@ -872,6 +992,145 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
         .set_managed_session_for_app("codex", false)
         .await
         .expect("disable managed proxy for codex");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn managed_session_disable_last_app_terminates_external_process_even_when_status_probe_fails()
+{
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    seed_claude_live_config(json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "claude-live-key"
+        }
+    }));
+
+    let state = AppState::try_new().expect("create app state");
+    let mut config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("get proxy config");
+    config.listen_port = find_free_port();
+    state
+        .proxy_service
+        .update_config(&config)
+        .await
+        .expect("persist proxy config");
+
+    state
+        .proxy_service
+        .set_managed_session_for_app("claude", true)
+        .await
+        .expect("start managed proxy for claude");
+    let runtime_pid = load_runtime_session_pid(&state);
+    let _cleanup = ManagedSessionCleanup::new(runtime_pid);
+
+    let mut runtime_session: serde_json::Value = serde_json::from_str(
+        &state
+            .db
+            .get_setting("proxy_runtime_session")
+            .expect("read runtime session marker")
+            .expect("runtime session marker should exist"),
+    )
+    .expect("parse runtime session marker");
+    runtime_session["port"] = json!(find_free_port());
+    state
+        .db
+        .set_setting("proxy_runtime_session", &runtime_session.to_string())
+        .expect("persist tampered runtime session marker");
+
+    let status = state.proxy_service.get_status().await;
+    assert!(
+        status.running,
+        "owned managed external markers should still report running when /status probe is unreachable"
+    );
+    assert!(
+        state
+            .db
+            .get_setting("proxy_runtime_session")
+            .expect("read runtime session marker after unreachable get_status")
+            .is_some(),
+        "owned managed external marker should survive an unreachable /status probe so last-app disable can still stop it"
+    );
+
+    state
+        .proxy_service
+        .set_managed_session_for_app("claude", false)
+        .await
+        .expect("disable final managed app and stop runtime");
+
+    wait_for(Duration::from_secs(5), || !is_process_alive(runtime_pid));
+
+    assert!(
+        state
+            .db
+            .get_setting("proxy_runtime_session")
+            .expect("read runtime session marker")
+            .is_none(),
+        "stopping the last managed app should clear persisted runtime marker"
+    );
+
+    let global = state
+        .proxy_service
+        .get_global_config()
+        .await
+        .expect("read global proxy switch");
+    assert!(
+        !global.proxy_enabled,
+        "stopping the last managed app should persist global proxy enabled=false"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn proxy_service_does_not_kill_unrelated_process_with_reused_pid_and_token_when_status_unreachable(
+) {
+    let mut unrelated = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn unrelated process");
+    let unrelated_pid = unrelated.id();
+
+    let db = Arc::new(Database::memory().expect("create database"));
+    db.set_setting(
+        "proxy_runtime_session",
+        &json!({
+            "pid": unrelated_pid,
+            "address": "127.0.0.1",
+            "port": find_free_port(),
+            "started_at": "2026-03-10T00:00:00Z",
+            "kind": "managed_external",
+            "session_token": "stale-owned-token"
+        })
+        .to_string(),
+    )
+    .expect("persist stale external runtime marker with token");
+
+    let service = ProxyService::new(db.clone());
+    let err = service
+        .stop()
+        .await
+        .expect_err("stale tokenized external marker should report not running");
+    assert_eq!(err, "proxy server is not running");
+
+    assert!(
+        is_process_alive(unrelated_pid),
+        "unreachable status plus stale token must not terminate unrelated live processes with reused pids"
+    );
+    assert!(
+        db.get_setting("proxy_runtime_session")
+            .expect("read runtime marker after stop")
+            .is_none(),
+        "stop should clear stale tokenized external markers after refusing to kill unrelated processes"
+    );
+
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
 }
 
 #[cfg(unix)]
@@ -1131,10 +1390,11 @@ async fn proxy_service_does_not_kill_process_when_status_token_mismatches() {
     .expect("persist proxy runtime session marker");
 
     let service = ProxyService::new(db.clone());
-    service
+    let err = service
         .stop()
         .await
-        .expect("stop proxy with mismatched status token");
+        .expect_err("mismatched status token should report not running");
+    assert_eq!(err, "proxy server is not running");
 
     assert!(
         is_process_alive(unrelated_pid),

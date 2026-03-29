@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs};
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_mcp_path, get_claude_settings_path, AppError, AppState, AppType, McpApps, McpServer,
+    get_claude_mcp_path, get_claude_settings_path, AppError, AppType, McpApps, McpServer,
     McpService, MultiAppConfig, ProviderService,
 };
 
@@ -68,7 +68,7 @@ fn import_default_config_claude_persists_provider() {
 fn import_default_config_without_live_file_returns_error() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let state = state_from_config(MultiAppConfig::default());
 
@@ -100,7 +100,7 @@ fn import_default_config_without_live_file_returns_error() {
 fn import_mcp_from_claude_creates_config_and_enables_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let mcp_path = get_claude_mcp_path();
     let claude_json = json!({
@@ -155,7 +155,7 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
 fn import_mcp_from_claude_invalid_json_preserves_state() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let mcp_path = get_claude_mcp_path();
     fs::write(&mcp_path, "{\"mcpServers\":") // 不完整 JSON
@@ -505,5 +505,70 @@ fn upsert_server_disables_app_removes_from_gemini_live() {
     assert!(
         !remove_me_present,
         "upsert with Gemini disabled should remove it from ~/.gemini/settings.json, got: {settings_text}"
+    );
+}
+
+#[test]
+fn sync_all_enabled_removes_disabled_gemini_server_from_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let url = "http://localhost:1234";
+
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create gemini dir");
+    let settings_path = gemini_dir.join("settings.json");
+    let settings = json!({
+        "mcpServers": {
+            "remove_me": {
+                "httpUrl": url
+            }
+        }
+    });
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).expect("serialize gemini settings"),
+    )
+    .expect("seed ~/.gemini/settings.json");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "remove_me".into(),
+        McpServer {
+            id: "remove_me".to_string(),
+            name: "Remove Me".to_string(),
+            server: json!({
+                "type": "http",
+                "url": url
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: false,
+                gemini: false,
+                opencode: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+
+    let state = state_from_config(config);
+    state.save().expect("persist config to db");
+
+    McpService::sync_all_enabled(&state).expect("sync_all_enabled succeeds");
+
+    let settings_text = fs::read_to_string(&settings_path).expect("read gemini settings");
+    let settings_json: serde_json::Value =
+        serde_json::from_str(&settings_text).expect("parse gemini settings");
+    let remove_me_present = settings_json
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .is_some_and(|mcp_servers| mcp_servers.contains_key("remove_me"));
+    assert!(
+        !remove_me_present,
+        "sync_all_enabled should remove disabled Gemini binding from live config, got: {settings_text}"
     );
 }

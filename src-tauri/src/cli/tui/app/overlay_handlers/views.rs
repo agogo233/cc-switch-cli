@@ -39,7 +39,7 @@ impl App {
         if let Some(action) = self.handle_backup_picker_key(key, data) {
             return Some(action);
         }
-        if let Some(action) = self.handle_text_view_overlay_key(key) {
+        if let Some(action) = self.handle_text_view_overlay_key(key, data) {
             return Some(action);
         }
         if let Some(action) = self.handle_common_snippet_picker_key(key, data) {
@@ -113,32 +113,41 @@ impl App {
         })
     }
 
-    fn handle_text_view_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::TextView(view) = &mut self.overlay else {
+    fn handle_text_view_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
+        if !matches!(self.overlay, Overlay::TextView(_)) {
             return None;
-        };
+        }
 
         Some(match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.overlay = Overlay::None;
                 Action::None
             }
-            KeyCode::Char('t') | KeyCode::Char('T') => match &view.action {
-                Some(TextViewAction::ProxyToggleTakeover { app_type, enabled }) => {
-                    Action::SetProxyTakeover {
-                        app_type: app_type.clone(),
-                        enabled: *enabled,
-                    }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                let has_action = matches!(
+                    &self.overlay,
+                    Overlay::TextView(TextViewState {
+                        action: Some(TextViewAction::ProxyToggleTakeover { .. }),
+                        ..
+                    })
+                );
+                if has_action {
+                    self.main_proxy_action(data)
+                } else {
+                    Action::None
                 }
-                None => Action::None,
-            },
+            }
             KeyCode::Up => {
-                view.scroll = view.scroll.saturating_sub(1);
+                if let Overlay::TextView(view) = &mut self.overlay {
+                    view.scroll = view.scroll.saturating_sub(1);
+                }
                 Action::None
             }
             KeyCode::Down => {
-                if !view.lines.is_empty() {
-                    view.scroll = (view.scroll + 1).min(view.lines.len() - 1);
+                if let Overlay::TextView(view) = &mut self.overlay {
+                    if !view.lines.is_empty() {
+                        view.scroll = (view.scroll + 1).min(view.lines.len() - 1);
+                    }
                 }
                 Action::None
             }

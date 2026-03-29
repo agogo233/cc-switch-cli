@@ -115,12 +115,12 @@ fn serve_proxy(
                 .map_err(AppError::Message)?;
 
             if let Err(err) = apply_takeovers(&service, &takeovers).await {
-                let _ = service.stop().await;
+                let _ = service.stop_with_restore().await;
                 return Err(AppError::Message(err));
             }
 
             if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
-                let _ = service.stop().await;
+                let _ = service.stop_with_restore().await;
                 return Err(AppError::Message(err));
             }
 
@@ -174,7 +174,10 @@ fn serve_proxy(
                 .await
                 .map_err(|e| AppError::Message(format!("failed to listen for Ctrl-C: {e}")))?;
 
-            service.stop().await.map_err(AppError::Message)?;
+            service
+                .stop_with_restore()
+                .await
+                .map_err(AppError::Message)?;
             println!(
                 "{}",
                 success(crate::t!("✓ Proxy stopped.", "✓ 代理已停止。"))

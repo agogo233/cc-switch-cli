@@ -35,12 +35,11 @@ impl HandlerContext {
         headers: &HeaderMap,
         body: &Value,
     ) -> Result<Self, ProxyError> {
-        let current_provider_id_at_start = state
-            .db
-            .get_current_provider(app_type.as_str())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let current_provider_id_at_start =
+            crate::settings::get_effective_current_provider(&state.db, &app_type)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
         state.record_request_start().await;
         let start_time = Instant::now();
 
@@ -127,9 +126,53 @@ mod tests {
     use super::*;
 
     use serde_json::json;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
     use tokio::sync::RwLock;
 
     use crate::{database::Database, proxy::types::ProxyConfig};
+
+    struct TempHome {
+        #[allow(dead_code)]
+        dir: TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("create temp home");
+            let original_home = env::var("HOME").ok();
+            let original_userprofile = env::var("USERPROFILE").ok();
+
+            env::set_var("HOME", dir.path());
+            env::set_var("USERPROFILE", dir.path());
+            crate::settings::reload_test_settings();
+
+            Self {
+                dir,
+                original_home,
+                original_userprofile,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+
+            match &self.original_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+
+            crate::settings::reload_test_settings();
+        }
+    }
 
     fn test_provider(id: &str, sort_index: usize) -> Provider {
         Provider {
@@ -160,7 +203,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn load_uses_current_provider_id_at_request_start() {
+        let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
         let current = test_provider("claude-current", 1);
         let failover = test_provider("claude-failover", 0);
@@ -195,7 +240,47 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn load_uses_effective_current_provider_from_settings_at_request_start() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", 1);
+        let failover = test_provider("claude-failover", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider in db");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&failover.id))
+            .expect("set effective current provider in settings");
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read app proxy config");
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "claude-3-7-sonnet-20250219"}),
+        )
+        .await
+        .expect("load handler context");
+
+        assert_eq!(context.current_provider_id_at_start, "claude-failover");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn load_captures_current_provider_before_later_awaits() {
+        let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
         let current = test_provider("claude-current", 1);
         let failover = test_provider("claude-failover", 0);

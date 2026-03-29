@@ -1798,3 +1798,64 @@ fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
     assert_eq!(roundtrip.id, "test-provider");
     assert_eq!(roundtrip.name, "Test Provider");
 }
+
+#[test]
+fn provider_edit_form_roundtrip_preserves_upstream_meta_auth_and_type_fields() {
+    let provider_value = json!({
+        "id": "provider-1",
+        "name": "Provider One",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com"
+            }
+        },
+        "meta": {
+            "authBinding": {
+                "source": "managed_account",
+                "authProvider": "github_copilot",
+                "accountId": "acc-1"
+            },
+            "apiKeyField": "ANTHROPIC_AUTH_TOKEN",
+            "providerType": "github_copilot",
+            "githubAccountId": "gh-123"
+        }
+    });
+    let provider: Provider = serde_json::from_value(provider_value).expect("provider json valid");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let roundtrip = form.to_provider_json_value();
+    let meta = roundtrip["meta"]
+        .as_object()
+        .expect("meta should be object");
+
+    assert_eq!(
+        meta.get("authBinding")
+            .and_then(|value| value.get("source"))
+            .and_then(|value| value.as_str()),
+        Some("managed_account")
+    );
+    assert_eq!(
+        meta.get("authBinding")
+            .and_then(|value| value.get("authProvider"))
+            .and_then(|value| value.as_str()),
+        Some("github_copilot")
+    );
+    assert_eq!(
+        meta.get("authBinding")
+            .and_then(|value| value.get("accountId"))
+            .and_then(|value| value.as_str()),
+        Some("acc-1")
+    );
+    assert_eq!(
+        meta.get("apiKeyField").and_then(|value| value.as_str()),
+        Some("ANTHROPIC_AUTH_TOKEN")
+    );
+    assert_eq!(
+        meta.get("providerType").and_then(|value| value.as_str()),
+        Some("github_copilot")
+    );
+    assert_eq!(
+        meta.get("githubAccountId").and_then(|value| value.as_str()),
+        Some("gh-123")
+    );
+}

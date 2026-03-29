@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use tokio::sync::Mutex;
 
+#[path = "support.rs"]
+mod support;
+use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
+
 async fn bind_test_listener() -> tokio::net::TcpListener {
     let mut last_error = None;
     for _ in 0..20 {
@@ -411,6 +415,10 @@ async fn send_claude_request(service: &ProxyService, body: &Value) -> reqwest::R
 #[tokio::test]
 #[serial]
 async fn proxy_claude_successful_failover_syncs_current_provider_and_status() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
     let upstream_state = UpstreamState::default();
     let upstream_listener = bind_test_listener().await;
     let upstream_addr = upstream_listener
@@ -532,6 +540,10 @@ async fn proxy_claude_successful_failover_syncs_current_provider_and_status() {
 #[tokio::test]
 #[serial]
 async fn proxy_claude_failed_failover_keeps_state_unsynced() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
     let upstream_state = ScriptedUpstreamState {
         responses: Arc::new(Mutex::new(VecDeque::from(vec![
             (

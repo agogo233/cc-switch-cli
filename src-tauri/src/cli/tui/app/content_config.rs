@@ -851,17 +851,21 @@ impl App {
             crate::t!("stopped", "未运行")
         };
         let current_takeover = data.proxy.takeover_enabled_for(&self.app_type);
+        let current_app_routed = data.proxy.routes_current_app_through_proxy(&self.app_type);
+        let proxy_action_available = current_app_routed.is_some_and(|current_app_routed| {
+            !data.proxy.running || data.proxy.managed_runtime || current_app_routed
+        });
         let takeover_state = match current_takeover {
             Some(true) => crate::t!("active", "已接管"),
             Some(false) => crate::t!("inactive", "未接管"),
             None => crate::t!("not supported", "不支持"),
         };
-        let toggle_action = match current_takeover {
-            Some(true) => Some(TextViewAction::ProxyToggleTakeover {
+        let toggle_action = match current_app_routed {
+            Some(true) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
                 app_type: self.app_type.clone(),
                 enabled: false,
             }),
-            Some(false) if data.proxy.running => Some(TextViewAction::ProxyToggleTakeover {
+            Some(false) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
                 app_type: self.app_type.clone(),
                 enabled: true,
             }),
@@ -930,36 +934,32 @@ impl App {
             );
         }
 
-        lines.extend([
-            String::new(),
-            match current_takeover {
-                Some(true) => crate::t!(
-                    "Press T to restore the current app to its live config.",
-                    "按 T 恢复当前应用的 live 配置。"
-                )
-                .to_string(),
-                Some(false) if data.proxy.running => crate::t!(
-                    "Press T to take over the current app with the running foreground proxy.",
-                    "按 T 将当前应用接管到正在运行的前台代理。"
-                )
-                .to_string(),
-                Some(false) => crate::t!(
-                    "Start `cc-switch proxy serve` first, then press T to take over the current app.",
-                    "请先启动 `cc-switch proxy serve`，再按 T 接管当前应用。"
-                )
-                .to_string(),
-                None => crate::t!(
-                    "This app does not support proxy takeover in the TUI.",
-                    "这个应用暂不支持在 TUI 中进行代理接管。"
-                )
-                .to_string(),
-            },
-            crate::t!(
-                "Start or stop the foreground proxy from another terminal with `cc-switch proxy serve` and Ctrl+C.",
-                "请在另一个终端用 `cc-switch proxy serve` 和 Ctrl+C 启停前台代理。"
+        lines.push(String::new());
+        lines.push(match current_app_routed {
+            Some(true) => crate::t!(
+                "Press T to restore the current app to its live config.",
+                "按 T 恢复当前应用的 live 配置。"
             )
             .to_string(),
-        ]);
+            Some(false) if !proxy_action_available => {
+                texts::tui_proxy_dashboard_running_elsewhere().to_string()
+            }
+            Some(false) if data.proxy.running => crate::t!(
+                "Press T to route the current app through the running managed proxy.",
+                "按 T 让当前应用接入正在运行的托管代理。"
+            )
+            .to_string(),
+            Some(false) => crate::t!(
+                "Press T to start the managed proxy and route the current app through cc-switch.",
+                "按 T 启动托管代理，并让当前应用走 cc-switch。"
+            )
+            .to_string(),
+            None => crate::t!(
+                "This app does not support proxy takeover in the TUI.",
+                "这个应用暂不支持在 TUI 中进行代理接管。"
+            )
+            .to_string(),
+        });
 
         if matches!(self.app_type, AppType::Claude) {
             lines.push(String::new());

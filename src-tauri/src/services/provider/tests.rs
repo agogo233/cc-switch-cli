@@ -169,10 +169,11 @@ fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppStat
     .expect("seed current live config");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
     (temp_home, env, state)
 }
 
-fn setup_codex_state_with_dangling_current_and_broken_other_snapshot(
+fn setup_codex_state_with_db_current_and_broken_fallback_other_snapshot(
 ) -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
     let env = EnvGuard::set_home(temp_home.path());
@@ -182,33 +183,37 @@ fn setup_codex_state_with_dangling_current_and_broken_other_snapshot(
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
     config.common_config_snippets.codex = Some("disable_response_storage = true".to_string());
+    let mut current_provider = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
+        }),
+        None,
+    );
+    current_provider.sort_index = Some(10);
+
+    let mut broken_fallback_provider = Provider::with_id(
+        "p2".to_string(),
+        "Broken legacy".to_string(),
+        json!({
+            "config": "stale-config"
+        }),
+        None,
+    );
+    broken_fallback_provider.sort_index = Some(0);
+
     {
         let manager = config
             .get_manager_mut(&AppType::Codex)
             .expect("codex manager");
         manager.current = "missing".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
-                None,
-            ),
-        );
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Broken legacy".to_string(),
-                json!({
-                    "config": "stale-config"
-                }),
-                None,
-            ),
-        );
+        manager
+            .providers
+            .insert("p1".to_string(), current_provider.clone());
+        manager
+            .providers
+            .insert("p2".to_string(), broken_fallback_provider.clone());
     }
 
     std::fs::write(
@@ -218,6 +223,18 @@ fn setup_codex_state_with_dangling_current_and_broken_other_snapshot(
     .expect("seed current live config");
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &current_provider)
+        .expect("save current provider to db");
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &broken_fallback_provider)
+        .expect("save broken fallback provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider");
     (temp_home, env, state)
 }
 
@@ -525,7 +542,71 @@ fn add_first_provider_sets_current() {
 
 #[test]
 #[serial]
-fn current_self_heals_when_current_provider_missing() {
+fn current_prefers_effective_current_from_local_settings_without_mutating_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
+        .expect("set local effective current override");
+
+    let current_id = ProviderService::current(&state, AppType::Claude)
+        .expect("resolve current provider from effective local settings");
+    assert_eq!(
+        current_id, "p2",
+        "current() should prefer the effective current provider from local settings"
+    );
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "p1",
+        "current() should not rewrite in-memory config when resolving effective current provider"
+    );
+}
+
+#[test]
+#[serial]
+fn current_falls_back_to_db_current_without_self_healing_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
 
@@ -568,25 +649,225 @@ fn current_self_heals_when_current_provider_missing() {
     }
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save p1 to db");
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save p2 to db");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p2")
+        .expect("set db current provider");
 
     let current_id =
-        ProviderService::current(&state, AppType::Claude).expect("self-heal current provider");
+        ProviderService::current(&state, AppType::Claude).expect("read current provider from db");
     assert_eq!(
         current_id, "p2",
-        "should pick provider with smaller sort_index"
+        "current() should fall back to the stored current provider in db"
+    );
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "missing",
+        "current() should not self-heal stale in-memory config while reading effective current provider"
+    );
+}
+
+#[test]
+#[serial]
+fn current_clears_invalid_local_override_and_falls_back_to_db_current() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p2".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    crate::settings::set_current_provider(&AppType::Claude, Some("missing"))
+        .expect("set invalid local current override");
+
+    let current_id = ProviderService::current(&state, AppType::Claude)
+        .expect("fall back to stored current provider after clearing invalid local override");
+    assert_eq!(
+        current_id, "p2",
+        "current() should fall back to the stored db current provider when local override is invalid"
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude),
+        None,
+        "current() should clear invalid local current override during effective-current fallback"
     );
 
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
     assert_eq!(
         manager.current, "p2",
-        "current should be updated in config after self-heal"
+        "current() should not mutate config when the stored current provider is already valid"
     );
 }
 
 #[test]
 #[serial]
-fn updating_common_snippet_self_heals_dangling_current_and_refreshes_live() {
+fn sync_current_to_live_prefers_effective_current_from_local_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(
+        get_claude_settings_path()
+            .parent()
+            .expect("claude settings parent dir"),
+    )
+    .expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one"
+            }
+        }),
+    )
+    .expect("seed live settings with config.current provider");
+
+    crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
+        .expect("set local effective current override");
+
+    ProviderService::sync_current_to_live(&state)
+        .expect("sync_current_to_live should use effective current provider");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    let env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token2"),
+        "sync_current_to_live should refresh live settings from the effective current provider"
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.two"),
+        "sync_current_to_live should not keep using stale config.current when local settings override it"
+    );
+
+    let cfg = state.config.read().expect("read config after sync");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "p1",
+        "sync_current_to_live should not rewrite in-memory config while resolving the effective current provider"
+    );
+}
+
+#[test]
+#[serial]
+fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
@@ -642,6 +923,44 @@ fn updating_common_snippet_self_heals_dangling_current_and_refreshes_live() {
     .expect("seed stale live settings");
 
     let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save first provider to db");
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save second provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -653,8 +972,8 @@ fn updating_common_snippet_self_heals_dangling_current_and_refreshes_live() {
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
     assert_eq!(
-        manager.current, "p2",
-        "updating common snippet should self-heal dangling current before persisting"
+        manager.current, "missing",
+        "updating common snippet should not rewrite stale config.current while syncing live from db current"
     );
     drop(cfg);
 
@@ -670,8 +989,134 @@ fn updating_common_snippet_self_heals_dangling_current_and_refreshes_live() {
         .expect("live env should be object");
     assert_eq!(
         env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token2"),
-        "live settings should refresh from the healed current provider instead of staying stale"
+        Some("token1"),
+        "live settings should refresh from the effective current provider instead of fallback-healing config.current"
+    );
+}
+
+#[test]
+#[serial]
+fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_current_provider() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "missing".to_string();
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_BASE_URL": "https://stale.example"
+            }
+        }),
+    )
+    .expect("seed stale live settings");
+
+    let state = state_from_config(config);
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save current provider to db");
+    state
+        .db
+        .save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save non-current provider to db");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    ProviderService::set_common_config_snippet(
+        &state,
+        AppType::Claude,
+        Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
+    )
+    .expect("update common snippet should use db current even when config snapshot is missing it");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.get("includeCoAuthoredBy").and_then(Value::as_bool),
+        Some(false),
+        "new common snippet should be applied to live settings"
+    );
+    let env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token1"),
+        "live settings should be refreshed from the db current provider even when config snapshot lacks it"
+    );
+
+    let cfg = state.config.read().expect("read config after update");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "missing",
+        "updating common snippet should not rewrite stale config.current even when hydrating the current provider snapshot from db"
+    );
+    assert!(
+        manager.providers.contains_key("p1"),
+        "missing current provider snapshot should be hydrated from db before the common snippet update is persisted"
+    );
+
+    let db_providers = state
+        .db
+        .get_all_providers(AppType::Claude.as_str())
+        .expect("read db providers after update");
+    assert!(
+        db_providers.contains_key("p1"),
+        "db current provider should remain persisted after updating the common snippet"
     );
 }
 
@@ -996,6 +1441,196 @@ fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
 
 #[test]
 #[serial]
+fn provider_update_treats_settings_effective_current_as_current_for_live_write() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one"
+            }
+        }),
+    )
+    .expect("seed current live settings as p1");
+
+    crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
+        .expect("set local effective current override to p2");
+
+    let provider = Provider::with_id(
+        "p2".to_string(),
+        "Second Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token2-updated",
+                "ANTHROPIC_BASE_URL": "https://claude.two.updated"
+            }
+        }),
+        None,
+    );
+
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    let live_env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        live_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token2-updated"),
+        "update should treat settings effective current (p2) as current and rewrite live settings"
+    );
+    assert_eq!(
+        live_env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.two.updated"),
+        "live settings should reflect updated effective current provider"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_update_clears_invalid_local_current_override_and_falls_back_to_stored_current() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token2",
+                "ANTHROPIC_BASE_URL": "https://claude.two"
+            }
+        }),
+    )
+    .expect("seed current live settings as p2");
+
+    crate::settings::set_current_provider(&AppType::Claude, Some("missing"))
+        .expect("set invalid local current override");
+
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1-updated",
+                "ANTHROPIC_BASE_URL": "https://claude.one.updated"
+            }
+        }),
+        None,
+    );
+
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude),
+        None,
+        "invalid local current override should be cleared during effective-current fallback"
+    );
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    let live_env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        live_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token1-updated"),
+        "update should fall back to stored current provider when local override is invalid"
+    );
+    assert_eq!(
+        live_env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.one.updated"),
+        "live settings should reflect stored current provider fallback"
+    );
+}
+
+#[test]
+#[serial]
 fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
@@ -1131,6 +1766,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snaps
     .expect("seed current live settings");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -1552,6 +2188,7 @@ fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
     .expect("seed current live settings");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::clear_common_config_snippet(&state, AppType::Claude)
         .expect("clear should recover from invalid stored snippet");
@@ -1987,17 +2624,16 @@ fn clearing_codex_common_snippet_skips_broken_other_provider_snapshot() {
 
 #[test]
 #[serial]
-fn setting_codex_common_snippet_self_heals_dangling_current_before_skipping_broken_other_snapshot()
-{
+fn setting_codex_common_snippet_uses_db_current_before_skipping_broken_other_snapshot() {
     let (_temp_home, _env, state) =
-        setup_codex_state_with_dangling_current_and_broken_other_snapshot();
+        setup_codex_state_with_db_current_and_broken_fallback_other_snapshot();
 
     ProviderService::set_common_config_snippet(
         &state,
         AppType::Codex,
         Some("network_access = \"restricted\"".to_string()),
     )
-    .expect("set should self-heal dangling current before normalizing snapshots");
+    .expect("set should use the db current provider before normalizing snapshots");
 
     let cfg = state.config.read().expect("read config after set");
     assert_eq!(
@@ -2007,8 +2643,8 @@ fn setting_codex_common_snippet_self_heals_dangling_current_before_skipping_brok
     );
     let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
     assert_eq!(
-        manager.current, "p1",
-        "dangling current should self-heal to the fallback provider before snapshot normalization"
+        manager.current, "missing",
+        "setting a common snippet should not rewrite stale config.current while syncing live from db current"
     );
     let broken = manager
         .providers
@@ -2024,7 +2660,7 @@ fn setting_codex_common_snippet_self_heals_dangling_current_before_skipping_brok
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
         live_text.contains("network_access = \"restricted\""),
-        "self-healed current provider should still refresh the live config with the new common snippet"
+        "db current provider should still refresh the live config with the new common snippet"
     );
     assert!(
         !live_text.contains("disable_response_storage = true"),
@@ -2032,19 +2668,18 @@ fn setting_codex_common_snippet_self_heals_dangling_current_before_skipping_brok
     );
     assert!(
         live_text.contains("base_url = \"https://api.one.example/v1\""),
-        "live config should be rebuilt from the healed current provider"
+        "live config should be rebuilt from the db current provider"
     );
 }
 
 #[test]
 #[serial]
-fn clearing_codex_common_snippet_self_heals_dangling_current_before_skipping_broken_other_snapshot()
-{
+fn clearing_codex_common_snippet_uses_db_current_before_skipping_broken_other_snapshot() {
     let (_temp_home, _env, state) =
-        setup_codex_state_with_dangling_current_and_broken_other_snapshot();
+        setup_codex_state_with_db_current_and_broken_fallback_other_snapshot();
 
     ProviderService::clear_common_config_snippet(&state, AppType::Codex)
-        .expect("clear should self-heal dangling current before normalizing snapshots");
+        .expect("clear should use the db current provider before normalizing snapshots");
 
     let cfg = state.config.read().expect("read config after clear");
     assert!(
@@ -2053,8 +2688,8 @@ fn clearing_codex_common_snippet_self_heals_dangling_current_before_skipping_bro
     );
     let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
     assert_eq!(
-        manager.current, "p1",
-        "dangling current should self-heal to the fallback provider before clearing snapshots"
+        manager.current, "missing",
+        "clearing a common snippet should not rewrite stale config.current while syncing live from db current"
     );
     let broken = manager
         .providers
@@ -2074,7 +2709,7 @@ fn clearing_codex_common_snippet_self_heals_dangling_current_before_skipping_bro
     );
     assert!(
         live_text.contains("base_url = \"https://api.one.example/v1\""),
-        "live config should be rebuilt from the healed current provider during clear"
+        "live config should be rebuilt from the db current provider during clear"
     );
 }
 
@@ -2367,6 +3002,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_codex_provider_snapsh
     .expect("seed current live config");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -2440,6 +3076,7 @@ fn setting_codex_common_snippet_normalizes_existing_provider_snapshot() {
     }
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -2520,6 +3157,7 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
     .expect("seed current live config");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -2901,6 +3539,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_gemini_provider_snaps
     .expect("seed current gemini env");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -2981,6 +3620,7 @@ fn setting_gemini_common_snippet_normalizes_existing_provider_snapshot() {
     }
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,
@@ -3067,6 +3707,7 @@ fn replacing_gemini_common_snippet_tolerates_invalid_stored_snippet() {
     .expect("seed current gemini env");
 
     let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
 
     ProviderService::set_common_config_snippet(
         &state,

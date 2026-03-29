@@ -18,6 +18,7 @@ impl ProviderService {
         timeout: u64,
         access_token: Option<&str>,
         user_id: Option<&str>,
+        template_type: Option<&str>,
     ) -> Result<UsageResult, AppError> {
         match usage_script::execute_usage_script(
             script_code,
@@ -26,6 +27,7 @@ impl ProviderService {
             timeout,
             access_token,
             user_id,
+            template_type,
         )
         .await
         {
@@ -86,12 +88,9 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<UsageResult, AppError> {
-        let (script_code, timeout, api_key, base_url, access_token, user_id) = {
-            let config = state.config.read().map_err(AppError::from)?;
-            let manager = config
-                .get_manager(&app_type)
-                .ok_or_else(|| Self::app_not_found(&app_type))?;
-            let provider = manager.providers.get(provider_id).cloned().ok_or_else(|| {
+        let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
+            let providers = state.db.get_all_providers(app_type.as_str())?;
+            let provider = providers.get(provider_id).ok_or_else(|| {
                 AppError::localized(
                     "provider.not_found",
                     format!("供应商不存在: {provider_id}"),
@@ -128,6 +127,7 @@ impl ProviderService {
                 base_url,
                 usage_script.access_token.clone(),
                 usage_script.user_id.clone(),
+                usage_script.template_type.clone(),
             )
         };
 
@@ -138,6 +138,7 @@ impl ProviderService {
             timeout,
             access_token.as_deref(),
             user_id.as_deref(),
+            template_type.as_deref(),
         )
         .await
     }
@@ -154,6 +155,7 @@ impl ProviderService {
         base_url: Option<&str>,
         access_token: Option<&str>,
         user_id: Option<&str>,
+        template_type: Option<&str>,
     ) -> Result<UsageResult, AppError> {
         // 直接使用传入的凭证参数进行测试
         Self::execute_and_format_usage_result(
@@ -163,6 +165,7 @@ impl ProviderService {
             timeout,
             access_token,
             user_id,
+            template_type,
         )
         .await
     }
@@ -388,5 +391,82 @@ impl ProviderService {
         };
 
         Ok((api_key, base_url))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderService;
+    use crate::app_config::{AppType, MultiAppConfig};
+    use crate::provider::{Provider, ProviderMeta, UsageScript};
+    use axum::{routing::get, Router};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn query_usage_reads_provider_from_db_when_config_snapshot_is_stale() {
+        let state = super::super::state_from_config(MultiAppConfig::default());
+
+        let app = Router::new().route("/", get(|| async { axum::Json(json!({ "total": 42 })) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let mut provider = Provider::with_id(
+            "db-only".to_string(),
+            "DB Only".to_string(),
+            json!({}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: r#"({
+                    request: {
+                        url: "{{baseUrl}}",
+                        method: "GET"
+                    },
+                    extractor: function(response) {
+                        return { total: response.total };
+                    }
+                })"#
+                .to_string(),
+                timeout: Some(2),
+                api_key: Some("unused".to_string()),
+                base_url: Some(format!("http://{address}/")),
+                access_token: None,
+                user_id: None,
+                template_type: None,
+                auto_query_interval: None,
+            }),
+            ..Default::default()
+        });
+        state
+            .db
+            .save_provider(AppType::OpenClaw.as_str(), &provider)
+            .expect("save provider to db only");
+
+        let result = ProviderService::query_usage(&state, AppType::OpenClaw, "db-only")
+            .await
+            .expect("query usage should use db-backed provider lookup");
+
+        assert!(
+            result.success,
+            "expected successful usage query: {result:?}"
+        );
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|items| items.first())
+                .and_then(|usage| usage.total),
+            Some(42.0)
+        );
+
+        server.abort();
     }
 }
