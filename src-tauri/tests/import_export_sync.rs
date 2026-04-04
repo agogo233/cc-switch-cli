@@ -530,6 +530,144 @@ url = "https://example.com"
 }
 
 #[test]
+fn import_from_codex_infers_http_when_url_is_present_without_type() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.cloudflare_api]
+url = "https://mcp.cloudflare.com/mcp"
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_MCP_TOKEN"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    let changed = cc_switch_lib::import_from_codex(&mut config).expect("import codex");
+    assert_eq!(changed, 2, "should import both URL-based servers");
+
+    let servers = config
+        .mcp
+        .servers
+        .as_ref()
+        .expect("unified servers should exist");
+
+    let cloudflare = servers
+        .get("cloudflare_api")
+        .expect("cloudflare server should be imported");
+    assert!(
+        cloudflare.apps.codex,
+        "Codex app should be enabled for cloudflare_api"
+    );
+    assert_eq!(cloudflare.server["type"], "http");
+    assert_eq!(cloudflare.server["url"], "https://mcp.cloudflare.com/mcp");
+
+    let github = servers
+        .get("github")
+        .expect("github server should be imported");
+    assert!(github.apps.codex, "Codex app should be enabled for github");
+    assert_eq!(github.server["type"], "http");
+    assert_eq!(github.server["url"], "https://api.githubcopilot.com/mcp/");
+    assert_eq!(
+        github.server["bearer_token_env_var"], "GITHUB_MCP_TOKEN",
+        "custom Codex HTTP fields should be preserved during import"
+    );
+}
+
+#[test]
+fn import_from_codex_does_not_infer_http_for_malformed_explicit_type() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.invalid_type]
+type = 1
+url = "https://example.invalid/mcp"
+
+[mcp_servers.valid_remote]
+url = "https://example.com/mcp"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    let changed = cc_switch_lib::import_from_codex(&mut config).expect("import codex");
+    assert_eq!(changed, 1, "only the URL-only entry should be imported");
+
+    let servers = config
+        .mcp
+        .servers
+        .as_ref()
+        .expect("unified servers should exist");
+
+    assert!(
+        !servers.contains_key("invalid_type"),
+        "malformed explicit type should not be silently inferred as http"
+    );
+
+    let valid_remote = servers
+        .get("valid_remote")
+        .expect("URL-only entry should still be imported");
+    assert_eq!(valid_remote.server["type"], "http");
+    assert_eq!(valid_remote.server["url"], "https://example.com/mcp");
+}
+
+#[test]
+fn import_from_codex_skips_unknown_type_without_stopping_later_entries() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.aaa_unknown]
+type = "bogus"
+url = "https://example.invalid/ignored"
+
+[mcp_servers.zzz_echo]
+type = "stdio"
+command = "echo"
+args = ["ok"]
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    let changed = cc_switch_lib::import_from_codex(&mut config).expect("import codex");
+    assert_eq!(changed, 1, "invalid entries should not stop later imports");
+
+    let servers = config
+        .mcp
+        .servers
+        .as_ref()
+        .expect("unified servers should exist");
+
+    assert!(
+        !servers.contains_key("aaa_unknown"),
+        "unknown type entry should be skipped"
+    );
+
+    let echo_after = servers
+        .get("zzz_echo")
+        .expect("later valid entry should still be imported");
+    assert_eq!(echo_after.server["type"], "stdio");
+    assert_eq!(echo_after.server["command"], "echo");
+}
+
+#[test]
 fn mcp_env_import_from_codex_preserves_env_table() {
     let _guard = lock_test_mutex();
     reset_test_fs();
