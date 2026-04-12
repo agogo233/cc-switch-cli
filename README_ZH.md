@@ -29,10 +29,11 @@
 ## 🆕 5.3.1 更新内容
 
 <div align="center">
-  <h3><strong>🩹 面向 Codex 官方认证安全和新版数据库导入的补丁版本</strong></h3>
+  <h3><strong>🩹 面向 Codex 官方认证安全、代理热切换和新版数据库导入的补丁版本</strong></h3>
 </div>
 
 - 保留 Codex 官方 provider 的认证快照，避免编辑或切回官方渠道时把已有登录状态写丢。
+- 在 takeover 已运行时，切换 provider 会立即更新代理目标，不再需要手动重启 proxy。
 - 支持导入并升级更新后的 schema v8 数据库，补齐当前后端所需的分阶段迁移路径。
 - 让迁移后的数据库与新建数据库在定价修正和新增跟踪表上保持一致。
 - 详细补丁说明见：[release-note-v5.3.1-zh.md](docs/release-note-v5.3.1-zh.md)

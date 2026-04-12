@@ -17,16 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Codex / Provider Editing**: Preserve official Codex auth snapshots during provider edits and avoid recreating official providers as third-party endpoint configs.
 - **Database / Import**: Accept schema v8 databases, add the v6 -> v7 -> v8 migration path, and keep corrected pricing data aligned between migrated and newly created databases.
+- **Proxy / Provider Switching**: Update the active proxy target immediately while takeover is running so provider switches no longer require a manual proxy restart to take effect.
 
 ### Commits (since v5.3.0)
 
+- c0a01ec fix(proxy): switch running proxy targets without restart (#95)
 - b18e8b7 fix(database): support schema v8 imports and staged migrations (#106)
 - 81cd431 fix(codex): preserve official auth snapshots during provider edits (#102)
 
 ### Thanks
 
 - Thanks `@saladday` for pushing the backend/database compatibility work across this patch cycle.
-- Thanks `@aldev814` and `@Hatiaa` for the issue reports that surfaced the migration and Codex official-provider regressions early.
+- Thanks `@aldev814`, `@Hatiaa`, and `@hitsmaxft` for the issue reports that surfaced the migration, proxy switching, and Codex official-provider regressions early.
 
 ## [5.3.0] - 2026-04-03
 
