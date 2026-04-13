@@ -42,7 +42,7 @@ impl SponsorProviderPreset {
     }
 }
 
-static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 3] = [
+static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
     SponsorProviderPreset {
         id: "packycode",
         provider_name: "PackyCode",
@@ -79,18 +79,32 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 3] = [
         codex_base_url: "https://right.codes/codex/v1",
         gemini_base_url: "https://www.right.codes",
     },
+    SponsorProviderPreset {
+        id: "dds",
+        provider_name: "DDS",
+        chip_label: "* DDS",
+        website_url: "https://www.ddshub.cc",
+        register_url: "https://ddshub.short.gy/ccscli",
+        promo_code: "",
+        partner_promotion_key: "dds",
+        claude_base_url: "https://www.ddshub.cc",
+        codex_base_url: "https://www.ddshub.cc",
+        gemini_base_url: "",
+    },
 ];
 
-static SPONSOR_PROVIDER_PRESETS_CLAUDE: [SponsorProviderPreset; 3] = [
+static SPONSOR_PROVIDER_PRESETS_CLAUDE: [SponsorProviderPreset; 4] = [
     SPONSOR_PROVIDER_PRESETS[0],
     SPONSOR_PROVIDER_PRESETS[1],
     SPONSOR_PROVIDER_PRESETS[2],
+    SPONSOR_PROVIDER_PRESETS[3],
 ];
 
-static SPONSOR_PROVIDER_PRESETS_CODEX: [SponsorProviderPreset; 3] = [
+static SPONSOR_PROVIDER_PRESETS_CODEX: [SponsorProviderPreset; 4] = [
     SPONSOR_PROVIDER_PRESETS[0],
     SPONSOR_PROVIDER_PRESETS[1],
     SPONSOR_PROVIDER_PRESETS[2],
+    SPONSOR_PROVIDER_PRESETS[3],
 ];
 
 static SPONSOR_PROVIDER_PRESETS_GEMINI: [SponsorProviderPreset; 3] = [

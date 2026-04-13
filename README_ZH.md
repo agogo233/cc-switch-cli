@@ -80,6 +80,17 @@
       RightCode 为 CC-Switch CLI 用户提供了特别优惠：通过<a href="https://www.right.codes/register?aff=ccswitch-cli">此链接</a>注册，每次充值均可获得实付金额 <b>25%</b> 的按量额度！
     </td>
   </tr>
+  <tr>
+    <td width="180">
+      <a href="https://ddshub.short.gy/ccscli">
+        <img src="assets/partners/logos/DDSHub.png" alt="DDS" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>DDS</b> 赞助本项目！呆呆兽是一家专注 Claude 的可靠高效 API 中转站，为个人和企业用户提供极具性价比的国内 Claude 直连加速服务。支持 <b>Claude Haiku / Opus / Sonnet 等满血模型</b>。充值满 1000 元即可开具发票，企业客户更可享受定制化分组和技术支持服务。<br/>
+      CC-Switch CLI 用户专属福利：通过<a href="https://ddshub.short.gy/ccscli">此链接</a>注册后，首单充值可<b>额外赠送 10% 额度</b>（充值后请联系群主领取）！
+    </td>
+  </tr>
 </table>
 
 ---

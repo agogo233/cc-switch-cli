@@ -79,6 +79,17 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
       RightCode offers a special deal for CC-Switch CLI users: register via <a href="https://www.right.codes/register?aff=ccswitch-cli">this link</a> and get <b>25% bonus pay-as-you-go credits</b> on every top-up!
     </td>
   </tr>
+  <tr>
+    <td width="180">
+      <a href="https://ddshub.short.gy/ccscli">
+        <img src="assets/partners/logos/DDSHub.png" alt="DDS" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>DDS</b> for sponsoring this project! DDS Hub is a reliable and high-performance Claude API proxy service. DDS Hub provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for <b>Claude Haiku, Opus, Sonnet</b> and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. <br/>
+      Exclusive benefit for CC-Switch CLI users: register via <a href="https://ddshub.short.gy/ccscli">this link</a> and enjoy <b>an extra 10% credit</b> on your first recharge (please contact the group admin to claim after recharging)!
+    </td>
+  </tr>
 </table>
 
 ---

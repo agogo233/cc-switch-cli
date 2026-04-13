@@ -22,6 +22,10 @@ fn rightcode_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* RightCode")
 }
 
+fn dds_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "* DDS")
+}
+
 #[test]
 fn provider_add_form_template_labels_use_ascii_prefix_for_packycode() {
     let form = ProviderAddFormState::new(AppType::Claude);
@@ -44,6 +48,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* PackyCode",
             "* AICodeMirror",
             "* RightCode",
+            "* DDS",
         ]
     );
 
@@ -56,6 +61,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* PackyCode",
             "* AICodeMirror",
             "* RightCode",
+            "* DDS",
         ]
     );
 
@@ -97,6 +103,82 @@ fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadat
     assert_eq!(
         aicodemirror.register_url(),
         "https://www.aicodemirror.com/register?invitecode=77V9EA"
+    );
+}
+
+#[test]
+fn provider_add_form_dds_preset_keeps_affiliate_register_url_in_metadata() {
+    let claude_presets = super::provider_templates::provider_sponsor_presets(&AppType::Claude);
+    let dds = claude_presets
+        .iter()
+        .find(|preset| preset.id() == "dds")
+        .expect("expected DDS sponsor preset for Claude");
+
+    assert_eq!(dds.register_url(), "https://ddshub.short.gy/ccscli");
+}
+
+#[test]
+fn provider_add_form_dds_template_claude_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let existing_ids = Vec::<String>::new();
+
+    let idx = dds_template_index(AppType::Claude);
+    form.apply_template(idx, &existing_ids);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "DDS");
+    assert_eq!(provider["websiteUrl"], "https://www.ddshub.cc");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        "https://www.ddshub.cc"
+    );
+    let meta = provider["meta"]
+        .as_object()
+        .expect("meta should be an object");
+    assert_eq!(
+        meta.get("isPartner").and_then(|value| value.as_bool()),
+        Some(true),
+        "expected DDS sponsor to set meta.isPartner"
+    );
+    assert_eq!(
+        meta.get("partnerPromotionKey")
+            .and_then(|value| value.as_str()),
+        Some("dds"),
+        "expected DDS sponsor to set meta.partnerPromotionKey"
+    );
+}
+
+#[test]
+fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    let existing_ids = Vec::<String>::new();
+
+    let idx = dds_template_index(AppType::Codex);
+    form.apply_template(idx, &existing_ids);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "DDS");
+    assert_eq!(provider["websiteUrl"], "https://www.ddshub.cc");
+    let cfg = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be string");
+    assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
+    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("wire_api = \"responses\""));
+    assert!(cfg.contains("requires_openai_auth = true"));
+    let meta = provider["meta"]
+        .as_object()
+        .expect("meta should be an object");
+    assert_eq!(
+        meta.get("isPartner").and_then(|value| value.as_bool()),
+        Some(true),
+        "expected DDS sponsor to set meta.isPartner"
+    );
+    assert_eq!(
+        meta.get("partnerPromotionKey")
+            .and_then(|value| value.as_str()),
+        Some("dds"),
+        "expected DDS sponsor to set meta.partnerPromotionKey"
     );
 }
 
