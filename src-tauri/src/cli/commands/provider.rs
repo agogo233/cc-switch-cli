@@ -74,11 +74,6 @@ pub enum ProviderCommand {
         /// Provider ID to query
         id: String,
     },
-    /// Query usage for a provider (requires usage script configured in provider meta)
-    Usage {
-        /// Provider ID to query
-        id: String,
-    },
     /// Export a Claude provider to a standalone settings file
     Export {
         /// Provider ID to export
@@ -108,7 +103,6 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::FetchModels { id } => {
             provider_inspect::fetch_models_provider(app_type, &id)
         }
-        ProviderCommand::Usage { id } => provider_inspect::usage_provider(app_type, &id),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
     }
 }
