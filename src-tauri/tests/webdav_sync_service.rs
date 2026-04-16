@@ -364,10 +364,7 @@ fn sample_settings(base_url: &str) -> WebDavSyncSettings {
 
 fn find_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
-    listener
-        .local_addr()
-        .expect("read free local port")
-        .port()
+    listener.local_addr().expect("read free local port").port()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -895,14 +892,22 @@ fn webdav_download_rejects_when_proxy_running() {
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        let mut config = state
+            .proxy_service
+            .get_config()
+            .await
+            .expect("read proxy config");
         config.listen_port = find_free_port();
         state
             .proxy_service
             .update_config(&config)
             .await
             .expect("update proxy config");
-        state.proxy_service.start().await.expect("start proxy runtime");
+        state
+            .proxy_service
+            .start()
+            .await
+            .expect("start proxy runtime");
     });
 
     let err = WebDavSyncService::download()
@@ -914,7 +919,11 @@ fn webdav_download_rejects_when_proxy_running() {
     );
 
     runtime.block_on(async {
-        state.proxy_service.stop().await.expect("stop proxy runtime");
+        state
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop proxy runtime");
     });
 }
 
@@ -975,7 +984,11 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
     server.seed_file("/dav/sync-root/v1/default-profile/skills.zip", skills_zip);
 
     runtime.block_on(async {
-        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        let mut config = state
+            .proxy_service
+            .get_config()
+            .await
+            .expect("read proxy config");
         config.listen_port = find_free_port();
         state
             .proxy_service
@@ -1046,7 +1059,11 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        let mut config = state
+            .proxy_service
+            .get_config()
+            .await
+            .expect("read proxy config");
         config.listen_port = find_free_port();
         state
             .proxy_service
@@ -1087,7 +1104,8 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
             "enabled flag should appear cleared for the weak takeover view"
         );
         assert!(
-            state.db
+            state
+                .db
                 .get_live_backup("claude")
                 .await
                 .expect("read live backup")

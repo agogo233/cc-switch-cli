@@ -326,7 +326,9 @@ impl Database {
 
         for key in keys {
             let local_value: Option<String> = source_conn
-                .query_row("SELECT value FROM settings WHERE key = ?1", [*key], |row| row.get(0))
+                .query_row("SELECT value FROM settings WHERE key = ?1", [*key], |row| {
+                    row.get(0)
+                })
                 .optional()
                 .map_err(|e| AppError::Database(format!("读取本地 settings 键 {key} 失败: {e}")))?;
 
@@ -362,8 +364,12 @@ impl Database {
 
         let source_columns = Self::get_table_columns(source_conn, group.table)?;
         let target_columns = Self::get_table_columns(target_conn, group.table)?;
-        if !source_columns.iter().any(|column| column == group.key_column)
-            || !target_columns.iter().any(|column| column == group.key_column)
+        if !source_columns
+            .iter()
+            .any(|column| column == group.key_column)
+            || !target_columns
+                .iter()
+                .any(|column| column == group.key_column)
         {
             return Ok(());
         }
@@ -386,7 +392,10 @@ impl Database {
             .map(Self::quote_ident)
             .collect::<Vec<_>>()
             .join(", ");
-        let select_sql = format!("SELECT {select_columns} FROM {}", Self::quote_ident(group.table));
+        let select_sql = format!(
+            "SELECT {select_columns} FROM {}",
+            Self::quote_ident(group.table)
+        );
         let assignments = preserved_columns
             .iter()
             .enumerate()
@@ -571,7 +580,10 @@ impl Database {
         // 导出数据
         for table in tables {
             if policy.is_some_and(|policy| {
-                policy.import_restore_tables.iter().any(|skip| *skip == table)
+                policy
+                    .import_restore_tables
+                    .iter()
+                    .any(|skip| *skip == table)
                     || policy
                         .export_resettable_tables
                         .iter()
@@ -919,9 +931,27 @@ mod tests {
         {
             let conn = crate::database::lock_conn!(remote_db.conn);
             seed_provider(&conn, "remote-provider")?;
-            set_proxy_row(&conn, "claude", false, "192.168.10.10", 31001, false, true, 9)?;
+            set_proxy_row(
+                &conn,
+                "claude",
+                false,
+                "192.168.10.10",
+                31001,
+                false,
+                true,
+                9,
+            )?;
             set_proxy_row(&conn, "codex", true, "192.168.10.11", 31002, true, false, 8)?;
-            set_proxy_row(&conn, "gemini", false, "192.168.10.12", 31003, true, true, 7)?;
+            set_proxy_row(
+                &conn,
+                "gemini",
+                false,
+                "192.168.10.12",
+                31003,
+                true,
+                true,
+                7,
+            )?;
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES ('proxy_runtime_session', '{\"pid\":999}')",
                 [],

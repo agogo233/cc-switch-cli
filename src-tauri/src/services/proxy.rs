@@ -186,8 +186,7 @@ impl ProxyService {
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         let config = self.get_config().await.map_err(|e| e.to_string())?;
         self.start_with_resolved_config_unlocked(config).await
     }
@@ -196,14 +195,12 @@ impl ProxyService {
         &self,
         config: ProxyConfig,
     ) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         self.start_with_resolved_config_unlocked(config).await
     }
 
     pub async fn start_managed_session(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         self.start_managed_session_unlocked(app_type).await
     }
 
@@ -294,8 +291,7 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         self.set_managed_session_for_app_unlocked(app_type, enabled)
             .await
     }
@@ -310,7 +306,8 @@ impl ProxyService {
         if enabled {
             let status = self.get_status().await;
             if !status.running {
-                self.start_managed_session_unlocked(app_type.as_str()).await?;
+                self.start_managed_session_unlocked(app_type.as_str())
+                    .await?;
                 return Ok(());
             }
 
@@ -422,14 +419,12 @@ impl ProxyService {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         self.stop_server_unlocked().await
     }
 
     pub async fn stop_with_restore(&self) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
 
         if let Err(error) = self.stop_server_unlocked().await {
             log::warn!("stop proxy runtime before restore failed: {error}");
@@ -621,13 +616,13 @@ impl ProxyService {
 
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
-            .await?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
 
         if enabled {
             self.enable_takeover_for_app_unlocked(&app_type).await
         } else {
-            self.disable_takeover_for_app_unlocked(&app_type, true).await
+            self.disable_takeover_for_app_unlocked(&app_type, true)
+                .await
         }
     }
 
