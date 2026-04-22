@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -28,18 +28,20 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 **Credits:** Original architecture and core functionality from [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
 
+**Changelog:** [CHANGELOG.md](CHANGELOG.md)
+
 ---
 
-## 🆕 What's New in 5.3.3
+## 🆕 Latest Patch Highlights
 
 <div align="center">
-  <h3><strong>🩹 Patch release for Codex auth safety, proxy hot-switching, and newer database imports</strong></h3>
+  <h3><strong>🩹 Patch release for WebDAV restore safety, upstream schema v10 sync compatibility, and temporary-launch correctness</strong></h3>
 </div>
 
-- Preserve official Codex auth snapshots during provider edits so switching back to the official path no longer drops stored login state.
-- Switch the active proxy target immediately while takeover is already running, without requiring a manual proxy restart.
-- Support importing and upgrading newer schema v8 databases through the staged migration path now expected by the current backend.
-- Keep corrected pricing data and new tracking tables aligned between migrated databases and freshly initialized local databases.
+- Keep restore flows from clobbering device-local proxy runtime state, and sync active prompt files back into the live app directories after restore/download paths.
+- Accept upstream schema v10 databases through staged `v8 -> v9 -> v10` migrations while keeping WebDAV `db-v6` compatibility and creating a startup pre-migration backup before upgrades.
+- Preserve upstream Hermes MCP enablement when round-tripping synced databases, so editing MCP entries locally no longer clears those flags.
+- Fix temporary-launch model setting switches, align Codex custom defaults and validation, and lower the shell completion activation barrier.
 
 ---
 
