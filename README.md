@@ -32,19 +32,6 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 🆕 Latest Patch Highlights
-
-<div align="center">
-  <h3><strong>🩹 Patch release for WebDAV restore safety, upstream schema v10 sync compatibility, and temporary-launch correctness</strong></h3>
-</div>
-
-- Keep restore flows from clobbering device-local proxy runtime state, and sync active prompt files back into the live app directories after restore/download paths.
-- Accept upstream schema v10 databases through staged `v8 -> v9 -> v10` migrations while keeping WebDAV `db-v6` compatibility and creating a startup pre-migration backup before upgrades.
-- Preserve upstream Hermes MCP enablement when round-tripping synced databases, so editing MCP entries locally no longer clears those flags.
-- Fix temporary-launch model setting switches, align Codex custom defaults and validation, and lower the shell completion activation barrier.
-
----
-
 ## ❤️ Sponsor
 
 <table>

@@ -28,19 +28,6 @@
 
 ---
 
-## 🆕 最新补丁亮点
-
-<div align="center">
-  <h3><strong>🩹 聚焦 WebDAV 恢复安全、上游 schema v10 同步兼容，以及临时启动正确性的补丁版本</strong></h3>
-</div>
-
-- 避免恢复流程覆盖设备本地的 proxy 运行态数据，并在 restore / download 后把激活中的 prompt 文件重新同步回各应用 live 目录。
-- 在保持 WebDAV `db-v6` 兼容层不变的前提下，支持上游 schema v10 数据库，并通过 `v8 -> v9 -> v10` 分阶段迁移和启动前备份完成本地升级。
-- 保留上游数据库里的 Hermes MCP 启用标记，避免在本地编辑 MCP 条目后把同步过来的状态写回成 `0`。
-- 修复 temporary launch 的模型设置切换问题，并补齐 Codex 默认值/校验与 shell completion 入口体验的后续打磨。
-
----
-
 ## ❤️赞助商
 
 <table>

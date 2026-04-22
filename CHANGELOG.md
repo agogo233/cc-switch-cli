@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **README / Release Metadata**: Refresh the README version badge and patch-highlight section for 5.3.4, drop the versioned `What's New in 5.3.3` heading, and link the About section directly to the changelog.
+- **README / Release Metadata**: Refresh the README version badge for 5.3.4, remove the README patch-highlight section entirely, and link the About section directly to the changelog for release details.
 
 ### Fixed
 
