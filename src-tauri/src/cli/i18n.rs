@@ -5946,6 +5946,14 @@ pub mod texts {
         }
     }
 
+    pub fn provider_added_to_app_config(id: &str, app: &str) -> String {
+        if is_chinese() {
+            format!("✓ 已将供应商 '{}' 添加到 {} 配置", id, app)
+        } else {
+            format!("✓ Added provider '{}' to {} config", id, app)
+        }
+    }
+
     pub fn restart_note() -> &'static str {
         if is_chinese() {
             "注意：请重启 CLI 客户端以应用更改。"

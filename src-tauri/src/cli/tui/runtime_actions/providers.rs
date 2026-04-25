@@ -333,7 +333,8 @@ pub(super) fn remove_from_config(
                     "Cannot remove the OpenClaw provider referenced by the current default model from config",
                 ));
             }
-            crate::openclaw_config::remove_provider(&id)?;
+            let state = load_state()?;
+            ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
                 texts::tui_toast_provider_removed_from_config(),
                 ToastKind::Success,
@@ -342,9 +343,8 @@ pub(super) fn remove_from_config(
             Ok(())
         }
         crate::app_config::AppType::OpenCode => {
-            if crate::opencode_config::get_opencode_dir().exists() {
-                crate::opencode_config::remove_provider(&id)?;
-            }
+            let state = load_state()?;
+            ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
                 texts::tui_toast_provider_removed_from_app_config(ctx.app.app_type.as_str()),
                 ToastKind::Success,
@@ -1026,6 +1026,21 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.id == "p1" && row.is_in_config && !row.is_current));
+        let added_row = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1")
+            .expect("added provider should remain saved");
+        assert_eq!(
+            added_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(true)
+        );
         assert!(matches!(ctx.app.toast, Some(_)));
 
         remove_from_config(&mut ctx, "p1".to_string())
@@ -1045,6 +1060,14 @@ mod tests {
         assert!(!removed_row.is_in_config);
         assert!(!removed_row.is_current);
         assert!(removed_row.is_saved);
+        assert_eq!(
+            removed_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1736,6 +1759,14 @@ mod tests {
             .expect("removed provider should remain visible after reload for re-adding");
         assert!(!removed_row.is_in_config);
         assert!(removed_row.is_saved);
+        assert_eq!(
+            removed_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false)
+        );
     }
 
     #[test]
