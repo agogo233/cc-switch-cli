@@ -7983,9 +7983,9 @@ pub mod texts {
 
     pub fn common_config_snippet_applied() -> &'static str {
         if is_chinese() {
-            "✓ 已应用到 live 配置（请重启对应客户端）"
+            "✓ 已在适用时刷新 live 配置（请重启对应客户端）"
         } else {
-            "✓ Applied to live config (restart the client)"
+            "✓ Refreshed live config when applicable (restart the client)"
         }
     }
 
