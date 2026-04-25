@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -28,18 +28,7 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 **Credits:** Original architecture and core functionality from [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
 
----
-
-## 🆕 What's New in 5.3.3
-
-<div align="center">
-  <h3><strong>🩹 Patch release for Codex auth safety, proxy hot-switching, and newer database imports</strong></h3>
-</div>
-
-- Preserve official Codex auth snapshots during provider edits so switching back to the official path no longer drops stored login state.
-- Switch the active proxy target immediately while takeover is already running, without requiring a manual proxy restart.
-- Support importing and upgrading newer schema v8 databases through the staged migration path now expected by the current backend.
-- Keep corrected pricing data and new tracking tables aligned between migrated databases and freshly initialized local databases.
+**Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 ---
 

@@ -80,6 +80,7 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
                 codex: true,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             description: None,
             homepage: None,
@@ -151,6 +152,7 @@ command = "echo"
                 codex: true,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             description: None,
             homepage: None,
@@ -340,8 +342,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("disable_response_storage = true"),
-        "common snippet should still be present after add"
+        !config_text.contains("disable_response_storage = true"),
+        "new missing-meta providers should not apply common config implicitly after migration"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),
@@ -3949,6 +3951,7 @@ fn provider_service_switch_openclaw_ignores_unrelated_mcp_sync_failures() {
                 codex: false,
                 gemini: false,
                 opencode: true,
+                hermes: false,
             },
             description: None,
             homepage: None,

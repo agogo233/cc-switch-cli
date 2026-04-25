@@ -7,6 +7,39 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.4] - 2026-04-22
+
+### Changed
+
+- **README / Release Metadata**: Refresh the README version badge for 5.3.4, remove the README patch-highlight section entirely, and link the About section directly to the changelog for release details.
+
+### Fixed
+
+- **WebDAV / Restore**: Keep restore flows from clobbering device-local proxy runtime state and sync active prompt files back into live app directories after restore/download paths.
+- **Database / Sync**: Accept upstream schema v10 databases through staged `v8 -> v9 -> v10` migrations, keep WebDAV `db-v6` compatibility intact, refresh the upstream pricing catalog, and create a pre-migration backup before startup upgrades.
+- **MCP / Database**: Preserve upstream Hermes MCP enablement when synced databases are loaded and saved locally, so round-tripping MCP entries no longer clears the v10 compatibility flag.
+- **Temp Launch / CLI**: Fix temporary-launch model setting switches, align Codex custom defaults and validation, and lower the shell completion activation barrier for the updated command flow.
+
+### Commits (since v5.3.3)
+
+- 8a2a850 Preserve temporary provider launches without leaking native CLI control
+- 94c2b13 Trim patch-note links from the README release summaries
+- e38a32f Keep WebDAV restore from clobbering local proxy state
+- 3284b02 Keep CI green after the WebDAV sync fix
+- 5e98f4f （feat）Lower the shell completion activation barrier for issue #113
+- 4c2cfed （test）Seed provider state into the test database
+- 390cfd3 (fix)sync active prompt files after restore flows (#115)
+- 88fa583 (fix)align codex custom defaults and validation
+- 7476f2a Fix model settings not switching during temp launch (#117)
+- 3bc6c39 (fix)align db v10 migration with upstream sync
+
+### Thanks
+
+- Thanks `@yuanzidev` for the temp-launch follow-up that fixed provider model settings during runtime switching.
+- Thanks `@farion1231` for the upstream schema/WebDAV direction that this sync-compatibility release aligns with.
+- Thanks `@saladday` for the WebDAV restore hardening, schema v10 migration work, and release integration across this patch cycle.
+- Thanks `@aldev814`, `@Hatiaa`, and `@hitsmaxft` for the earlier migration reports that continued to inform the database compatibility follow-up.
+
 ## [5.3.3] - 2026-04-13
 
 ### Fixed

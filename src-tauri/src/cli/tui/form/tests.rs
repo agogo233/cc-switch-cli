@@ -163,7 +163,7 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     let meta = provider["meta"]
@@ -375,7 +375,7 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://api.aicodemirror.com/api/codex/backend-api/codex\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert_eq!(provider["meta"]["isPartner"], true);
@@ -390,6 +390,14 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         !fields.contains(&ProviderAddField::CodexEnvKey),
         "Codex env key should stay hidden for sponsor presets"
     );
+}
+
+#[test]
+fn provider_add_form_codex_custom_defaults_to_blank_base_url_and_gpt_5_4() {
+    let form = ProviderAddFormState::new(AppType::Codex);
+
+    assert_eq!(form.codex_base_url.value, "");
+    assert_eq!(form.codex_model.value, "gpt-5.4");
 }
 
 #[test]
@@ -648,7 +656,7 @@ fn provider_add_form_codex_builds_full_toml_config() {
     form.id.set("c1");
     form.name.set("Codex Provider");
     form.codex_base_url.set("https://api.openai.com/v1");
-    form.codex_model.set("gpt-5.2-codex");
+    form.codex_model.set("gpt-5.4");
     form.codex_api_key.set("sk-test");
 
     let provider = form.to_provider_json_value();
@@ -662,7 +670,7 @@ fn provider_add_form_codex_builds_full_toml_config() {
     assert!(cfg.contains("model_provider ="));
     assert!(cfg.contains("[model_providers."));
     assert!(cfg.contains("base_url = \"https://api.openai.com/v1\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert!(cfg.contains("disable_response_storage = true"));
@@ -814,7 +822,7 @@ fn provider_add_form_claude_official_save_preserves_existing_env_keys_like_upstr
     let env = out["settingsConfig"]["env"]
         .as_object()
         .expect("settingsConfig.env should be object");
-    let meta = out["meta"].as_object().expect("meta should be object");
+    let meta = out.get("meta").and_then(|value| value.as_object());
 
     assert_eq!(
         env.get("ANTHROPIC_AUTH_TOKEN")
@@ -835,7 +843,10 @@ fn provider_add_form_claude_official_save_preserves_existing_env_keys_like_upstr
             .and_then(|value| value.as_str()),
         Some("model-sonnet")
     );
-    assert!(meta.get("apiFormat").is_none());
+    assert!(
+        meta.is_none_or(|meta| meta.get("apiFormat").is_none()),
+        "official Claude provider should not serialize a default apiFormat"
+    );
     assert_eq!(out["category"], "official");
 }
 
@@ -1258,8 +1269,8 @@ fn provider_add_form_common_config_json_merges_into_preview_but_not_raw_submit_p
     assert_eq!(settings["alwaysThinkingEnabled"], false);
     assert_eq!(settings["env"]["COMMON_FLAG"], "1");
     assert_eq!(
-        settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example",
-        "provider field should override common snippet value"
+        settings["env"]["ANTHROPIC_BASE_URL"], "https://common.example",
+        "common config should follow backend merge precedence"
     );
     assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
     assert_eq!(merged["meta"]["commonConfigEnabled"], true);
@@ -1345,6 +1356,73 @@ fn provider_add_form_apply_provider_json_updates_fields_and_preserves_include_to
     );
     assert_eq!(form.extra["category"], "custom");
     assert_eq!(form.extra["settingsConfig"]["alwaysThinkingEnabled"], false);
+}
+
+#[test]
+fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
+    let provider = Provider::with_id(
+        "legacy-provider".to_string(),
+        "Legacy Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let raw = form.to_provider_json_value();
+    assert!(
+        raw.get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "editing a missing-meta provider should preserve upstream missing-meta semantics"
+    );
+
+    form.name.set("Renamed Provider");
+    let renamed = form.to_provider_json_value();
+    assert!(
+        renamed
+            .get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "unrelated edits must not force commonConfigEnabled=true"
+    );
+
+    form.toggle_include_common_config(
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://provider.example"}}"#,
+    )
+    .expect("toggle should succeed");
+    let toggled = form.to_provider_json_value();
+    assert_eq!(toggled["meta"]["commonConfigEnabled"], false);
+}
+
+#[test]
+fn provider_edit_form_preserves_other_meta_without_forcing_common_config_meta() {
+    let mut provider = Provider::with_id(
+        "provider-with-meta".to_string(),
+        "Provider With Meta".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        endpoint_auto_select: Some(true),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let raw = form.to_provider_json_value();
+
+    assert_eq!(raw["meta"]["endpointAutoSelect"], true);
+    assert!(
+        raw["meta"].get("commonConfigEnabled").is_none(),
+        "preserving unrelated meta should not synthesize commonConfigEnabled"
+    );
 }
 
 #[test]

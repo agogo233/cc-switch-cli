@@ -53,6 +53,14 @@ fn codex_settings(config: &str) -> Value {
     })
 }
 
+fn with_common_enabled(mut provider: Provider) -> Provider {
+    provider
+        .meta
+        .get_or_insert_with(crate::provider::ProviderMeta::default)
+        .apply_common_config = Some(true);
+    provider
+}
+
 fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
     let env = EnvGuard::set_home(temp_home.path());
@@ -68,21 +76,21 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
         manager.current = "p1".to_string();
         manager.providers.insert(
             "p1".to_string(),
-            Provider::with_id(
+            with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
                 codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
-            ),
+            )),
         );
         manager.providers.insert(
             "p2".to_string(),
-            Provider::with_id(
+            with_common_enabled(Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
                 codex_settings("model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
-            ),
+            )),
         );
     }
     config.mcp.servers = Some(std::collections::HashMap::new());
@@ -100,6 +108,7 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
                 codex: true,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             description: None,
             homepage: None,
@@ -250,6 +259,67 @@ fn validate_provider_settings_rejects_missing_auth_for_codex() {
     assert!(
         err.to_string().contains("auth"),
         "expected auth error, got {err:?}"
+    );
+}
+
+#[test]
+fn validate_provider_settings_rejects_missing_base_url_for_non_official_codex() {
+    let provider = Provider::with_id(
+        "codex".into(),
+        "Codex".into(),
+        json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        }),
+        None,
+    );
+    let err = ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+        .expect_err("missing base_url should be rejected");
+    assert!(
+        err.to_string().contains("base_url") || err.to_string().contains("Base URL"),
+        "expected base_url error, got {err:?}"
+    );
+}
+
+#[test]
+fn validate_provider_settings_allows_blank_config_for_official_codex() {
+    let mut provider = Provider::with_id(
+        "openai-official".into(),
+        "OpenAI Official".into(),
+        json!({
+            "auth": {},
+            "config": ""
+        }),
+        Some("https://chatgpt.com/codex".to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        codex_official: Some(true),
+        ..Default::default()
+    });
+
+    ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+        .expect("official Codex provider should not require a base_url");
+}
+
+#[test]
+fn provider_service_add_rejects_non_official_codex_without_base_url() {
+    let state = state_from_config(MultiAppConfig::default());
+    let provider = Provider::with_id(
+        "codex".into(),
+        "Codex".into(),
+        json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        }),
+        None,
+    );
+
+    let err = ProviderService::add(&state, AppType::Codex, provider)
+        .expect_err("service add should reject missing Codex base_url");
+    assert!(
+        err.to_string().contains("base_url") || err.to_string().contains("Base URL"),
+        "expected base_url error, got {err:?}"
     );
 }
 
@@ -492,6 +562,133 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
     );
 }
 
+#[test]
+#[serial]
+fn codex_switch_backfills_effective_current_and_preserves_runtime_projects() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p2".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-one-stale" },
+                    "config": "model_provider = \"one\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.one]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-two" },
+                    "config": "model_provider = \"two\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.two]\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider to p1");
+
+    crate::config::write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-one-live" }),
+    )
+    .expect("seed live auth.json");
+    std::fs::write(
+        get_codex_config_path(),
+        r#"model_provider = "one"
+model = "gpt-5.2-codex"
+
+[model_providers.one]
+base_url = "https://api.one-live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[projects."/tmp/codex-project-a"]
+trust_level = "trusted"
+"#,
+    )
+    .expect("seed live config.toml with runtime project trust");
+
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
+
+    let cfg = state.config.read().expect("read config after switch");
+    let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
+    let p1_stored = manager
+        .providers
+        .get("p1")
+        .expect("p1 exists")
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("p1 config should be string");
+    assert!(
+        p1_stored.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "effective current provider should receive runtime project trust"
+    );
+    assert!(
+        p1_stored.contains("base_url = \"https://api.one-live.example/v1\""),
+        "effective current provider should receive live provider settings"
+    );
+    assert!(
+        cfg.common_config_snippets
+            .codex
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
+        "runtime project trust should not be auto-extracted as common config"
+    );
+    drop(cfg);
+
+    let db_p1 = state
+        .db
+        .get_provider_by_id("p1", AppType::Codex.as_str())
+        .expect("read p1 from db")
+        .expect("p1 should exist in db");
+    let db_p1_config = db_p1
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("db p1 config should be string");
+    assert!(
+        db_p1_config.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "state.save should not overwrite the effective-current backfill with stale memory"
+    );
+
+    let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
+    assert!(
+        !p2_live.contains("/tmp/codex-project-a"),
+        "target provider live config should not absorb source provider runtime project trust"
+    );
+
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
+    assert!(
+        p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "runtime project trust should survive switching away and back"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn switch_updates_running_proxy_takeover_target_without_restart() {
@@ -591,7 +788,7 @@ fn add_first_provider_sets_current() {
     config.ensure_app(&AppType::Claude);
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -601,7 +798,7 @@ fn add_first_provider_sets_current() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
 
@@ -691,7 +888,7 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
             .expect("claude manager");
         manager.current = "missing".to_string();
 
-        let mut p1 = Provider::with_id(
+        let mut p1 = with_common_enabled(Provider::with_id(
             "p1".to_string(),
             "First".to_string(),
             json!({
@@ -701,10 +898,10 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
                 }
             }),
             None,
-        );
+        ));
         p1.sort_index = Some(10);
 
-        let mut p2 = Provider::with_id(
+        let mut p2 = with_common_enabled(Provider::with_id(
             "p2".to_string(),
             "Second".to_string(),
             json!({
@@ -714,7 +911,7 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
                 }
             }),
             None,
-        );
+        ));
         p2.sort_index = Some(0);
 
         manager.providers.insert("p1".to_string(), p1);
@@ -726,7 +923,7 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
                 json!({
@@ -736,14 +933,14 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save p1 to db");
     state
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
                 json!({
@@ -753,7 +950,7 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save p2 to db");
     state
@@ -954,7 +1151,7 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
             .expect("claude manager");
         manager.current = "missing".to_string();
 
-        let mut p1 = Provider::with_id(
+        let mut p1 = with_common_enabled(Provider::with_id(
             "p1".to_string(),
             "First".to_string(),
             json!({
@@ -964,10 +1161,10 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
                 }
             }),
             None,
-        );
+        ));
         p1.sort_index = Some(10);
 
-        let mut p2 = Provider::with_id(
+        let mut p2 = with_common_enabled(Provider::with_id(
             "p2".to_string(),
             "Second".to_string(),
             json!({
@@ -977,7 +1174,7 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
                 }
             }),
             None,
-        );
+        ));
         p2.sort_index = Some(0);
 
         manager.providers.insert("p1".to_string(), p1);
@@ -1000,7 +1197,7 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
                 json!({
@@ -1010,14 +1207,14 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save first provider to db");
     state
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
                 json!({
@@ -1027,7 +1224,7 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save second provider to db");
     state
@@ -1114,7 +1311,7 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
                 json!({
@@ -1124,14 +1321,14 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save current provider to db");
     state
         .db
         .save_provider(
             AppType::Claude.as_str(),
-            &Provider::with_id(
+            &with_common_enabled(Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
                 json!({
@@ -1141,7 +1338,7 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
                     }
                 }),
                 None,
-            ),
+            )),
         )
         .expect("save non-current provider to db");
     state
@@ -1210,7 +1407,7 @@ fn common_config_snippet_is_merged_into_claude_settings_on_write() {
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -1220,7 +1417,7 @@ fn common_config_snippet_is_merged_into_claude_settings_on_write() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
 
@@ -1248,6 +1445,258 @@ fn common_config_snippet_is_merged_into_claude_settings_on_write() {
         env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
         Some("token"),
         "provider env key should remain in settings.env"
+    );
+}
+
+#[test]
+fn build_effective_live_snapshot_merges_claude_common_config_with_upstream_precedence() {
+    let provider = with_common_enabled(Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            },
+            "includeCoAuthoredBy": true,
+            "permissions": {
+                "allow": ["Bash(git status)"]
+            }
+        }),
+        None,
+    ));
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false,"permissions":{"allow":["Bash(ls)"]}}"#,
+        ),
+        true,
+    )
+    .expect("build effective snapshot");
+
+    assert_eq!(
+        effective["env"]["ANTHROPIC_AUTH_TOKEN"],
+        json!("token"),
+        "provider auth token should be preserved"
+    );
+    assert_eq!(
+        effective["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://common.example"),
+        "common config should follow upstream merge precedence"
+    );
+    assert_eq!(
+        effective["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        json!(1),
+        "common env values should still be merged"
+    );
+    assert_eq!(
+        effective["includeCoAuthoredBy"],
+        json!(false),
+        "common top-level settings should follow upstream merge precedence"
+    );
+    assert_eq!(
+        effective["permissions"]["allow"],
+        json!(["Bash(ls)"]),
+        "common nested settings should follow upstream merge precedence"
+    );
+}
+
+#[test]
+fn missing_common_config_meta_uses_subset_detection() {
+    let provider_with_subset = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+            }
+        }),
+        None,
+    );
+    let provider_without_subset = Provider::with_id(
+        "p2".to_string(),
+        "Second".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token"
+            }
+        }),
+        None,
+    );
+    let snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#;
+
+    assert!(
+        common_config::provider_uses_common_config(
+            &AppType::Claude,
+            &provider_with_subset,
+            Some(snippet),
+        ),
+        "missing meta should use common config when the provider snapshot already contains it as a subset"
+    );
+    assert!(
+        !common_config::provider_uses_common_config(
+            &AppType::Claude,
+            &provider_without_subset,
+            Some(snippet),
+        ),
+        "missing meta should not behave like default-enabled when the subset is absent"
+    );
+}
+
+#[test]
+fn json_common_config_array_subset_removal_preserves_extra_items() {
+    let settings = json!({
+        "permissions": {
+            "allow": [
+                { "tool": "Bash", "pattern": "git status" },
+                { "tool": "Read", "pattern": "src/**" }
+            ]
+        }
+    });
+    let snippet = r#"{"permissions":{"allow":[{"tool":"Bash"}]}}"#;
+
+    let stripped =
+        common_config::test_support::remove(&AppType::Claude, &settings, snippet).expect("strip");
+
+    assert_eq!(
+        stripped["permissions"]["allow"],
+        json!([{ "tool": "Read", "pattern": "src/**" }]),
+        "array subset removal should remove only the matching common item"
+    );
+}
+
+#[test]
+fn toml_common_config_array_subset_removal_preserves_extra_items_and_identity_keys() {
+    let settings = codex_settings(
+        "model = \"gpt-5\"\ndisable_response_storage = true\ntools = [{ name = \"common\", command = \"npx\" }, { name = \"provider\", command = \"uvx\" }]\n",
+    );
+    let snippet =
+        "model = \"gpt-5\"\ndisable_response_storage = true\ntools = [{ name = \"common\" }]\n";
+
+    let stripped =
+        common_config::test_support::remove(&AppType::Codex, &settings, snippet).expect("strip");
+    let stored = stripped
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("config should remain string");
+
+    assert!(
+        stored.contains("model = \"gpt-5\""),
+        "Codex identity keys should not be stripped by common config removal"
+    );
+    assert!(
+        !stored.contains("disable_response_storage = true"),
+        "matching common scalar should be stripped"
+    );
+    assert!(
+        !stored.contains("name = \"common\""),
+        "matching common array item should be stripped"
+    );
+    assert!(
+        stored.contains("name = \"provider\""),
+        "provider-specific array item should remain"
+    );
+}
+
+#[test]
+#[serial]
+fn set_codex_common_config_snippet_rejects_runtime_local_keys() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let state = state_from_config(MultiAppConfig::default());
+
+    let err = ProviderService::set_common_config_snippet(
+        &state,
+        AppType::Codex,
+        Some("[projects.\"/tmp/demo\"]\ntrust_level = \"trusted\"".to_string()),
+    )
+    .expect_err("runtime-local Codex tables should be rejected");
+
+    assert!(
+        err.to_string().contains("runtime-local key") || err.to_string().contains("运行时本地配置"),
+        "error should clearly explain that runtime-local Codex keys are not valid common config"
+    );
+}
+
+#[test]
+fn historical_codex_runtime_keys_are_sanitized_before_effective_apply() {
+    let provider = with_common_enabled(Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        codex_settings(
+            "model_provider = \"first\"\nmodel = \"gpt-5\"\n\n[model_providers.first]\nbase_url = \"https://api.example/v1\"\n",
+        ),
+        None,
+    ));
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Codex,
+        &provider,
+        Some(
+            "disable_response_storage = true\n\n[projects.\"/tmp/demo\"]\ntrust_level = \"trusted\"\n",
+        ),
+        true,
+    )
+    .expect("build effective snapshot");
+    let config = effective
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("effective Codex config");
+
+    assert!(
+        config.contains("disable_response_storage = true"),
+        "safe historical common keys should still apply"
+    );
+    assert!(
+        !config.contains("[projects"),
+        "runtime-local historical keys should be sanitized before live apply"
+    );
+}
+
+#[test]
+fn build_effective_live_snapshot_skips_claude_common_config_when_disabled() {
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        apply_common_config: Some(false),
+        ..Default::default()
+    });
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(
+            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#,
+        ),
+        true,
+    )
+    .expect("build effective snapshot");
+
+    assert!(
+        effective.get("includeCoAuthoredBy").is_none(),
+        "common top-level settings should be skipped when disabled"
+    );
+    assert!(
+        effective["env"]
+            .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            .is_none(),
+        "common env settings should be skipped when disabled"
+    );
+    assert_eq!(
+        effective["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://provider.example"),
+        "provider settings should remain untouched"
     );
 }
 
@@ -1325,7 +1774,7 @@ fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -1337,7 +1786,7 @@ fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
 
@@ -1386,7 +1835,7 @@ fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -1397,7 +1846,7 @@ fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
 
@@ -2303,7 +2752,7 @@ fn common_config_snippet_is_merged_into_codex_config_on_write() {
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -2311,7 +2760,7 @@ fn common_config_snippet_is_merged_into_codex_config_on_write() {
             "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Codex, provider).expect("add should succeed");
 
@@ -2336,7 +2785,7 @@ fn provider_add_strips_common_snippet_before_codex_snapshot_persist() {
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -2344,7 +2793,7 @@ fn provider_add_strips_common_snippet_before_codex_snapshot_persist() {
             "config": "disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Codex, provider).expect("add should succeed");
 
@@ -2442,7 +2891,7 @@ command = "npx"
 
 #[test]
 #[serial]
-fn provider_add_rejects_invalid_codex_common_snippet_during_storage_normalization() {
+fn provider_add_tolerates_invalid_codex_common_snippet_during_storage_normalization() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
 
@@ -2452,7 +2901,7 @@ fn provider_add_rejects_invalid_codex_common_snippet_during_storage_normalizatio
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -2460,15 +2909,10 @@ fn provider_add_rejects_invalid_codex_common_snippet_during_storage_normalizatio
             "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         }),
         None,
-    );
+    ));
 
-    let err = ProviderService::add(&state, AppType::Codex, provider)
-        .expect_err("invalid common snippet should fail instead of being silently ignored");
-
-    assert!(
-        err.to_string().contains("Common config TOML parse error"),
-        "error should surface invalid common snippet parse failure"
-    );
+    ProviderService::add(&state, AppType::Codex, provider)
+        .expect("historical invalid common snippet should not block provider add");
 }
 
 #[test]
@@ -3281,12 +3725,12 @@ fn import_default_config_strips_codex_common_snippet_before_persisting_snapshot(
         .expect("stored codex config should be string");
 
     assert!(
-        !stored_config.contains("disable_response_storage = true"),
-        "imported Codex snapshot should strip common top-level keys"
+        stored_config.contains("disable_response_storage = true"),
+        "missing-meta Codex import should keep common top-level keys for upstream subset detection"
     );
     assert!(
-        !stored_config.contains("network_access = \"restricted\""),
-        "imported Codex snapshot should reuse the common-config stripping path"
+        stored_config.contains("network_access = \"restricted\""),
+        "missing-meta Codex import should not strip common fields unless explicitly enabled"
     );
     assert!(
         stored_config.contains("base_url = \"https://api.example/v1\""),
@@ -3394,12 +3838,11 @@ fn common_config_snippet_is_merged_into_gemini_env_on_write() {
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
-    config.common_config_snippets.gemini =
-        Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#.to_string());
+    config.common_config_snippets.gemini = Some(r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#.to_string());
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -3408,7 +3851,7 @@ fn common_config_snippet_is_merged_into_gemini_env_on_write() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Gemini, provider).expect("add should succeed");
 
@@ -3435,12 +3878,11 @@ fn provider_add_strips_common_snippet_before_gemini_snapshot_persist() {
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
-    config.common_config_snippets.gemini =
-        Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#.to_string());
+    config.common_config_snippets.gemini = Some(r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#.to_string());
 
     let state = state_from_config(config);
 
-    let provider = Provider::with_id(
+    let provider = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -3450,7 +3892,7 @@ fn provider_add_strips_common_snippet_before_gemini_snapshot_persist() {
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Gemini, provider).expect("add should succeed");
 
@@ -3486,12 +3928,11 @@ fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switc
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
-    config.common_config_snippets.gemini =
-        Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#.to_string());
+    config.common_config_snippets.gemini = Some(r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#.to_string());
 
     let state = state_from_config(config);
 
-    let p1 = Provider::with_id(
+    let p1 = with_common_enabled(Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
         json!({
@@ -3500,8 +3941,8 @@ fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switc
             }
         }),
         None,
-    );
-    let p2 = Provider::with_id(
+    ));
+    let p2 = with_common_enabled(Provider::with_id(
         "p2".to_string(),
         "Second".to_string(),
         json!({
@@ -3510,7 +3951,7 @@ fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switc
             }
         }),
         None,
-    );
+    ));
 
     ProviderService::add(&state, AppType::Gemini, p1).expect("add p1");
     ProviderService::add(&state, AppType::Gemini, p2).expect("add p2");
@@ -3546,8 +3987,8 @@ fn updating_common_snippet_removes_stale_fields_from_other_gemini_provider_snaps
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
-    let old_snippet = r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#;
-    let new_snippet = r#"{"env":{"CC_SWITCH_GEMINI_REPLACED":"1"}}"#;
+    let old_snippet = r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#;
+    let new_snippet = r#"{"CC_SWITCH_GEMINI_REPLACED":"1"}"#;
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
@@ -3648,7 +4089,7 @@ fn setting_gemini_common_snippet_normalizes_existing_provider_snapshot() {
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
-    let new_snippet = r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#;
+    let new_snippet = r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#;
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
@@ -3659,7 +4100,7 @@ fn setting_gemini_common_snippet_normalizes_existing_provider_snapshot() {
         manager.current = "p1".to_string();
         manager.providers.insert(
             "p1".to_string(),
-            Provider::with_id(
+            with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
                 json!({
@@ -3669,7 +4110,7 @@ fn setting_gemini_common_snippet_normalizes_existing_provider_snapshot() {
                     }
                 }),
                 None,
-            ),
+            )),
         );
     }
 
@@ -3714,8 +4155,8 @@ fn replacing_gemini_common_snippet_tolerates_invalid_stored_snippet() {
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
-    let invalid_old_snippet = r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}"#;
-    let new_snippet = r#"{"env":{"CC_SWITCH_GEMINI_REPLACED":"1"}}"#;
+    let invalid_old_snippet = r#"{"CC_SWITCH_GEMINI_COMMON":"1""#;
+    let new_snippet = r#"{"CC_SWITCH_GEMINI_REPLACED":"1"}"#;
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
@@ -3816,8 +4257,7 @@ fn import_default_config_strips_gemini_common_snippet_before_persisting_snapshot
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
-    config.common_config_snippets.gemini =
-        Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"},"config":{"theme":"light"}}"#.to_string());
+    config.common_config_snippets.gemini = Some(r#"{"CC_SWITCH_GEMINI_COMMON":"1"}"#.to_string());
     let state = state_from_config(config);
 
     ProviderService::import_default_config(&state, AppType::Gemini)
@@ -3842,17 +4282,18 @@ fn import_default_config_strips_gemini_common_snippet_before_persisting_snapshot
         .expect("stored gemini config should be object");
 
     assert!(
-        !env.contains_key("CC_SWITCH_GEMINI_COMMON"),
-        "imported Gemini snapshot should strip common env keys"
+        env.contains_key("CC_SWITCH_GEMINI_COMMON"),
+        "missing-meta Gemini import should keep common env keys for upstream subset detection"
     );
     assert_eq!(
         env.get("GEMINI_API_KEY").and_then(Value::as_str),
         Some("token"),
         "provider-specific Gemini env should remain after import"
     );
-    assert!(
-        !config_obj.contains_key("theme"),
-        "imported Gemini snapshot should strip common config keys"
+    assert_eq!(
+        config_obj.get("theme").and_then(Value::as_str),
+        Some("light"),
+        "Gemini common snippets are env-scoped and should not strip settings.json keys"
     );
     assert_eq!(
         config_obj.get("providerOnly").and_then(Value::as_bool),

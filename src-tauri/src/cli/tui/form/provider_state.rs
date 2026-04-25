@@ -21,12 +21,7 @@ impl ProviderAddFormState {
         };
 
         let codex_defaults = match app_type {
-            AppType::Codex => (
-                "https://api.openai.com/v1",
-                "gpt-5.2-codex",
-                CodexWireApi::Responses,
-                true,
-            ),
+            AppType::Codex => ("", "gpt-5.4", CodexWireApi::Responses, true),
             _ => ("", "", CodexWireApi::Responses, true),
         };
 
@@ -44,6 +39,7 @@ impl ProviderAddFormState {
             website_url: TextInput::new(""),
             notes: TextInput::new(""),
             include_common_config,
+            include_common_config_touched: false,
             json_scroll: 0,
             codex_preview_section: CodexPreviewSection::Auth,
             codex_auth_scroll: 0,
@@ -126,10 +122,6 @@ impl ProviderAddFormState {
 
     pub fn is_id_editable(&self) -> bool {
         !self.mode.is_edit()
-    }
-
-    pub fn has_required_fields(&self) -> bool {
-        !self.name.is_blank()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -378,6 +370,7 @@ impl ProviderAddFormState {
         let previous_codex_auth_scroll = self.codex_auth_scroll;
         let previous_codex_config_scroll = self.codex_config_scroll;
         let previous_include_common_config = self.include_common_config;
+        let previous_include_common_config_touched = self.include_common_config_touched;
         let previous_extra = self.extra.clone();
         let previous_initial_snapshot = self.initial_snapshot.clone();
 
@@ -394,6 +387,9 @@ impl ProviderAddFormState {
             .is_none()
         {
             next.include_common_config = previous_include_common_config;
+            next.include_common_config_touched = previous_include_common_config_touched;
+        } else {
+            next.include_common_config_touched = true;
         }
 
         next.mode = previous_mode.clone();
@@ -433,6 +429,7 @@ impl ProviderAddFormState {
         let previous_codex_auth_scroll = self.codex_auth_scroll;
         let previous_codex_config_scroll = self.codex_config_scroll;
         let previous_include_common_config = self.include_common_config;
+        let previous_include_common_config_touched = self.include_common_config_touched;
         let previous_initial_snapshot = self.initial_snapshot.clone();
 
         let current_value = self.to_provider_json_value();
@@ -459,6 +456,9 @@ impl ProviderAddFormState {
             .is_none()
         {
             next.include_common_config = previous_include_common_config;
+            next.include_common_config_touched = previous_include_common_config_touched;
+        } else {
+            next.include_common_config_touched = true;
         }
 
         next.mode = previous_mode.clone();
@@ -507,6 +507,7 @@ impl ProviderAddFormState {
             }
         }
         self.include_common_config = next_enabled;
+        self.include_common_config_touched = true;
         Ok(())
     }
 

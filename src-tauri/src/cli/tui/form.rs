@@ -14,6 +14,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use provider_json::strip_provider_internal_fields;
 
+pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_state::resolve_provider_id_for_submit;
 
@@ -286,6 +287,7 @@ pub struct ProviderAddFormState {
     pub website_url: TextInput,
     pub notes: TextInput,
     pub include_common_config: bool,
+    include_common_config_touched: bool,
     pub json_scroll: usize,
     pub codex_preview_section: CodexPreviewSection,
     pub codex_auth_scroll: usize,
