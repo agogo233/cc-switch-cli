@@ -121,7 +121,12 @@ impl ProviderService {
             };
 
             (
-                manager.providers.values().cloned().collect::<Vec<_>>(),
+                manager
+                    .providers
+                    .values()
+                    .filter(|provider| Self::provider_live_config_managed(provider) != Some(false))
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 guard
                     .common_config_snippets
                     .get(&AppType::OpenClaw)
@@ -163,6 +168,40 @@ impl ProviderService {
         }
 
         Ok(Some(valid_provider_ids))
+    }
+
+    fn provider_live_config_managed(provider: &Provider) -> Option<bool> {
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed)
+    }
+
+    fn set_provider_live_config_managed(provider: &mut Provider, managed: bool) {
+        provider
+            .meta
+            .get_or_insert_with(Default::default)
+            .live_config_managed = Some(managed);
+    }
+
+    fn additive_provider_exists_in_live_config(
+        app_type: &AppType,
+        provider_id: &str,
+        live_config_managed: Option<bool>,
+    ) -> Result<bool, AppError> {
+        let read_presence = || match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()
+                .map(|providers| providers.contains_key(provider_id)),
+            AppType::OpenClaw => Self::valid_openclaw_live_provider_ids()
+                .map(|ids| ids.is_some_and(|ids| ids.contains(provider_id))),
+            _ => Ok(false),
+        };
+
+        if live_config_managed == Some(false) {
+            Ok(read_presence().unwrap_or(false))
+        } else {
+            read_presence()
+        }
     }
 
     fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
@@ -1057,6 +1096,9 @@ impl ProviderService {
             {
                 provider_to_store.created_at = Some(current_timestamp());
             }
+            if app_type_clone.is_additive_mode() {
+                Self::set_provider_live_config_managed(&mut provider_to_store, true);
+            }
 
             config.ensure_app(&app_type_clone);
             let manager = config
@@ -1142,8 +1184,10 @@ impl ProviderService {
                 manager.current = stored_current_provider.clone().unwrap_or_default();
             }
 
-            let is_current = app_type_clone.is_additive_mode()
-                || effective_current_provider.as_deref() == Some(provider_id.as_str());
+            let existing_live_config_managed = manager
+                .providers
+                .get(&provider_id)
+                .and_then(Self::provider_live_config_managed);
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1176,11 +1220,23 @@ impl ProviderService {
                 common_config_snippet.as_deref(),
             )?;
 
+            let should_write_live = if app_type_clone.is_additive_mode() {
+                let live_config_managed = Self::additive_provider_exists_in_live_config(
+                    &app_type_clone,
+                    &provider_id,
+                    Self::provider_live_config_managed(&merged).or(existing_live_config_managed),
+                )?;
+                Self::set_provider_live_config_managed(&mut merged, live_config_managed);
+                live_config_managed
+            } else {
+                effective_current_provider.as_deref() == Some(provider_id.as_str())
+            };
+
             manager
                 .providers
                 .insert(provider_id.clone(), merged.clone());
 
-            let action = if is_current {
+            let action = if should_write_live {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
@@ -1466,6 +1522,89 @@ impl ProviderService {
         Ok(true)
     }
 
+    pub fn remove_from_live_config(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        if !app_type.is_additive_mode() {
+            return Err(AppError::localized(
+                "provider.remove_from_live_config.unsupported",
+                "只有累加模式应用支持从 live 配置中移除供应商",
+                "Only additive-mode apps support removing a provider from live config",
+            ));
+        }
+
+        let original = {
+            let config = state.config.read().map_err(AppError::from)?;
+            let manager = config
+                .get_manager(&app_type)
+                .ok_or_else(|| Self::app_not_found(&app_type))?;
+            if !manager.providers.contains_key(provider_id) {
+                return Err(AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                ));
+            }
+            config.clone()
+        };
+
+        let backup = Self::capture_live_snapshot(&app_type)?;
+        match &app_type {
+            AppType::OpenCode => {
+                if crate::opencode_config::get_opencode_dir().exists() {
+                    crate::opencode_config::remove_provider(provider_id)?;
+                }
+            }
+            AppType::OpenClaw => {
+                if crate::openclaw_config::get_openclaw_dir().exists() {
+                    crate::openclaw_config::remove_provider(provider_id)?;
+                }
+            }
+            _ => unreachable!("non-additive apps should not enter remove-from-live branch"),
+        }
+
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            let manager = config
+                .get_manager_mut(&app_type)
+                .ok_or_else(|| Self::app_not_found(&app_type))?;
+            let provider = manager.providers.get_mut(provider_id).ok_or_else(|| {
+                AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                )
+            })?;
+            Self::set_provider_live_config_managed(provider, false);
+        }
+
+        if let Err(save_err) = state.save() {
+            let config_restore = Self::restore_config_only(state, original);
+            let live_restore = backup.restore();
+            if let Err(rollback_err) = config_restore {
+                return Err(AppError::localized(
+                    "config.save.rollback_failed",
+                    format!("保存配置失败: {save_err}；回滚失败: {rollback_err}"),
+                    format!("Failed to save config: {save_err}; rollback failed: {rollback_err}"),
+                ));
+            }
+            if let Err(rollback_err) = live_restore {
+                return Err(AppError::localized(
+                    "post_commit.rollback_failed",
+                    format!("保存配置失败: {save_err}；live 回滚失败: {rollback_err}"),
+                    format!(
+                        "Failed to save config: {save_err}; live rollback failed: {rollback_err}"
+                    ),
+                ));
+            }
+            return Err(save_err);
+        }
+
+        Ok(())
+    }
+
     /// 将所有应用的当前供应商配置同步到 live 文件。
     ///
     /// 用于 WebDAV 下载、备份恢复等场景：数据库已更新，但 live 配置文件
@@ -1483,6 +1622,9 @@ impl ProviderService {
                     if let Some(manager) = guard.get_manager(&app_type) {
                         let snippet = guard.common_config_snippets.get(&app_type).cloned();
                         for provider in manager.providers.values() {
+                            if Self::provider_live_config_managed(provider) == Some(false) {
+                                continue;
+                            }
                             result.push((app_type.clone(), provider.clone(), snippet.clone()));
                         }
                     }
@@ -1605,19 +1747,22 @@ impl ProviderService {
 
         Self::run_transaction(state, move |config| {
             if app_type_clone.is_additive_mode() {
-                let provider = config
-                    .get_manager(&app_type_clone)
-                    .ok_or_else(|| Self::app_not_found(&app_type_clone))?
-                    .providers
-                    .get(&provider_id_owned)
-                    .cloned()
-                    .ok_or_else(|| {
-                        AppError::localized(
-                            "provider.not_found",
-                            format!("供应商不存在: {provider_id_owned}"),
-                            format!("Provider not found: {provider_id_owned}"),
-                        )
-                    })?;
+                let provider = {
+                    let provider = config
+                        .get_manager_mut(&app_type_clone)
+                        .ok_or_else(|| Self::app_not_found(&app_type_clone))?
+                        .providers
+                        .get_mut(&provider_id_owned)
+                        .ok_or_else(|| {
+                            AppError::localized(
+                                "provider.not_found",
+                                format!("供应商不存在: {provider_id_owned}"),
+                                format!("Provider not found: {provider_id_owned}"),
+                            )
+                        })?;
+                    Self::set_provider_live_config_managed(provider, true);
+                    provider.clone()
+                };
 
                 let action = PostCommitAction {
                     app_type: app_type_clone.clone(),

@@ -107,6 +107,22 @@ fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadat
 }
 
 #[test]
+fn provider_add_form_google_oauth_template_marks_official_metadata() {
+    let mut form = ProviderAddFormState::new(AppType::Gemini);
+    let existing_ids = Vec::<String>::new();
+    let idx = template_index_by_label(AppType::Gemini, "Google OAuth");
+
+    form.apply_template(idx, &existing_ids);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["category"], "official");
+    assert_eq!(
+        provider["meta"]["partnerPromotionKey"], "google-official",
+        "Google OAuth should be distinguishable from stripped custom Gemini providers"
+    );
+}
+
+#[test]
 fn provider_add_form_dds_preset_keeps_affiliate_register_url_in_metadata() {
     let claude_presets = super::provider_templates::provider_sponsor_presets(&AppType::Claude);
     let dds = claude_presets
