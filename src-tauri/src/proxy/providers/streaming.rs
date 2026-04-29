@@ -125,8 +125,9 @@ pub fn create_anthropic_sse_stream(
                                     "event: message_stop\ndata: {}\n\n",
                                     serde_json::to_string(&event).unwrap_or_default()
                                 );
+                                stream_completion.record_success();
                                 yield Ok(Bytes::from(sse_data));
-                                continue;
+                                return;
                             }
 
                             let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) else {
@@ -684,6 +685,30 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn done_marker_ends_stream_without_waiting_for_upstream_eof() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(input))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let completion = StreamCompletion::default();
+        let converted = create_anthropic_sse_stream(upstream, completion.clone());
+
+        let chunks: Vec<_> =
+            tokio::time::timeout(std::time::Duration::from_millis(100), converted.collect())
+                .await
+                .expect("stream should end at [DONE]");
+        let merged = chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        assert!(merged.contains("event: message_stop"));
+        assert_eq!(completion.outcome(), Some(Ok(())));
     }
 
     #[test]
