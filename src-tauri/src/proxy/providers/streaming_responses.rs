@@ -442,8 +442,6 @@ pub fn create_anthropic_sse_stream_from_responses(
                                         open_indices.remove(&index);
                                     }
                                 }
-                                fallback_open_index = None;
-
                                 let delta_event = json!({
                                     "type": "message_delta",
                                     "delta": {
@@ -459,7 +457,9 @@ pub fn create_anthropic_sse_stream_from_responses(
 
                                 let stop_event = json!({"type": "message_stop"});
                                 let stop_sse = format!("event: message_stop\ndata: {}\n\n", serde_json::to_string(&stop_event).unwrap_or_default());
+                                stream_completion.record_success();
                                 yield Ok(Bytes::from(stop_sse));
+                                return;
                             }
                             "response.output_text.done" | "response.output_item.done" | "response.in_progress" => {}
                             _ => {}
@@ -483,5 +483,35 @@ pub fn create_anthropic_sse_stream_from_responses(
         }
 
         stream_completion.record_success();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{stream, StreamExt};
+
+    #[tokio::test]
+    async fn completed_event_ends_stream_without_waiting_for_upstream_eof() {
+        let input = concat!(
+            "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1-mini\",\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+        );
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(input))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let completion = StreamCompletion::default();
+        let converted = create_anthropic_sse_stream_from_responses(upstream, completion.clone());
+
+        let chunks: Vec<_> =
+            tokio::time::timeout(std::time::Duration::from_millis(100), converted.collect())
+                .await
+                .expect("stream should end at response.completed");
+        let merged = chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        assert!(merged.contains("event: message_stop"));
+        assert_eq!(completion.outcome(), Some(Ok(())));
     }
 }

@@ -7,6 +7,44 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.4.0] - 2026-04-29
+
+### Added
+
+- **Provider / Quota**: Add official provider quota checks so supported first-party accounts can surface quota status directly from cc-switch.
+- **MCP / TUI**: Add `stdio` / `http` / `sse` transport selection to the TUI MCP form, including URL-based remote MCP creation and editing.
+
+### Changed
+
+- **MCP / TUI**: Align the MCP add/edit form with the upstream remote-MCP fields while keeping the existing table, keybar, and overlay picker design language.
+- **README / Release Metadata**: Refresh the README version badges for 5.4.0.
+
+### Fixed
+
+- **Provider / Common Config**: Preserve Codex runtime trust tables and additive saved-only edits when switching providers, so user-local runtime state is not overwritten by common config extraction.
+- **OpenCode / TUI**: Keep OpenCode provider config state aligned when editing provider forms.
+- **Proxy / Streaming**: End transformed proxy streams on terminal events so OpenAI-compatible proxy calls do not stall after tool/function-call completion.
+- **MCP / Codex Sync**: Write remote MCP headers to Codex as `http_headers` without duplicating the legacy `headers` table.
+
+### Commits (since v5.3.4)
+
+- 8eeb191 fix(tui): support remote MCP server form
+- b58caeb fix(proxy): end transformed streams on terminal events
+- 8ab7916 feat: add official provider quota checks
+- 23f1fd0 test(config): align common config CLI semantics (#123)
+- 11df8b6 fix(provider): preserve additive saved-only edits
+- 5fcc903 fix(tui): align OpenCode provider config state
+- 0f510eb fix(provider): unify common config live handling (#123)
+- 83657d7 fix(provider): preserve Codex runtime trust on switch
+
+### Thanks
+
+- Thanks `@iCoresen` for reporting that the TUI MCP form could not add remote URL-based MCP servers.
+- Thanks `@unive3sal` for the OpenAI proxy function-call stall report and follow-up validation.
+- Thanks `@mushengLenzer` for the Codex `config.toml` trust/common-config report that drove the provider preservation fixes.
+- Thanks `@yudar1024` for the OpenCode provider state report that helped tighten provider form handling.
+- Thanks `@saladday` for the quota checks, MCP TUI implementation, proxy streaming fix, provider preservation work, and release integration across this cycle.
+
 ## [5.3.4] - 2026-04-22
 
 ### Changed
