@@ -28,110 +28,6 @@ pub(super) fn render_help_overlay(frame: &mut Frame<'_>, content_area: Rect, the
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
 }
 
-pub(super) fn render_provider_switch_first_use_overlay(
-    frame: &mut Frame<'_>,
-    content_area: Rect,
-    theme: &theme::Theme,
-    title: &str,
-    message: &str,
-    selected: usize,
-) {
-    let area = centered_rect_fixed(72, 12, content_area);
-    frame.render_widget(Clear, area);
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(overlay_border_style(theme, true))
-        .title(title.to_string());
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(4),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    render_key_bar_center(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("←→", texts::tui_key_select()),
-            ("Enter", texts::tui_key_apply()),
-            ("Esc", texts::tui_key_cancel()),
-        ],
-    );
-
-    frame.render_widget(
-        Paragraph::new(centered_message_lines(
-            message,
-            chunks[1].width,
-            chunks[1].height,
-        ))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false }),
-        chunks[1],
-    );
-
-    let import_style = if selected == 0 {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(theme.dim)
-    };
-    let continue_style = if selected == 1 {
-        Style::default()
-            .fg(theme.warn)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(theme.dim)
-    };
-    let cancel_style = if selected == 2 {
-        Style::default()
-            .fg(theme.dim)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(theme.dim)
-    };
-
-    let buttons = Line::from(vec![
-        Span::styled(
-            format!(
-                "[ {} ]",
-                texts::tui_provider_switch_first_use_import_button()
-            ),
-            import_style,
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(
-                "[ {} ]",
-                texts::tui_provider_switch_first_use_continue_button()
-            ),
-            continue_style,
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(
-                "[ {} ]",
-                texts::tui_provider_switch_first_use_cancel_button()
-            ),
-            cancel_style,
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(buttons).alignment(Alignment::Center),
-        chunks[2],
-    );
-}
-
 pub(super) fn render_confirm_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
@@ -168,11 +64,7 @@ pub(super) fn render_confirm_overlay(
                 ("Esc", texts::tui_key_cancel()),
             ],
         );
-    } else if matches!(
-        confirm.action,
-        ConfirmAction::ProviderApiFormatProxyNotice
-            | ConfirmAction::ProviderSwitchSharedConfigNotice
-    ) {
+    } else if matches!(confirm.action, ConfirmAction::ProviderApiFormatProxyNotice) {
         render_key_bar_center(
             frame,
             chunks[0],

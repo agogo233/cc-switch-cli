@@ -2,12 +2,13 @@
 //!
 //! 提供供应商（Provider）的 CRUD 操作。
 
+use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl Database {
     /// 获取指定应用类型的所有供应商
@@ -172,6 +173,96 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
+    }
+
+    /// 仅获取指定 app 下所有 provider 的 id 集合。
+    pub fn get_provider_ids(&self, app_type: &str) -> Result<HashSet<String>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare("SELECT id FROM providers WHERE app_type = ?1")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![app_type], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut ids = HashSet::new();
+        for row in rows {
+            ids.insert(row.map_err(|e| AppError::Database(e.to_string()))?);
+        }
+        Ok(ids)
+    }
+
+    /// 判断指定 app 下是否存在非官方种子的供应商。
+    pub fn has_non_official_seed_provider(&self, app_type: &str) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare("SELECT id FROM providers WHERE app_type = ?1")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![app_type])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+            let id: String = row.get(0).map_err(|e| AppError::Database(e.to_string()))?;
+            if !is_official_seed_id(&id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
+        let conn = lock_conn!(self.conn);
+        let max: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(sort_index) FROM providers WHERE app_type = ?1",
+                params![app_type],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(max.map(|value| (value + 1) as usize).unwrap_or(0))
+    }
+
+    /// 启动时补齐上游官方预设供应商（Claude / Codex / Gemini）。
+    pub fn init_default_official_providers(&self) -> Result<usize, AppError> {
+        if self
+            .get_bool_flag("official_providers_seeded")
+            .unwrap_or(false)
+        {
+            return Ok(0);
+        }
+
+        let mut inserted = 0usize;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        for seed in OFFICIAL_SEEDS {
+            let app_type = seed.app_type.as_str();
+            if self.get_provider_by_id(seed.id, app_type)?.is_some() {
+                continue;
+            }
+
+            let settings_config: serde_json::Value =
+                serde_json::from_str(seed.settings_config_json).map_err(|err| {
+                    AppError::Database(format!("Seed JSON parse failed for {}: {err}", seed.id))
+                })?;
+
+            let mut provider = Provider::with_id(
+                seed.id.to_string(),
+                seed.name.to_string(),
+                settings_config,
+                Some(seed.website_url.to_string()),
+            );
+            provider.category = Some("official".to_string());
+            provider.icon = Some(seed.icon.to_string());
+            provider.icon_color = Some(seed.icon_color.to_string());
+            provider.sort_index = Some(self.next_sort_index_for_app(app_type)?);
+            provider.created_at = Some(now_ms);
+
+            self.save_provider(app_type, &provider)?;
+            inserted += 1;
+            log::info!("✓ Seeded official provider: {} ({})", seed.name, app_type);
+        }
+
+        self.set_setting("official_providers_seeded", "true")?;
+        Ok(inserted)
     }
 
     /// 保存供应商（新增或更新）

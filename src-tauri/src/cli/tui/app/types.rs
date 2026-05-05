@@ -68,7 +68,6 @@ pub enum ConfirmAction {
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
-    ProviderSwitchSharedConfigNotice,
     OpenClawDailyMemoryDelete { filename: String },
     FormSaveBeforeClose,
     EditorDiscard,
@@ -175,12 +174,6 @@ pub enum Overlay {
     None,
     Help,
     Confirm(ConfirmOverlay),
-    ProviderSwitchFirstUseConfirm {
-        provider_id: String,
-        title: String,
-        message: String,
-        selected: usize,
-    },
     TextInput(TextInputState),
     BackupPicker {
         selected: usize,

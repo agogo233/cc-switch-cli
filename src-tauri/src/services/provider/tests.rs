@@ -3685,7 +3685,7 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
 
 #[test]
 #[serial]
-fn import_default_config_strips_codex_common_snippet_before_persisting_snapshot() {
+fn import_default_config_preserves_codex_common_snippet_in_db_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -3711,12 +3711,10 @@ fn import_default_config_strips_codex_common_snippet_before_persisting_snapshot(
     ProviderService::import_default_config(&state, AppType::Codex)
         .expect("import default codex config");
 
-    let cfg = state.config.read().expect("read config after import");
-    let provider = cfg
-        .get_manager(&AppType::Codex)
-        .expect("codex manager")
-        .providers
-        .get("default")
+    let provider = state
+        .db
+        .get_provider_by_id("default", AppType::Codex.as_str())
+        .expect("read imported codex provider")
         .expect("default provider exists");
     let stored_config = provider
         .settings_config
@@ -4235,7 +4233,7 @@ fn replacing_gemini_common_snippet_tolerates_invalid_stored_snippet() {
 
 #[test]
 #[serial]
-fn import_default_config_strips_gemini_common_snippet_before_persisting_snapshot() {
+fn import_default_config_preserves_gemini_common_snippet_in_db_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
@@ -4263,12 +4261,10 @@ fn import_default_config_strips_gemini_common_snippet_before_persisting_snapshot
     ProviderService::import_default_config(&state, AppType::Gemini)
         .expect("import default gemini config");
 
-    let cfg = state.config.read().expect("read config after import");
-    let provider = cfg
-        .get_manager(&AppType::Gemini)
-        .expect("gemini manager")
-        .providers
-        .get("default")
+    let provider = state
+        .db
+        .get_provider_by_id("default", AppType::Gemini.as_str())
+        .expect("read imported gemini provider")
         .expect("default provider exists");
     let env = provider
         .settings_config
@@ -4299,5 +4295,79 @@ fn import_default_config_strips_gemini_common_snippet_before_persisting_snapshot
         config_obj.get("providerOnly").and_then(Value::as_bool),
         Some(true),
         "provider-specific Gemini config should remain after import"
+    );
+}
+
+#[test]
+#[serial]
+fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    crate::openclaw_config::set_provider(
+        "existing",
+        json!({
+            "api": "live-api",
+            "models": [{"id": "live-model", "name": "Live Model"}]
+        }),
+    )
+    .expect("seed existing live provider");
+    crate::openclaw_config::set_provider(
+        "new-live",
+        json!({
+            "api": "new-api",
+            "models": [{"id": "new-model", "name": "New Model"}]
+        }),
+    )
+    .expect("seed new live provider");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::OpenClaw);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "existing".to_string(),
+            Provider::with_id(
+                "existing".to_string(),
+                "Saved Provider".to_string(),
+                json!({
+                    "api": "saved-api",
+                    "models": [{"id": "saved-model", "name": "Saved Model"}]
+                }),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+
+    let imported = ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw providers from live");
+
+    assert_eq!(imported, 1);
+    let existing = state
+        .db
+        .get_provider_by_id("existing", AppType::OpenClaw.as_str())
+        .expect("read existing provider")
+        .expect("existing provider remains");
+    assert_eq!(
+        existing.settings_config.get("api").and_then(Value::as_str),
+        Some("saved-api"),
+        "existing DB provider must not be overwritten by startup import"
+    );
+
+    let imported_provider = state
+        .db
+        .get_provider_by_id("new-live", AppType::OpenClaw.as_str())
+        .expect("read imported provider")
+        .expect("new live provider imported");
+    assert_eq!(imported_provider.name, "New Model");
+    assert_eq!(
+        imported_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(true)
     );
 }

@@ -1564,6 +1564,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_hide_attribution() -> &'static str {
+        if is_chinese() {
+            "隐藏 AI 署名"
+        } else {
+            "Hide AI Attribution"
+        }
+    }
+
     pub fn tui_label_provider_package() -> &'static str {
         if is_chinese() {
             "Provider / npm 包"
@@ -8742,22 +8750,6 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_imported_live_config_name() -> &'static str {
-        if is_chinese() {
-            "导入的 Live 配置"
-        } else {
-            "Imported Live Config"
-        }
-    }
-
-    pub fn tui_codex_imported_live_config_name() -> &'static str {
-        if is_chinese() {
-            "导入的 Codex Live 配置"
-        } else {
-            "Imported Codex Live Config"
-        }
-    }
-
     pub fn tui_toast_provider_live_config_imported() -> &'static str {
         if is_chinese() {
             "已将当前 live 配置导入为供应商"
@@ -8774,87 +8766,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_switch_first_use_title() -> &'static str {
+    pub fn tui_toast_no_live_config_imported() -> &'static str {
         if is_chinese() {
-            "检测到现有 live 配置"
+            "没有可导入的 live 供应商"
         } else {
-            "Existing live config detected"
-        }
-    }
-
-    pub fn tui_provider_switch_first_use_message(path: &str) -> String {
-        if is_chinese() {
-            format!("首次切换前，检测到 {path} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
-        } else {
-            format!("Before the first switch, an existing config was found at {path}. You can import the current live config first, or continue and overwrite it.")
-        }
-    }
-
-    pub fn tui_codex_provider_switch_first_use_title() -> &'static str {
-        if is_chinese() {
-            "检测到现有 Codex live 配置"
-        } else {
-            "Existing Codex live config detected"
-        }
-    }
-
-    pub fn tui_codex_provider_switch_first_use_message(paths: &str) -> String {
-        if is_chinese() {
-            format!("首次切换前，检测到 {paths} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
-        } else {
-            format!("Before the first switch, existing config was found in {paths}. You can import the current live config first, or continue and overwrite it.")
-        }
-    }
-
-    pub fn tui_provider_switch_first_use_import_button() -> &'static str {
-        if is_chinese() {
-            "导入当前配置"
-        } else {
-            "Import Current Config"
-        }
-    }
-
-    pub fn tui_provider_switch_first_use_continue_button() -> &'static str {
-        if is_chinese() {
-            "继续切换"
-        } else {
-            "Continue Switching"
-        }
-    }
-
-    pub fn tui_provider_switch_first_use_cancel_button() -> &'static str {
-        if is_chinese() {
-            "取消"
-        } else {
-            "Cancel"
-        }
-    }
-
-    pub fn tui_provider_switch_shared_config_tip_title() -> &'static str {
-        if is_chinese() {
-            "已切换供应商"
-        } else {
-            "Provider Switched"
-        }
-    }
-
-    pub fn tui_provider_switch_shared_config_tip_message() -> String {
-        if is_chinese() {
-            "当前 live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
-                .to_string()
-        } else {
-            "The live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
-                .to_string()
-        }
-    }
-
-    pub fn tui_codex_provider_switch_shared_config_tip_message() -> String {
-        if is_chinese() {
-            "当前 Codex live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
-                .to_string()
-        } else {
-            "The Codex live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
-                .to_string()
+            "No live providers were imported"
         }
     }
 }

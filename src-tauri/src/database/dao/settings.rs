@@ -38,6 +38,13 @@ impl Database {
         Ok(())
     }
 
+    /// 获取一次性布尔 flag。兼容历史写法 `"1"`。
+    pub fn get_bool_flag(&self, key: &str) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(key)?
+            .is_some_and(|value| value == "true" || value == "1"))
+    }
+
     /// 删除设置值
     pub fn delete_setting(&self, key: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);

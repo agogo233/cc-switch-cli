@@ -24,6 +24,13 @@ impl App {
                 self.open_provider_add_form();
                 Action::None
             }
+            KeyCode::Char('i') => {
+                if data.providers.rows.is_empty() {
+                    Action::ProviderImportLiveConfig
+                } else {
+                    Action::None
+                }
+            }
             KeyCode::Char('e') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;

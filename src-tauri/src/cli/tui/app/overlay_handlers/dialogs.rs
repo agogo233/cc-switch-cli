@@ -6,10 +6,6 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        if let Some(action) = self.handle_provider_switch_first_use_overlay_key(key) {
-            return Some(action);
-        }
-
         if let Some(action) = self.handle_confirm_overlay_key(key, data) {
             return Some(action);
         }
@@ -19,44 +15,6 @@ impl App {
         }
 
         None
-    }
-
-    fn handle_provider_switch_first_use_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::ProviderSwitchFirstUseConfirm {
-            provider_id,
-            selected,
-            ..
-        } = &mut self.overlay
-        else {
-            return None;
-        };
-
-        Some(match key.code {
-            KeyCode::Left | KeyCode::BackTab => {
-                *selected = selected.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Right | KeyCode::Tab => {
-                *selected = (*selected + 1).min(2);
-                Action::None
-            }
-            KeyCode::Enter => {
-                let action = match *selected {
-                    0 => Action::ProviderImportLiveConfig,
-                    1 => Action::ProviderSwitchForce {
-                        id: provider_id.clone(),
-                    },
-                    _ => Action::None,
-                };
-                self.close_overlay();
-                action
-            }
-            KeyCode::Esc => {
-                self.close_overlay();
-                Action::None
-            }
-            _ => Action::None,
-        })
     }
 
     fn handle_confirm_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
@@ -95,7 +53,6 @@ impl App {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
-                    ConfirmAction::ProviderSwitchSharedConfigNotice => Action::None,
                     ConfirmAction::OpenClawDailyMemoryDelete { filename } => {
                         Action::OpenClawDailyMemoryDelete {
                             filename: filename.clone(),

@@ -1475,45 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_switch_first_use_overlay_enter_requests_import() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-        app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
-            provider_id: "p1".to_string(),
-            title: texts::tui_provider_switch_first_use_title().to_string(),
-            message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
-            selected: 0,
-        };
-
-        let action = app.on_key(key(KeyCode::Enter), &data());
-
-        assert!(matches!(action, Action::ProviderImportLiveConfig));
-        assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    #[test]
-    fn provider_switch_first_use_overlay_right_then_enter_confirms_switch() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-        app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
-            provider_id: "p1".to_string(),
-            title: texts::tui_provider_switch_first_use_title().to_string(),
-            message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
-            selected: 0,
-        };
-
-        let move_action = app.on_key(key(KeyCode::Right), &data());
-        assert!(matches!(move_action, Action::None));
-
-        let action = app.on_key(key(KeyCode::Enter), &data());
-
-        assert!(matches!(action, Action::ProviderSwitchForce { id } if id == "p1"));
-        assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    #[test]
     fn openclaw_provider_detail_s_key_allows_removing_fallback_only_default_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ProviderDetail {
@@ -9208,35 +9169,6 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    #[test]
-    fn provider_claude_api_format_proxy_notice_reveals_pending_shared_config_tip() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-        app.pending_overlay = Some(Overlay::Confirm(ConfirmOverlay {
-            title: texts::tui_provider_switch_shared_config_tip_title().to_string(),
-            message: texts::tui_provider_switch_shared_config_tip_message(),
-            action: ConfirmAction::ProviderSwitchSharedConfigNotice,
-        }));
-        app.overlay = Overlay::Confirm(ConfirmOverlay {
-            title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
-            message: texts::tui_claude_api_format_requires_proxy_message("openai_chat"),
-            action: ConfirmAction::ProviderApiFormatProxyNotice,
-        });
-
-        let action = app.on_key(key(KeyCode::Enter), &data());
-
-        assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Confirm(ConfirmOverlay {
-                action: ConfirmAction::ProviderSwitchSharedConfigNotice,
-                ..
-            })
-        ));
-        assert!(app.pending_overlay.is_none());
     }
 
     #[test]

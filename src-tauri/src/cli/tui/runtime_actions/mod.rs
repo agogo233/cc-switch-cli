@@ -210,7 +210,6 @@ pub(crate) fn handle_action(
             provider_id,
             model_id,
         } => providers::set_default_model(&mut ctx, provider_id, model_id),
-        Action::ProviderSwitchForce { id } => providers::switch_force(&mut ctx, id),
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),

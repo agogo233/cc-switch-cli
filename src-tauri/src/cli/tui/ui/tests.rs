@@ -147,6 +147,20 @@ fn provider_field_label_and_value_renders_claude_responses_api_format() {
 }
 
 #[test]
+fn provider_field_label_and_value_renders_claude_hide_attribution_toggle() {
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.toggle_claude_hide_attribution();
+
+    let (label, value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::ClaudeHideAttribution,
+    );
+
+    assert!(label.contains("署名") || label.contains("Attribution"));
+    assert_eq!(value, "[✓]");
+}
+
+#[test]
 fn provider_detail_uses_legacy_claude_api_format_for_display() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -2592,73 +2606,6 @@ fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
     assert!(
         !all.contains("Esc cancel"),
         "should not show cancel hint: {all}"
-    );
-}
-
-#[test]
-fn provider_switch_first_use_overlay_renders_three_actions_with_padding() {
-    let _lock = lock_env();
-    let _no_color = EnvGuard::remove("NO_COLOR");
-
-    let mut app = App::new(Some(AppType::Claude));
-    app.route = Route::Providers;
-    app.focus = Focus::Content;
-    app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
-        provider_id: "p1".to_string(),
-        title: texts::tui_provider_switch_first_use_title().to_string(),
-        message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
-        selected: 0,
-    };
-
-    let data = minimal_data(&app.app_type);
-    let buf = render(&app, &data);
-    let all = all_text(&buf);
-
-    assert!(
-        all.contains(texts::tui_provider_switch_first_use_import_button()),
-        "expected import action in warning overlay: {all}"
-    );
-    assert!(
-        all.contains(texts::tui_provider_switch_first_use_continue_button()),
-        "expected continue action in warning overlay: {all}"
-    );
-    assert!(
-        all.contains(texts::tui_provider_switch_first_use_cancel_button()),
-        "expected cancel action in warning overlay: {all}"
-    );
-
-    let theme = theme_for(&app.app_type);
-    let content = super::content_pane_rect(buf.area, &theme);
-    let area = super::centered_rect_fixed(72, 12, content);
-
-    assert_eq!(buf[(area.x, area.y)].symbol(), "┌");
-    assert_eq!(
-        buf[(
-            area.x.saturating_add(area.width.saturating_sub(1)),
-            area.y.saturating_add(area.height.saturating_sub(1))
-        )]
-            .symbol(),
-        "┘"
-    );
-
-    let button_row = (0..buf.area.height)
-        .find(|&y| {
-            let row = line_at(&buf, y);
-            row.contains(texts::tui_provider_switch_first_use_import_button())
-                && row.contains(texts::tui_provider_switch_first_use_continue_button())
-                && row.contains(texts::tui_provider_switch_first_use_cancel_button())
-        })
-        .expect("warning overlay buttons should be rendered");
-    assert!(
-        button_row > area.y.saturating_add(3),
-        "buttons should not hug the top border"
-    );
-    assert!(
-        area.y
-            .saturating_add(area.height)
-            .saturating_sub(button_row)
-            >= 3,
-        "buttons should keep visible bottom margin"
     );
 }
 

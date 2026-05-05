@@ -365,26 +365,20 @@ impl ProviderService {
     }
 
     fn apply_post_commit(state: &AppState, action: &PostCommitAction) -> Result<(), AppError> {
-        let apply_common_config = action
-            .provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
         if action.takeover_active {
-            let backup_snapshot = Self::build_live_backup_snapshot(
-                &action.app_type,
-                &action.provider,
-                action.common_config_snippet.as_deref(),
-                apply_common_config,
-            )?;
             futures::executor::block_on(
                 state
                     .proxy_service
-                    .save_live_backup_snapshot(action.app_type.as_str(), &backup_snapshot),
+                    .update_live_backup_from_provider(action.app_type.as_str(), &action.provider),
             )
             .map_err(AppError::Message)?;
         } else {
+            let apply_common_config = action
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true);
             Self::write_live_snapshot(
                 &action.app_type,
                 &action.provider,
@@ -513,12 +507,16 @@ impl ProviderService {
                     raw_settings.insert("auth".to_string(), auth);
                 }
                 raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
-                let settings_to_store = Self::normalize_settings_config_for_storage(
+                let mut settings_to_store = Self::normalize_settings_config_for_storage(
                     app_type,
                     &provider,
                     Value::Object(raw_settings),
                     effective_common_snippet.as_deref(),
                 )?;
+                Self::restore_codex_model_provider_for_storage_best_effort(
+                    &provider,
+                    &mut settings_to_store,
+                );
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
@@ -811,6 +809,23 @@ impl ProviderService {
             common_config_snippet,
         )?;
         Ok(snapshot_provider.settings_config)
+    }
+
+    fn restore_codex_model_provider_for_storage_best_effort(
+        provider: &Provider,
+        settings_config: &mut Value,
+    ) {
+        if let Err(err) =
+            crate::codex_config::restore_codex_settings_config_model_provider_for_backfill(
+                settings_config,
+                &provider.settings_config,
+            )
+        {
+            log::warn!(
+                "Failed to restore Codex provider id while storing snapshot for '{}': {err}",
+                provider.id
+            );
+        }
     }
 
     pub(crate) fn remove_common_config_from_settings_for_preview(
@@ -1257,53 +1272,16 @@ impl ProviderService {
         })
     }
 
-    /// 导入当前 live 配置为默认供应商
-    pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<(), AppError> {
+    /// 导入当前 live 配置为默认供应商。
+    ///
+    /// 返回 `Ok(true)` 表示实际导入，`Ok(false)` 表示该 app 已有非官方 seed provider 而跳过。
+    pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
         if app_type.is_additive_mode() {
-            if matches!(app_type, AppType::OpenClaw) {
-                return Ok(());
-            }
-
-            let providers = crate::opencode_config::get_providers()?;
-            if providers.is_empty() {
-                return Ok(());
-            }
-
-            {
-                let mut config = state.config.write().map_err(AppError::from)?;
-                config.ensure_app(&app_type);
-                let manager = config
-                    .get_manager_mut(&app_type)
-                    .ok_or_else(|| Self::app_not_found(&app_type))?;
-
-                if !manager.get_all_providers().is_empty() {
-                    return Ok(());
-                }
-
-                for (id, settings_config) in providers {
-                    let name = settings_config
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .to_string();
-                    manager.providers.insert(
-                        id.clone(),
-                        Provider::with_id(id, name, settings_config, None),
-                    );
-                }
-            }
-
-            state.save()?;
-            return Ok(());
+            return Ok(false);
         }
 
-        {
-            let config = state.config.read().map_err(AppError::from)?;
-            if let Some(manager) = config.get_manager(&app_type) {
-                if !manager.get_all_providers().is_empty() {
-                    return Ok(());
-                }
-            }
+        if state.db.has_non_official_seed_provider(app_type.as_str())? {
+            return Ok(false);
         }
 
         let settings_config = match app_type {
@@ -1378,31 +1356,11 @@ impl ProviderService {
         );
         provider.category = Some("custom".to_string());
 
-        let common_config_snippet = {
-            let config = state.config.read().map_err(AppError::from)?;
-            config.common_config_snippets.get(&app_type).cloned()
-        };
-        provider.settings_config = Self::normalize_settings_config_for_storage(
-            &app_type,
-            &provider,
-            provider.settings_config.clone(),
-            common_config_snippet.as_deref(),
-        )?;
-
-        {
-            let mut config = state.config.write().map_err(AppError::from)?;
-            config.ensure_app(&app_type);
-            let manager = config
-                .get_manager_mut(&app_type)
-                .ok_or_else(|| Self::app_not_found(&app_type))?;
-            manager
-                .providers
-                .insert(provider.id.clone(), provider.clone());
-            manager.current = provider.id.clone();
-        }
-
-        state.save()?;
-        Ok(())
+        state.db.save_provider(app_type.as_str(), &provider)?;
+        state
+            .db
+            .set_current_provider(app_type.as_str(), &provider.id)?;
+        Ok(true)
     }
 
     /// 读取当前 live 配置
@@ -2371,6 +2329,10 @@ impl ProviderService {
 
     pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
         live::import_openclaw_providers_from_live(state)
+    }
+
+    pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+        live::import_opencode_providers_from_live(state)
     }
 }
 

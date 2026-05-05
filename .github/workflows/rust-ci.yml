@@ -8,7 +8,7 @@ on:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
       - ".github/workflows/release.yml"
-  pull_request:
+  pull_request_target:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master

@@ -93,6 +93,8 @@ impl AppState {
     pub fn try_new_with_startup_recovery() -> Result<Self, AppError> {
         let state = Self::try_new()?;
 
+        state.import_live_provider_configs_on_startup()?;
+
         if !state
             .proxy_service
             .is_running_blocking()
@@ -105,6 +107,54 @@ impl AppState {
         }
 
         Ok(state)
+    }
+
+    fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
+        for app_type in crate::app_config::AppType::all().filter(|app| !app.is_additive_mode()) {
+            match crate::services::provider::ProviderService::import_default_config(
+                self,
+                app_type.clone(),
+            ) {
+                Ok(true) => log::info!(
+                    "✓ Imported live config for {} as default provider",
+                    app_type.as_str()
+                ),
+                Ok(false) => log::debug!(
+                    "○ {} already has providers; live import skipped",
+                    app_type.as_str()
+                ),
+                Err(error) => log::debug!(
+                    "○ No live config to import for {}: {error}",
+                    app_type.as_str()
+                ),
+            }
+        }
+
+        match self.db.init_default_official_providers() {
+            Ok(count) if count > 0 => log::info!("✓ Seeded {count} official provider(s)"),
+            Ok(_) => {}
+            Err(error) => log::warn!("✗ Failed to seed official providers: {error}"),
+        }
+
+        match crate::services::provider::ProviderService::import_opencode_providers_from_live(self)
+        {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} OpenCode provider(s) from live config");
+            }
+            Ok(_) => log::debug!("○ No new OpenCode providers to import"),
+            Err(error) => log::warn!("✗ Failed to import OpenCode providers: {error}"),
+        }
+
+        match crate::services::provider::ProviderService::import_openclaw_providers_from_live(self)
+        {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} OpenClaw provider(s) from live config");
+            }
+            Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
+            Err(error) => log::warn!("✗ Failed to import OpenClaw providers: {error}"),
+        }
+
+        self.refresh_config_from_db()
     }
 
     /// 将内存中的 config 快照持久化到 SQLite（SSOT）。
@@ -394,5 +444,249 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+    use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::remove_var("CC_SWITCH_CONFIG_DIR");
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+                old_config_dir,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    fn write_text(path: PathBuf, text: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(path, text).expect("write text file");
+    }
+
+    fn write_json(path: PathBuf, value: serde_json::Value) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&value).expect("serialize json"),
+        )
+        .expect("write json file");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_imports_existing_claude_live_config_as_default_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "live-key" },
+                "permissions": { "allow": ["Bash"] }
+            }),
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+        let provider = state
+            .db
+            .get_provider_by_id("default", "claude")
+            .expect("read provider")
+            .expect("default provider should be imported");
+
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("claude")
+                .expect("read current provider")
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_API_KEY"],
+            json!("live-key")
+        );
+        assert!(provider.settings_config["permissions"]["allow"].is_array());
+        assert!(state
+            .db
+            .get_provider_by_id("claude-official", "claude")
+            .expect("read official provider")
+            .is_some());
+        let config = state.config.read().expect("read refreshed config");
+        let manager = config
+            .get_manager(&crate::app_config::AppType::Claude)
+            .expect("claude manager");
+        assert_eq!(manager.current, "default");
+        assert!(manager.providers.contains_key("default"));
+        assert!(manager.providers.contains_key("claude-official"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_imports_existing_codex_live_config_as_default_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        write_json(
+            crate::codex_config::get_codex_auth_path(),
+            json!({ "OPENAI_API_KEY": "live-codex-key" }),
+        );
+        write_text(
+            crate::codex_config::get_codex_config_path(),
+            r#"model_provider = "legacy"
+model = "gpt-4"
+
+[model_providers.legacy]
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+"#,
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+        let provider = state
+            .db
+            .get_provider_by_id("default", "codex")
+            .expect("read provider")
+            .expect("default provider should be imported");
+
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("codex")
+                .expect("read current provider")
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            provider.settings_config["auth"]["OPENAI_API_KEY"],
+            json!("live-codex-key")
+        );
+        assert!(provider
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| text.contains("model_provider = \"legacy\"")));
+        assert!(state
+            .db
+            .get_provider_by_id("codex-official", "codex")
+            .expect("read official provider")
+            .is_some());
+        let config = state.config.read().expect("read refreshed config");
+        let manager = config
+            .get_manager(&crate::app_config::AppType::Codex)
+            .expect("codex manager");
+        assert_eq!(manager.current, "default");
+        assert!(manager.providers.contains_key("default"));
+        assert!(manager.providers.contains_key("codex-official"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_seeds_official_providers_when_live_config_is_absent() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        for (app, provider_id, name) in [
+            ("claude", "claude-official", "Claude Official"),
+            ("codex", "codex-official", "OpenAI Official"),
+            ("gemini", "gemini-official", "Google Official"),
+        ] {
+            let provider = state
+                .db
+                .get_provider_by_id(provider_id, app)
+                .expect("read official provider")
+                .unwrap_or_else(|| panic!("{provider_id} should be seeded"));
+            assert_eq!(provider.name, name);
+            assert_eq!(provider.category.as_deref(), Some("official"));
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn import_default_config_runs_when_only_official_seed_exists() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+        assert!(state
+            .db
+            .get_provider_by_id("claude-official", "claude")
+            .expect("read official provider")
+            .is_some());
+
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "late-live-key" }
+            }),
+        );
+
+        let imported = crate::services::ProviderService::import_default_config(
+            &state,
+            crate::app_config::AppType::Claude,
+        )
+        .expect("import live config");
+
+        assert!(imported);
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("claude")
+                .expect("read current provider")
+                .as_deref(),
+            Some("default")
+        );
     }
 }

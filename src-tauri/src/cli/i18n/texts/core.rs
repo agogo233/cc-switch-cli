@@ -1401,31 +1401,3 @@ pub fn tui_claude_api_format_requires_proxy_message(api_format: &str) -> String 
         format!("Switched to {label}.\nThis format requires the local proxy.\nPress P on the home page to open local proxy.")
     }
 }
-
-pub fn tui_provider_switch_first_use_title() -> &'static str {
-    if is_chinese() {
-        "已有 Claude 配置"
-    } else {
-        "Existing Claude Config"
-    }
-}
-
-pub fn tui_provider_switch_first_use_message(path: &str) -> String {
-    if is_chinese() {
-        format!(
-            "⚠ 检测到已有 Claude 配置文件 ({path})。\n切换供应商将覆盖此文件。\n建议先将当前配置导入为供应商。"
-        )
-    } else {
-        format!(
-            "WARNING: An existing Claude config file was found at {path}.\nSwitching providers will overwrite this file.\nImport the current config as a provider first if you want to keep it."
-        )
-    }
-}
-
-pub fn tui_codex_provider_switch_first_use_title() -> &'static str {
-    if is_chinese() {
-        "已有 Codex 配置"
-    } else {
-        "Existing Codex Config"
-    }
-}
