@@ -19,7 +19,9 @@ mod tests {
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
     use crate::error::AppError;
+    use crate::prompt::Prompt;
     use crate::provider::Provider;
+    use crate::services::PromptService;
     use crate::settings::{get_settings, update_settings, AppSettings};
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
@@ -7644,6 +7646,243 @@ mod tests {
                 content
             } if content.contains("hello")
         ));
+    }
+
+    #[test]
+    fn prompts_c_opens_create_name_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::PromptCreateName,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompts_r_requests_reload() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('r')), &UiData::default());
+        assert!(matches!(action, Action::ReloadData));
+    }
+
+    #[test]
+    fn prompts_create_name_submit_opens_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_prompt_create_title().to_string(),
+            prompt: texts::tui_prompt_create_prompt().to_string(),
+            buffer: "Prompt One".to_string(),
+            submit: TextSubmit::PromptCreateName,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|editor| editor.submit.clone()),
+            Some(EditorSubmit::PromptCreate { name }) if name == "Prompt One"
+        ));
+    }
+
+    #[test]
+    fn prompts_create_name_empty_keeps_input_open() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_prompt_create_title().to_string(),
+            prompt: texts::tui_prompt_create_prompt().to_string(),
+            buffer: "   ".to_string(),
+            submit: TextSubmit::PromptCreateName,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::PromptCreateName,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompts_n_opens_rename_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('n')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::PromptRename { ref id },
+                ref buffer,
+                ..
+            }) if id == "pr1" && buffer == "Demo"
+        ));
+    }
+
+    #[test]
+    fn prompts_rename_empty_keeps_input_open() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_prompt_rename_title().to_string(),
+            prompt: texts::tui_prompt_rename_prompt().to_string(),
+            buffer: "   ".to_string(),
+            submit: TextSubmit::PromptRename {
+                id: "pr1".to_string(),
+            },
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::PromptRename { ref id },
+                ..
+            }) if id == "pr1"
+        ));
+    }
+
+    #[test]
+    fn prompts_rename_submit_returns_action() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_prompt_rename_title().to_string(),
+            prompt: texts::tui_prompt_rename_prompt().to_string(),
+            buffer: "Renamed".to_string(),
+            submit: TextSubmit::PromptRename {
+                id: "pr1".to_string(),
+            },
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::PromptRename { id, name } if id == "pr1" && name == "Renamed"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_create_runtime_clears_filter_when_new_prompt_is_not_visible() {
+        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let state = crate::AppState::try_new().expect("load state");
+        state.save().expect("persist empty state");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.buffer = "focus".to_string();
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit {
+                submit: EditorSubmit::PromptCreate {
+                    name: "Prompt One".to_string(),
+                },
+                content: "body".to_string(),
+            },
+        )
+        .expect("create prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "prompt-one");
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_rename_runtime_clears_filter_when_renamed_prompt_is_not_visible() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let state = crate::AppState::try_new().expect("load state");
+        PromptService::upsert_prompt(
+            &state,
+            AppType::Claude,
+            "pr1",
+            Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: Some(1),
+                updated_at: Some(1),
+            },
+        )
+        .expect("seed prompt");
+        state.save().expect("persist config");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.buffer = "demo".to_string();
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::PromptRename {
+                id: "pr1".to_string(),
+                name: "Renamed".to_string(),
+            },
+        )
+        .expect("rename prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "pr1");
+        assert_eq!(data.prompts.rows[0].prompt.name, "Renamed");
     }
 
     #[test]

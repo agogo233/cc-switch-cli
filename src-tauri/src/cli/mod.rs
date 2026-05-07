@@ -44,7 +44,7 @@ pub enum Commands {
     #[command(subcommand)]
     Mcp(commands::mcp::McpCommand),
 
-    /// Manage prompts (list, activate, edit)
+    /// Manage prompts (list, activate, create, rename, edit)
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommand),
 
@@ -78,6 +78,9 @@ pub enum Commands {
 
     /// Generate, install, inspect, or uninstall shell completions
     Completions(commands::completions::CompletionsCommand),
+
+    #[command(name = "internal", hide = true, subcommand)]
+    Internal(commands::internal::InternalCommand),
 }
 
 /// Generate shell completions
