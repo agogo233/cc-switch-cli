@@ -60,6 +60,10 @@ pub enum Commands {
     #[command(subcommand)]
     Proxy(commands::proxy::ProxyCommand),
 
+    /// Manage automatic failover and provider queue
+    #[command(subcommand)]
+    Failover(commands::failover::FailoverCommand),
+
     /// Start an app with a provider selector without switching the global current provider
     #[cfg(unix)]
     #[command(subcommand)]
@@ -184,6 +188,102 @@ mod tests {
         match cli.command {
             Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Disable)) => {}
             _ => panic!("expected proxy disable command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_enable_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "enable"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Enable)) => {}
+            _ => panic!("expected failover enable command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_disable_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "disable"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Disable)) => {}
+            _ => panic!("expected failover disable command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_list_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "list"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::List)) => {}
+            _ => panic!("expected failover list command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_add_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "add", "p1"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Add { id })) => {
+                assert_eq!(id, "p1");
+            }
+            _ => panic!("expected failover add command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_remove_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "remove", "p1"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Remove { id })) => {
+                assert_eq!(id, "p1");
+            }
+            _ => panic!("expected failover remove command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_move_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "move", "p1", "up"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Move {
+                id,
+                direction,
+            })) => {
+                assert_eq!(id, "p1");
+                assert_eq!(
+                    direction,
+                    super::commands::failover::FailoverMoveDirection::Up
+                );
+            }
+            _ => panic!("expected failover move command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_clear_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "failover", "clear", "--yes"]);
+
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Clear { yes })) => {
+                assert!(yes);
+            }
+            _ => panic!("expected failover clear command"),
+        }
+    }
+
+    #[test]
+    fn parses_failover_show_with_app() {
+        let cli = Cli::parse_from(["cc-switch", "--app", "codex", "failover", "show"]);
+
+        assert_eq!(cli.app, Some(super::AppType::Codex));
+        match cli.command {
+            Some(Commands::Failover(super::commands::failover::FailoverCommand::Show)) => {}
+            _ => panic!("expected failover show command"),
         }
     }
 

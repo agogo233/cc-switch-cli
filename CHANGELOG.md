@@ -7,6 +7,60 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.5.0] - 2026-05-10
+
+### Added
+
+- **Provider Failover**: Add failover management across CLI and TUI, including provider controls and proxy status visibility.
+- **Prompts / CLI / TUI**: Add prompt create and rename flows so prompt libraries can be managed without manual file edits.
+- **Claude / Config**: Respect `CLAUDE_CONFIG_DIR` for Claude Code installations that keep settings outside the default directory.
+- **Packaging**: Add Nix flake packaging for reproducible builds and downstream packaging workflows.
+
+### Changed
+
+- **Claude / TUI**: Add a hide-attribution toggle for Claude provider configuration.
+- **Startup / Providers**: Import live provider snapshots during startup to keep stored state aligned with on-disk configuration.
+- **CI**: Trigger Rust CI for fork pull requests through `pull_request_target`.
+- **README / Release Metadata**: Refresh the README version badges for 5.5.0.
+
+### Fixed
+
+- **Proxy / Streaming**: Emit valid tool stream events without usage payloads and strip Anthropic billing headers from OpenAI-compatible prompts.
+- **Proxy / Failover**: Fix proxy failover status output.
+- **Codex / Auth**: Persist official temporary auth snapshots and keep Codex session history stable across provider switches.
+- **Models / Compatibility**: Improve DeepSeek model and reasoning compatibility.
+- **Docs**: Fix broken internal documentation links.
+
+### Commits (since v5.4.0)
+
+- ca1a76b fix(proxy): emit valid tool stream events without usage (#146)
+- bccd85a fix(codex): keep history stable across provider switches
+- 49b7142 feat(proxy): strip Anthropic billing header from OpenAI prompts (#149)
+- 8018bba feat(tui): add Claude hide attribution toggle
+- 5a809aa Import live providers on startup
+- 27a1c12 feat: respect CLAUDE_CONFIG_DIR env var for Claude Code (#152)
+- 0f8c638 ci(workflow): trigger CI on fork PRs via pull_request_target
+- 54ae40e style(config): fix cargo fmt formatting
+- c0f5cb5 feat(tui): add failover controls (#155)
+- f2daf4e feat(prompts): add create and rename flows for CLI and TUI (#160)
+- 103f341 fix(codex): persist official temp auth snapshots (#159)
+- 6aebff3 build: add Nix flake packaging for cc-switch (#156)
+- 84495e3 Fix proxy failover status output (#144)
+- af3b291 feat(cli): add failover management commands (#165)
+- 5c6d373 Fix broken internal documentation links (#167)
+- 397741c (fix) improve DeepSeek model and reasoning compatibility
+
+### Thanks
+
+- Thanks `@unive3sal` for the proxy streaming, Anthropic billing-header, and provider failover contributions across this cycle.
+- Thanks `@LuJiansen` for adding `CLAUDE_CONFIG_DIR` support for Claude Code.
+- Thanks `@brushax` for the prompt create and rename flows across CLI and TUI.
+- Thanks `@haoxianhan` for adding Nix flake packaging.
+- Thanks `@TMYTiMidlY` for fixing Codex official login and temporary auth persistence.
+- Thanks `@apple-ouyang` for the proxy failover status output fix.
+- Thanks `@aqilaziz` for cleaning up broken internal documentation links.
+- Thanks `@saladday` for Codex history stability, live provider import, Claude attribution controls, CI updates, DeepSeek compatibility, and release integration across this minor release.
+
 ## [5.4.0] - 2026-04-29
 
 ### Added
