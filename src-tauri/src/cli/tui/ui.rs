@@ -167,7 +167,7 @@ fn render_content(
 }
 
 fn split_filter_area(area: Rect, app: &App) -> (Option<Rect>, Rect) {
-    let show = app.filter.active || !app.filter.buffer.trim().is_empty();
+    let show = app.filter.active || !app.filter.input.value.trim().is_empty();
     if !show {
         return (None, area);
     }
@@ -221,11 +221,11 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
 
     let input_inner = input_block.inner(inner);
     frame.render_widget(input_block, inner);
-    let available = input_inner.width as usize;
-    let full = app.filter.buffer.clone();
-    let cursor = full.chars().count();
-    let start = cursor.saturating_sub(available);
-    let visible = full.chars().skip(start).take(available).collect::<String>();
+    let (visible, cursor_x) = visible_text_window(
+        &app.filter.input.value,
+        app.filter.input.cursor,
+        input_inner.width as usize,
+    );
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(visible))).wrap(Wrap { trim: false }),
@@ -233,7 +233,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
     );
 
     if app.filter.active {
-        let cursor_x = input_inner.x + (cursor.saturating_sub(start) as u16);
+        let cursor_x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
         let cursor_y = input_inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }

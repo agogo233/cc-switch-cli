@@ -14,6 +14,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use provider_json::strip_provider_internal_fields;
 
+pub(crate) use super::text_edit::TextInput;
 pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::claude_hide_attribution_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
@@ -29,82 +30,6 @@ pub const OPENCLAW_API_PROTOCOLS: [&str; 5] = [
     "google-generative-ai",
     "bedrock-converse-stream",
 ];
-
-#[derive(Debug, Clone, Default)]
-pub struct TextInput {
-    pub value: String,
-    pub cursor: usize,
-}
-
-impl TextInput {
-    pub fn new(value: impl Into<String>) -> Self {
-        let value = value.into();
-        let cursor = value.chars().count();
-        Self { value, cursor }
-    }
-
-    pub fn set(&mut self, value: impl Into<String>) {
-        self.value = value.into();
-        self.cursor = self.value.chars().count();
-    }
-
-    pub fn is_blank(&self) -> bool {
-        self.value.trim().is_empty()
-    }
-
-    fn byte_index(line: &str, col: usize) -> usize {
-        line.char_indices()
-            .nth(col)
-            .map(|(i, _)| i)
-            .unwrap_or(line.len())
-    }
-
-    pub fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    pub fn move_right(&mut self) {
-        let len = self.value.chars().count();
-        self.cursor = (self.cursor + 1).min(len);
-    }
-
-    pub fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.cursor = self.value.chars().count();
-    }
-
-    pub fn insert_char(&mut self, c: char) -> bool {
-        let idx = Self::byte_index(&self.value, self.cursor);
-        self.value.insert(idx, c);
-        self.cursor += 1;
-        true
-    }
-
-    pub fn backspace(&mut self) -> bool {
-        if self.cursor == 0 || self.value.is_empty() {
-            return false;
-        }
-        let start = Self::byte_index(&self.value, self.cursor.saturating_sub(1));
-        let end = Self::byte_index(&self.value, self.cursor);
-        self.value.replace_range(start..end, "");
-        self.cursor = self.cursor.saturating_sub(1);
-        true
-    }
-
-    pub fn delete(&mut self) -> bool {
-        let len = self.value.chars().count();
-        if self.value.is_empty() || self.cursor >= len {
-            return false;
-        }
-        let start = Self::byte_index(&self.value, self.cursor);
-        let end = Self::byte_index(&self.value, self.cursor + 1);
-        self.value.replace_range(start..end, "");
-        true
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {

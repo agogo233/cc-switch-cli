@@ -19,7 +19,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_openclaw_daily_memory_create_title().to_string(),
             prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
-            buffer: initial,
+            input: TextInput::new(initial),
             submit: TextSubmit::OpenClawDailyMemoryFilename,
             secret: false,
         });
@@ -79,7 +79,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_export_title().to_string(),
                             prompt: texts::tui_config_export_prompt().to_string(),
-                            buffer: texts::tui_default_config_export_path().to_string(),
+                            input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigExport,
                             secret: false,
                         });
@@ -89,7 +89,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_import_title().to_string(),
                             prompt: texts::tui_config_import_prompt().to_string(),
-                            buffer: texts::tui_default_config_export_path().to_string(),
+                            input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigImport,
                             secret: false,
                         });
@@ -99,7 +99,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_backup_title().to_string(),
                             prompt: texts::tui_config_backup_prompt().to_string(),
-                            buffer: String::new(),
+                            input: TextInput::new(""),
                             submit: TextSubmit::ConfigBackupName,
                             secret: false,
                         });
@@ -312,7 +312,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: title.to_string(),
             prompt: texts::tui_openclaw_tools_pattern_placeholder().to_string(),
-            buffer: initial,
+            input: TextInput::new(initial),
             submit: TextSubmit::OpenClawToolsRule { section, row },
             secret: false,
         });
@@ -482,7 +482,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: title.to_string(),
             prompt: title.to_string(),
-            buffer,
+            input: TextInput::new(buffer),
             submit: TextSubmit::OpenClawAgentsRuntimeField { field },
             secret: false,
         });
@@ -664,7 +664,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                             prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
-                            buffer: String::new(),
+                            input: TextInput::new(""),
                             submit: TextSubmit::WebDavJianguoyunUsername,
                             secret: false,
                         });
@@ -709,7 +709,7 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_settings_openclaw_config_dir_label().to_string(),
                         prompt: texts::tui_settings_openclaw_config_dir_prompt().to_string(),
-                        buffer,
+                        input: TextInput::new(buffer),
                         submit: TextSubmit::SettingsOpenClawConfigDir,
                         secret: false,
                     });
@@ -788,7 +788,7 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_settings_proxy_title().to_string(),
                         prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                        buffer: data.proxy.configured_listen_address.clone(),
+                        input: TextInput::new(data.proxy.configured_listen_address.clone()),
                         submit: TextSubmit::SettingsProxyListenAddress,
                         secret: false,
                     });
@@ -805,7 +805,7 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_settings_proxy_title().to_string(),
                         prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                        buffer: data.proxy.configured_listen_port.to_string(),
+                        input: TextInput::new(data.proxy.configured_listen_port.to_string()),
                         submit: TextSubmit::SettingsProxyListenPort,
                         secret: false,
                     });
@@ -1101,7 +1101,10 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_prompt_create_title().to_string(),
             prompt: texts::tui_prompt_create_prompt().to_string(),
-            buffer: format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
+            input: TextInput::new(format!(
+                "Prompt {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M")
+            )),
             submit: TextSubmit::PromptCreateName,
             secret: false,
         });

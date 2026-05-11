@@ -6,6 +6,10 @@ mod tab;
 
 impl App {
     pub(crate) fn on_form_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        if is_save_shortcut(key) {
+            return self.handle_form_save_shortcut(data);
+        }
+
         if self.handle_form_tab_key(key) {
             return Action::None;
         }
@@ -24,10 +28,6 @@ impl App {
 
         if let Some(action) = self.handle_mcp_focus_key(key) {
             return action;
-        }
-
-        if is_save_shortcut(key) {
-            return self.handle_form_save_shortcut(data);
         }
 
         match key.code {

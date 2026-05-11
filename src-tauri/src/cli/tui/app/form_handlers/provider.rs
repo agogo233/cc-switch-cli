@@ -128,69 +128,22 @@ impl App {
                 provider.editing = false;
                 Some(Action::None)
             }
-            KeyCode::Left => {
-                if let Some(input) = provider.input_mut(selected) {
-                    input.move_left();
+            _ => {
+                if TextEditCommand::from_key(key).is_none() {
+                    return None;
                 }
-                Some(Action::None)
-            }
-            KeyCode::Right => {
-                if let Some(input) = provider.input_mut(selected) {
-                    input.move_right();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Home => {
-                if let Some(input) = provider.input_mut(selected) {
-                    input.move_home();
-                }
-                Some(Action::None)
-            }
-            KeyCode::End => {
-                if let Some(input) = provider.input_mut(selected) {
-                    input.move_end();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Backspace => {
+                let policy = TextInputPolicy {
+                    max_chars: (selected == ProviderAddField::Notes)
+                        .then_some(PROVIDER_NOTES_MAX_CHARS),
+                };
                 let changed = provider
                     .input_mut(selected)
-                    .map(|input| input.backspace())
+                    .and_then(|input| input.apply_key_with_policy(key, policy))
+                    .map(|edit| edit.changed)
                     .unwrap_or(false);
                 self.finish_provider_input_change(selected, changed, data);
                 Some(Action::None)
             }
-            KeyCode::Delete => {
-                let changed = provider
-                    .input_mut(selected)
-                    .map(|input| input.delete())
-                    .unwrap_or(false);
-                self.finish_provider_input_change(selected, changed, data);
-                Some(Action::None)
-            }
-            KeyCode::Char(c) => {
-                if c.is_control() {
-                    return Some(Action::None);
-                }
-
-                if selected == ProviderAddField::Notes {
-                    let can_insert = provider
-                        .input(selected)
-                        .map(|input| input.value.chars().count() < PROVIDER_NOTES_MAX_CHARS)
-                        .unwrap_or(true);
-                    if !can_insert {
-                        return Some(Action::None);
-                    }
-                }
-
-                let changed = provider
-                    .input_mut(selected)
-                    .map(|input| input.insert_char(c))
-                    .unwrap_or(false);
-                self.finish_provider_input_change(selected, changed, data);
-                Some(Action::None)
-            }
-            _ => None,
         }
     }
 

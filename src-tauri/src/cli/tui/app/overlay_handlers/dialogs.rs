@@ -114,27 +114,18 @@ impl App {
             }
             KeyCode::Enter => {
                 let raw = match &self.overlay {
-                    Overlay::TextInput(input) => input.buffer.trim().to_string(),
+                    Overlay::TextInput(input) => input.input.value.trim().to_string(),
                     _ => String::new(),
                 };
                 self.overlay = Overlay::None;
                 self.handle_text_input_submit(submit, raw, data)
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Overlay::TextInput(input) = &mut self.overlay {
-                    input.buffer.pop();
+                    let _ = input.input.apply_key(key);
                 }
                 Action::None
             }
-            KeyCode::Char(c) => {
-                if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let Overlay::TextInput(input) = &mut self.overlay {
-                        input.buffer.push(c);
-                    }
-                }
-                Action::None
-            }
-            _ => Action::None,
         };
 
         Some(action)
@@ -161,7 +152,7 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_prompt_create_title().to_string(),
                         prompt: texts::tui_prompt_create_prompt().to_string(),
-                        buffer: raw,
+                        input: TextInput::new(raw),
                         submit: TextSubmit::PromptCreateName,
                         secret: false,
                     });
@@ -182,7 +173,7 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_prompt_rename_title().to_string(),
                         prompt: texts::tui_prompt_rename_prompt().to_string(),
-                        buffer: raw,
+                        input: TextInput::new(raw),
                         submit: TextSubmit::PromptRename { id },
                         secret: false,
                     });
@@ -301,7 +292,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                 prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
-                buffer: String::new(),
+                input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunUsername,
                 secret: false,
             });
@@ -312,7 +303,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
             prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
-            buffer: String::new(),
+            input: TextInput::new(""),
             submit: TextSubmit::WebDavJianguoyunPassword,
             secret: true,
         });
@@ -325,7 +316,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                 prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
-                buffer: String::new(),
+                input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunPassword,
                 secret: true,
             });
@@ -366,7 +357,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenAddress,
                 secret: false,
             });
@@ -394,7 +385,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
                 secret: false,
             });
@@ -409,7 +400,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
                 secret: false,
             });

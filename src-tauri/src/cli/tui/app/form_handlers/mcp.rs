@@ -95,46 +95,15 @@ impl App {
                 mcp.editing = false;
                 Some(Action::None)
             }
-            KeyCode::Left => {
+            _ => {
+                if TextEditCommand::from_key(key).is_none() {
+                    return None;
+                }
                 if let Some(input) = mcp.input_mut(selected) {
-                    input.move_left();
+                    input.apply_key(key);
                 }
                 Some(Action::None)
             }
-            KeyCode::Right => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_right();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Home => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_home();
-                }
-                Some(Action::None)
-            }
-            KeyCode::End => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_end();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Backspace => {
-                let _ = mcp.input_mut(selected).map(|input| input.backspace());
-                Some(Action::None)
-            }
-            KeyCode::Delete => {
-                let _ = mcp.input_mut(selected).map(|input| input.delete());
-                Some(Action::None)
-            }
-            KeyCode::Char(c) => {
-                if c.is_control() {
-                    return Some(Action::None);
-                }
-                let _ = mcp.input_mut(selected).map(|input| input.insert_char(c));
-                Some(Action::None)
-            }
-            _ => None,
         }
     }
 

@@ -20,6 +20,12 @@ impl App {
             return Action::EditorOpenExternal;
         }
 
+        if let Some(command) = TextEditCommand::from_key(key) {
+            editor.apply_text_command(command);
+            editor.ensure_cursor_visible(viewport);
+            return Action::None;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if editor.is_dirty() {
@@ -52,37 +58,6 @@ impl App {
                 editor.ensure_cursor_visible(viewport);
                 Action::None
             }
-            KeyCode::Left => {
-                if editor.cursor_col > 0 {
-                    editor.cursor_col -= 1;
-                } else if editor.cursor_row > 0 {
-                    editor.cursor_row -= 1;
-                    editor.cursor_col = editor.line_len_chars(editor.cursor_row);
-                }
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
-            KeyCode::Right => {
-                let line_len = editor.line_len_chars(editor.cursor_row);
-                if editor.cursor_col < line_len {
-                    editor.cursor_col += 1;
-                } else if editor.cursor_row + 1 < editor.lines.len() {
-                    editor.cursor_row += 1;
-                    editor.cursor_col = 0;
-                }
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
-            KeyCode::Home => {
-                editor.cursor_col = 0;
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
-            KeyCode::End => {
-                editor.cursor_col = editor.line_len_chars(editor.cursor_row);
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
             KeyCode::PageUp => {
                 editor.scroll = editor.scroll.saturating_sub(jump_rows);
                 editor.cursor_row = editor.cursor_row.saturating_sub(jump_rows);
@@ -103,16 +78,6 @@ impl App {
                 editor.ensure_cursor_visible(viewport);
                 Action::None
             }
-            KeyCode::Backspace => {
-                editor.backspace();
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
-            KeyCode::Delete => {
-                editor.delete();
-                editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
             KeyCode::Enter => {
                 editor.newline();
                 editor.ensure_cursor_visible(viewport);
@@ -121,13 +86,6 @@ impl App {
             KeyCode::Tab => {
                 editor.insert_str("  ");
                 editor.ensure_cursor_visible(viewport);
-                Action::None
-            }
-            KeyCode::Char(c) => {
-                if !c.is_control() {
-                    editor.insert_char(c);
-                    editor.ensure_cursor_visible(viewport);
-                }
                 Action::None
             }
             _ => Action::None,
@@ -139,7 +97,7 @@ impl App {
         let mut width = self.last_size.width.saturating_sub(30);
         let mut height = self.last_size.height.saturating_sub(3).saturating_sub(1);
 
-        if self.filter.active || !self.filter.buffer.trim().is_empty() {
+        if self.filter.active || !self.filter.input.value.trim().is_empty() {
             height = height.saturating_sub(5);
         }
 

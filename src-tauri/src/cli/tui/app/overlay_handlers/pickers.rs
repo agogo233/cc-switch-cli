@@ -185,58 +185,14 @@ impl App {
                 }
                 Action::None
             }
-            KeyCode::Left => {
+            _ => {
                 if let Some(input) = provider.claude_model_input_mut(selected) {
-                    input.move_left();
-                }
-                Action::None
-            }
-            KeyCode::Right => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    input.move_right();
-                }
-                Action::None
-            }
-            KeyCode::Home => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    input.move_home();
-                }
-                Action::None
-            }
-            KeyCode::End => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    input.move_end();
-                }
-                Action::None
-            }
-            KeyCode::Backspace => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    if input.backspace() {
+                    if input.apply_key(key).is_some_and(|edit| edit.changed) {
                         provider.mark_claude_model_config_touched();
                     }
                 }
                 Action::None
             }
-            KeyCode::Delete => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    if input.delete() {
-                        provider.mark_claude_model_config_touched();
-                    }
-                }
-                Action::None
-            }
-            KeyCode::Char(c) => {
-                if c.is_control() {
-                    return Action::None;
-                }
-                if let Some(input) = provider.claude_model_input_mut(selected) {
-                    if input.insert_char(c) {
-                        provider.mark_claude_model_config_touched();
-                    }
-                }
-                Action::None
-            }
-            _ => Action::None,
         }
     }
 
@@ -320,7 +276,7 @@ impl App {
             KeyCode::Up => {
                 *selected_idx = selected_idx.saturating_sub(1);
                 if let Some(model) = filtered.get(*selected_idx) {
-                    *input = (*model).to_string();
+                    input.set((*model).to_string());
                 }
                 Action::None
             }
@@ -328,35 +284,21 @@ impl App {
                 if !filtered.is_empty() {
                     *selected_idx = (*selected_idx + 1).min(filtered.len() - 1);
                     if let Some(model) = filtered.get(*selected_idx) {
-                        *input = (*model).to_string();
+                        input.set((*model).to_string());
                     }
                 }
                 Action::None
             }
             KeyCode::Tab => {
                 if let Some(model) = filtered.get(*selected_idx) {
-                    *input = (*model).to_string();
-                    *query = (*model).to_string();
+                    input.set((*model).to_string());
+                    *query = input.value.clone();
                     *selected_idx = 0;
                 }
-                Action::None
-            }
-            KeyCode::Backspace => {
-                if !input.is_empty() {
-                    input.pop();
-                    *query = input.clone();
-                    *selected_idx = 0;
-                }
-                Action::None
-            }
-            KeyCode::Char(c) if !c.is_control() => {
-                input.push(c);
-                *query = input.clone();
-                *selected_idx = 0;
                 Action::None
             }
             KeyCode::Enter => {
-                let selected_model = input.trim().to_string();
+                let selected_model = input.value.trim().to_string();
                 if selected_model.is_empty() {
                     self.overlay = Overlay::None;
                     return Some(Action::None);
@@ -380,7 +322,13 @@ impl App {
                 }
                 Action::None
             }
-            _ => Action::None,
+            _ => {
+                if input.apply_key(key).is_some_and(|edit| edit.changed) {
+                    *query = input.value.clone();
+                    *selected_idx = 0;
+                }
+                Action::None
+            }
         })
     }
 

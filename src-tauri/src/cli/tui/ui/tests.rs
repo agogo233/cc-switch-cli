@@ -26,7 +26,7 @@ use crate::{
             ConfigSnapshot, McpSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
             ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData,
         },
-        form::{FormFocus, ProviderAddField},
+        form::{FormFocus, ProviderAddField, TextInput},
         route::{NavItem, Route},
         theme::theme_for,
     },
@@ -2410,7 +2410,7 @@ fn text_input_overlay_renders_inner_input_box() {
     app.overlay = Overlay::TextInput(TextInputState {
         title: "Demo".to_string(),
         prompt: "Enter value".to_string(),
-        buffer: "hello".to_string(),
+        input: TextInput::new("hello".to_string()),
         submit: TextSubmit::ConfigBackupName,
         secret: false,
     });
@@ -4675,7 +4675,7 @@ fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
     let mut config_app = App::new(Some(AppType::OpenClaw));
     config_app.route = Route::Config;
     config_app.focus = Focus::Content;
-    config_app.filter.buffer = "openclaw".to_string();
+    config_app.filter.input.set("openclaw".to_string());
     let config_labels = super::config_items_filtered(&config_app)
         .into_iter()
         .map(|item| super::config_item_label(&item))
@@ -6643,7 +6643,7 @@ fn workspace_daily_memory_route_render_shows_search_results_when_query_is_active
     let mut app = App::new(Some(AppType::OpenClaw));
     app.route = Route::ConfigOpenClawDailyMemory;
     app.focus = Focus::Content;
-    app.filter.buffer = "focus".to_string();
+    app.filter.input.set("focus".to_string());
     app.openclaw_daily_memory_search_query = "focus".to_string();
     app.openclaw_daily_memory_search_results =
         vec![crate::commands::workspace::DailyMemorySearchResult {
@@ -7120,7 +7120,7 @@ fn openclaw_tui_provider_detail_uses_saved_name_and_keeps_model_separate() {
 #[test]
 fn openclaw_tui_provider_search_uses_saved_name_not_model_name() {
     let mut app = App::new(Some(AppType::OpenClaw));
-    app.filter.buffer = "live model".to_string();
+    app.filter.input.set("live model".to_string());
 
     let mut data = minimal_data(&app.app_type);
     data.providers.rows[0].provider = Provider::with_id(
@@ -7137,7 +7137,7 @@ fn openclaw_tui_provider_search_uses_saved_name_not_model_name() {
 
     assert!(super::provider_rows_filtered(&app, &data).is_empty());
 
-    app.filter.buffer = "saved snapshot".to_string();
+    app.filter.input.set("saved snapshot".to_string());
     assert_eq!(super::provider_rows_filtered(&app, &data).len(), 1);
 }
 

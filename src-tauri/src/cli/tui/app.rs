@@ -15,6 +15,7 @@ use super::form::{
     McpTransport, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
+use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
 use super::{data, form};
 
 mod app_state;

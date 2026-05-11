@@ -11,6 +11,7 @@ use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::form::ProviderAddField;
 use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, StreamCheckReq};
+use super::super::text_edit::TextInput;
 use super::RuntimeActionContext;
 
 fn active_proxy_failover_queue_guard_message() -> &'static str {
@@ -501,7 +502,7 @@ pub(super) fn model_fetch(
         request_id,
         field: field.clone(),
         claude_idx,
-        input: String::new(),
+        input: TextInput::new(""),
         query: String::new(),
         fetching: true,
         models: Vec::new(),

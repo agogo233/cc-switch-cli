@@ -429,7 +429,7 @@ impl App {
                 self.overlay = Overlay::TextInput(TextInputState {
                     title: texts::tui_prompt_rename_title().to_string(),
                     prompt: texts::tui_prompt_rename_prompt().to_string(),
-                    buffer: row.prompt.name.clone(),
+                    input: TextInput::new(row.prompt.name.clone()),
                     submit: TextSubmit::PromptRename { id: row.id.clone() },
                     secret: false,
                 });

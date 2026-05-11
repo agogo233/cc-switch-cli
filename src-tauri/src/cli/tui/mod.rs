@@ -8,6 +8,7 @@ mod runtime_systems;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod text_edit;
 mod theme;
 mod ui;
 

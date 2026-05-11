@@ -202,9 +202,9 @@ pub(super) fn select_prompt_by_id(app: &mut App, data: &UiData, id: &str) {
         return;
     }
 
-    if app.filter.active || !app.filter.buffer.trim().is_empty() {
+    if app.filter.active || !app.filter.input.value.trim().is_empty() {
         app.filter.active = false;
-        app.filter.buffer.clear();
+        app.filter.input.set("");
         let visible = visible_prompts(&app.filter, data);
         if let Some(idx) = visible.iter().position(|row| row.id == id) {
             app.prompt_idx = idx;

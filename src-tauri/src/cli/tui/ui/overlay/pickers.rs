@@ -1,5 +1,6 @@
 use super::super::theme;
 use super::super::*;
+use crate::cli::tui::text_edit::TextInput;
 
 pub(super) fn render_claude_model_picker_overlay(
     frame: &mut Frame<'_>,
@@ -234,7 +235,7 @@ pub(super) fn render_model_fetch_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
     theme: &theme::Theme,
-    input: &str,
+    input: &TextInput,
     query: &str,
     fetching: bool,
     models: &[String],
@@ -270,8 +271,8 @@ pub(super) fn render_model_fetch_picker_overlay(
     let input_inner = input_block.inner(chunks[0]);
 
     let (visible, cursor_x) =
-        visible_text_window(input, input.chars().count(), input_inner.width as usize);
-    let (input_text, input_style) = if input.is_empty() {
+        visible_text_window(&input.value, input.cursor, input_inner.width as usize);
+    let (input_text, input_style) = if input.value.is_empty() {
         (
             texts::tui_model_fetch_search_placeholder().to_string(),
             Style::default().fg(theme.dim),

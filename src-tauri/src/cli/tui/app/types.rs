@@ -3,19 +3,19 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct FilterState {
     pub active: bool,
-    pub buffer: String,
+    pub input: TextInput,
 }
 
 impl FilterState {
     pub fn new() -> Self {
         Self {
             active: false,
-            buffer: String::new(),
+            input: TextInput::new(""),
         }
     }
 
     pub fn query_lower(&self) -> Option<String> {
-        let trimmed = self.buffer.trim();
+        let trimmed = self.input.value.trim();
         if trimmed.is_empty() {
             return None;
         }
@@ -113,7 +113,7 @@ pub enum TextSubmit {
 pub struct TextInputState {
     pub title: String,
     pub prompt: String,
-    pub buffer: String,
+    pub input: TextInput,
     pub submit: TextSubmit,
     pub secret: bool,
 }
@@ -204,7 +204,7 @@ pub enum Overlay {
         request_id: u64,
         field: ProviderAddField,
         claude_idx: Option<usize>,
-        input: String,
+        input: TextInput,
         query: String,
         fetching: bool,
         models: Vec<String>,

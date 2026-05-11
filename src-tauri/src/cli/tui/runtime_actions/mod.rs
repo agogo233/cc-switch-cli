@@ -441,7 +441,7 @@ mod tests {
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
         app.filter.active = true;
-        app.filter.buffer = "focus".to_string();
+        app.filter.input.set("focus".to_string());
         app.openclaw_daily_memory_search_query = "focus".to_string();
         app.daily_memory_idx = 1;
         app.openclaw_daily_memory_search_results =
@@ -484,7 +484,7 @@ mod tests {
             "route stack should be normalized too so Back does not land on a duplicate config route"
         );
         assert!(!app.filter.active);
-        assert!(app.filter.buffer.is_empty());
+        assert!(app.filter.input.value.is_empty());
         assert!(app.openclaw_daily_memory_search_query.is_empty());
         assert!(app.openclaw_daily_memory_search_results.is_empty());
         assert_eq!(app.daily_memory_idx, 0);
@@ -537,7 +537,7 @@ mod tests {
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
         app.filter.active = true;
-        app.filter.buffer = "focus".to_string();
+        app.filter.input.set("focus".to_string());
         app.openclaw_daily_memory_search_query = "focus".to_string();
         app.daily_memory_idx = 1;
         app.openclaw_daily_memory_search_results =
@@ -574,7 +574,7 @@ mod tests {
             "route stack should normalize the same way as SetAppType"
         );
         assert!(!app.filter.active);
-        assert!(app.filter.buffer.is_empty());
+        assert!(app.filter.input.value.is_empty());
         assert!(app.openclaw_daily_memory_search_query.is_empty());
         assert!(app.openclaw_daily_memory_search_results.is_empty());
         assert_eq!(app.daily_memory_idx, 0);

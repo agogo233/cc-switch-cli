@@ -6,7 +6,7 @@ const PROXY_ACTIVITY_POLL_INTERVAL_TICKS: u64 = 5;
 impl App {
     pub(crate) fn clear_openclaw_daily_memory_search_state(&mut self) {
         self.filter.active = false;
-        self.filter.buffer.clear();
+        self.filter.input.set("");
         self.openclaw_daily_memory_search_query.clear();
         self.openclaw_daily_memory_search_results.clear();
         self.daily_memory_idx = 0;
@@ -394,7 +394,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.filter.active = false;
-                self.filter.buffer.clear();
+                self.filter.input.set("");
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
                     self.daily_memory_idx = 0;
@@ -407,24 +407,20 @@ impl App {
                 self.filter.active = false;
                 if is_daily_memory {
                     return Action::OpenClawDailyMemorySearch {
-                        query: self.filter.buffer.clone(),
+                        query: self.filter.input.value.clone(),
                     };
                 }
             }
-            KeyCode::Backspace => {
-                self.filter.buffer.pop();
-                if is_daily_memory && self.filter.buffer.is_empty() {
+            _ => {
+                let Some(edit) = self.filter.input.apply_key(key) else {
+                    return Action::None;
+                };
+                if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
                     return Action::OpenClawDailyMemorySearch {
                         query: String::new(),
                     };
                 }
             }
-            KeyCode::Char(c) => {
-                if !c.is_control() {
-                    self.filter.buffer.push(c);
-                }
-            }
-            _ => {}
         }
         Action::None
     }
