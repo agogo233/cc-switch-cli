@@ -1,7 +1,8 @@
 use clap::{Subcommand, ValueEnum};
 
 use crate::app_config::AppType;
-use crate::cli::ui::{create_table, highlight, info, success, warning};
+use crate::cli::failover_policy::{ensure_auto_failover_queue_ready, inspect_auto_failover_gate};
+use crate::cli::ui::{create_table, highlight, info, success};
 use crate::database::FailoverQueueItem;
 use crate::error::AppError;
 use crate::proxy::types::ProxyTakeoverStatus;
@@ -80,12 +81,13 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
 }
 
 fn ensure_failover_supported(app_type: &AppType) -> Result<(), AppError> {
-    match app_type {
-        AppType::Claude | AppType::Codex | AppType::Gemini => Ok(()),
-        AppType::OpenCode | AppType::OpenClaw => Err(AppError::InvalidInput(format!(
+    if app_type.supports_failover() {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(format!(
             "failover is not supported for {}",
             app_type.as_str()
-        ))),
+        )))
     }
 }
 
@@ -131,13 +133,39 @@ fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
     let state = get_state()?;
     let runtime = create_runtime()?;
-    let queue_empty = state.db.get_failover_queue(app_type.as_str())?.is_empty();
-
-    runtime.block_on(async {
-        let mut config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
-        config.auto_failover_enabled = enabled;
-        state.db.update_proxy_config_for_app(config).await
-    })?;
+    if enabled {
+        let gate = runtime.block_on(inspect_auto_failover_gate(&state, &app_type))?;
+        ensure_auto_failover_queue_ready(&gate)?;
+        if gate.needs_proxy_bootstrap() {
+            if !confirm_enable_proxy_for_failover(app_type.as_str())? {
+                println!("{}", info("Cancelled."));
+                return Ok(());
+            }
+            runtime
+                .block_on(
+                    state
+                        .proxy_service
+                        .enable_proxy_and_auto_failover_for_app(app_type.as_str()),
+                )
+                .map_err(AppError::Message)?;
+        } else {
+            runtime
+                .block_on(
+                    state
+                        .proxy_service
+                        .enable_auto_failover_for_app(app_type.as_str()),
+                )
+                .map_err(AppError::Message)?;
+        }
+    } else {
+        runtime
+            .block_on(
+                state
+                    .proxy_service
+                    .set_auto_failover_for_app(app_type.as_str(), false),
+            )
+            .map_err(AppError::Message)?;
+    }
 
     println!(
         "{}",
@@ -147,16 +175,27 @@ fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
             app_type.as_str()
         ))
     );
-    if enabled && queue_empty {
-        println!(
-            "{}",
-            warning(
-                "Add providers to the failover queue before routing traffic through the proxy."
-            )
-        );
-    }
     print_hot_update_note();
     Ok(())
+}
+
+fn confirm_enable_proxy_for_failover(app_type: &str) -> Result<bool, AppError> {
+    inquire::Confirm::new(&format!(
+        "Automatic failover requires proxy routing for {app_type}. Enable proxy routing for this app now?"
+    ))
+    .with_default(false)
+    .prompt()
+    .map_err(|error| match error {
+        inquire::error::InquireError::OperationCanceled
+        | inquire::error::InquireError::OperationInterrupted => {
+            AppError::Message("__cc_switch_failover_cancelled__".to_string())
+        }
+        other => AppError::Message(format!("Prompt failed: {other}")),
+    })
+    .or_else(|error| match error {
+        AppError::Message(message) if message == "__cc_switch_failover_cancelled__" => Ok(false),
+        other => Err(other),
+    })
 }
 
 fn list_queue(app_type: AppType) -> Result<(), AppError> {
@@ -354,13 +393,8 @@ fn queue_has_active_failover_guard(
 
 fn active_failover_routes_app(state: &AppState, app_type: &AppType) -> Result<bool, AppError> {
     let runtime = create_runtime()?;
-    let status = runtime.block_on(state.proxy_service.get_status());
-    if !status.running {
-        return Ok(false);
-    }
-
     let config = runtime.block_on(state.db.get_proxy_config_for_app(app_type.as_str()))?;
-    Ok(config.enabled && config.auto_failover_enabled)
+    Ok(config.auto_failover_enabled)
 }
 
 fn active_proxy_failover_queue_guard_error() -> AppError {

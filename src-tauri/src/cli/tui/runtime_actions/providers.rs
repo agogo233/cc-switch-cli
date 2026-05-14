@@ -25,13 +25,7 @@ fn provider_is_last_active_failover_queue_entry(
     ctx: &RuntimeActionContext<'_>,
     provider_id: &str,
 ) -> Result<bool, AppError> {
-    if !crate::cli::tui::app::supports_failover_controls(&ctx.app.app_type)
-        || !ctx
-            .data
-            .proxy
-            .routes_current_app_through_proxy(&ctx.app.app_type)
-            .unwrap_or(false)
-    {
+    if !crate::cli::tui::app::supports_failover_controls(&ctx.app.app_type) {
         return Ok(false);
     }
 
@@ -866,6 +860,10 @@ mod tests {
         )
     }
 
+    fn reload_fixture_data(fixture: &mut RuntimeActionFixture) {
+        fixture.data = UiData::load(&fixture.app.app_type).expect("reload ui data");
+    }
+
     struct RuntimeActionFixture {
         terminal: TuiTerminal,
         app: App,
@@ -926,11 +924,13 @@ mod tests {
             .expect("create runtime");
         runtime.block_on(async {
             let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state.db.update_proxy_config_for_app(config).await.unwrap();
         });
 
         let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        reload_fixture_data(&mut fixture);
         fixture.data.proxy.running = true;
         fixture.data.proxy.claude_takeover = true;
         fixture.data.proxy.auto_failover_enabled = true;
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn stopped_proxy_failover_allows_removing_last_queued_provider() {
+    fn persisted_failover_rejects_removing_last_queued_provider_even_when_proxy_stopped() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
 
@@ -963,21 +963,24 @@ mod tests {
             .expect("create runtime");
         runtime.block_on(async {
             let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state.db.update_proxy_config_for_app(config).await.unwrap();
         });
 
         let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        reload_fixture_data(&mut fixture);
         fixture.data.proxy.running = false;
         fixture.data.proxy.claude_takeover = true;
         fixture.data.proxy.auto_failover_enabled = true;
         set_failover_queue(&mut fixture.ctx(), "p1".to_string(), false)
-            .expect("remove provider from stopped queue");
+            .expect("attempt queue removal");
 
-        assert!(!state
+        assert!(state
             .db
             .is_in_failover_queue("claude", "p1")
             .expect("read queue membership"));
+        assert!(matches!(fixture.app.toast, Some(toast) if toast.kind == ToastKind::Warning));
     }
 
     #[test]
@@ -1005,11 +1008,13 @@ mod tests {
             .expect("create runtime");
         runtime.block_on(async {
             let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state.db.update_proxy_config_for_app(config).await.unwrap();
         });
 
         let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        reload_fixture_data(&mut fixture);
         fixture.data.proxy.running = true;
         fixture.data.proxy.claude_takeover = true;
         fixture.data.proxy.auto_failover_enabled = true;
@@ -1051,11 +1056,13 @@ mod tests {
             .expect("create runtime");
         runtime.block_on(async {
             let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state.db.update_proxy_config_for_app(config).await.unwrap();
         });
 
         let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        reload_fixture_data(&mut fixture);
         fixture.data.proxy.running = true;
         fixture.data.proxy.claude_takeover = true;
         fixture.data.proxy.auto_failover_enabled = true;
@@ -1086,11 +1093,13 @@ mod tests {
             .expect("create runtime");
         runtime.block_on(async {
             let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state.db.update_proxy_config_for_app(config).await.unwrap();
         });
 
         let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        reload_fixture_data(&mut fixture);
         fixture.data.proxy.running = true;
         fixture.data.proxy.claude_takeover = true;
         fixture.data.proxy.auto_failover_enabled = true;

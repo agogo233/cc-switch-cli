@@ -384,6 +384,22 @@ pub fn tui_skills_empty_hint() -> &'static str {
     }
 }
 
+pub fn tui_prompt_no_active_summary() -> &'static str {
+    if is_chinese() {
+        "未激活"
+    } else {
+        "no active prompt"
+    }
+}
+
+pub fn tui_prompts_summary(count: usize, active: &str) -> String {
+    if is_chinese() {
+        format!("{count} 个提示词 · 当前: {active}")
+    } else {
+        format!("{count} prompts · active: {active}")
+    }
+}
+
 pub fn tui_config_item_export() -> &'static str {
     if is_chinese() {
         "导出配置"
@@ -794,9 +810,9 @@ pub fn tui_prompt_title(name: &str) -> String {
 
 pub fn tui_prompt_rename_title() -> &'static str {
     if is_chinese() {
-        "重命名提示词"
+        "编辑提示词"
     } else {
-        "Rename Prompt"
+        "Edit Prompt"
     }
 }
 
@@ -821,6 +837,14 @@ pub fn tui_prompt_rename_prompt() -> &'static str {
         "输入新的提示词名称："
     } else {
         "Enter a new prompt name:"
+    }
+}
+
+pub fn tui_label_prompt_metadata() -> &'static str {
+    if is_chinese() {
+        "提示词元信息"
+    } else {
+        "Prompt Metadata"
     }
 }
 
@@ -853,6 +877,50 @@ pub fn tui_confirm_delete_prompt_message(name: &str, id: &str) -> String {
         format!("确定删除提示词 '{}' ({})？", name, id)
     } else {
         format!("Delete prompt '{}' ({})?", name, id)
+    }
+}
+
+pub fn tui_confirm_import_prompt_title() -> &'static str {
+    if is_chinese() {
+        "导入现有提示词"
+    } else {
+        "Import Existing Prompt"
+    }
+}
+
+pub fn tui_confirm_import_prompt_message(filename: &str) -> String {
+    if is_chinese() {
+        format!(
+            "当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？"
+        )
+    } else {
+        format!(
+            "The prompt list is empty and {filename} already exists. Open it as a new editable prompt?"
+        )
+    }
+}
+
+pub fn tui_prompt_default_name() -> &'static str {
+    if is_chinese() {
+        "默认提示词"
+    } else {
+        "Default Prompt"
+    }
+}
+
+pub fn tui_prompt_imported_description(filename: &str) -> String {
+    if is_chinese() {
+        format!("从现有 {filename} 预填")
+    } else {
+        format!("Prefilled from existing {filename}")
+    }
+}
+
+pub fn tui_toast_prompt_import_candidate_missing() -> &'static str {
+    if is_chinese() {
+        "没有可导入的现有提示词文件。"
+    } else {
+        "No existing prompt file is available to import."
     }
 }
 

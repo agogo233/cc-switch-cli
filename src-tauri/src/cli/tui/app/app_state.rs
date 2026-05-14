@@ -110,12 +110,26 @@ pub enum Action {
     PromptDeactivate {
         id: String,
     },
-    PromptRename {
-        id: String,
+    PromptUpdateMetadata {
+        old_id: String,
+        new_id: String,
         name: String,
+        description: Option<String>,
+    },
+    PromptSave {
+        old_id: Option<String>,
+        new_id: String,
+        name: String,
+        description: Option<String>,
+        content: String,
     },
     PromptDelete {
         id: String,
+    },
+    PromptFormOpenExternal,
+    PromptOpenImportCandidate {
+        filename: String,
+        content: String,
     },
 
     ConfigExport {
@@ -190,6 +204,9 @@ pub enum Action {
     SetProxyAutoFailover {
         app_type: AppType,
         enabled: bool,
+    },
+    EnableProxyAndAutoFailover {
+        app_type: AppType,
     },
     SetOpenClawConfigDir {
         path: Option<String>,
@@ -465,6 +482,7 @@ pub struct App {
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,
     pub quota_last_auto_tick: Option<u64>,
+    pub prompt_import_prompted_apps: HashSet<String>,
 
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,

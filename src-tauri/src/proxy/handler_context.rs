@@ -230,6 +230,7 @@ mod tests {
             .get_proxy_config_for_app("claude")
             .await
             .expect("read app proxy config");
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config)
             .await
@@ -269,6 +270,7 @@ mod tests {
             .get_proxy_config_for_app("claude")
             .await
             .expect("read app proxy config");
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config)
             .await
@@ -305,6 +307,7 @@ mod tests {
             .get_proxy_config_for_app("claude")
             .await
             .expect("read app proxy config");
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config)
             .await

@@ -1,8 +1,11 @@
 use crate::app_config::{AppType, McpApps};
 use serde_json::Value;
 
+use super::app::EditorState;
+
 mod codex_config;
 mod mcp;
+mod prompt;
 mod provider_json;
 mod provider_state;
 mod provider_state_loading;
@@ -116,6 +119,7 @@ pub enum FormFocus {
     Templates,
     Fields,
     JsonPreview,
+    Content,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +198,13 @@ pub enum McpAddField {
     AppCodex,
     AppGemini,
     AppOpenCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMetaField {
+    Id,
+    Name,
+    Description,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,9 +299,23 @@ pub struct McpAddFormState {
 }
 
 #[derive(Debug, Clone)]
+pub struct PromptMetaFormState {
+    pub mode: FormMode,
+    pub focus: FormFocus,
+    pub field_idx: usize,
+    pub editing: bool,
+    pub id: TextInput,
+    pub name: TextInput,
+    pub description: TextInput,
+    pub content: EditorState,
+    initial_snapshot: (String, String, String, String),
+}
+
+#[derive(Debug, Clone)]
 pub enum FormState {
     ProviderAdd(ProviderAddFormState),
     McpAdd(McpAddFormState),
+    PromptMeta(PromptMetaFormState),
 }
 
 impl FormState {
@@ -298,6 +323,7 @@ impl FormState {
         match self {
             FormState::ProviderAdd(form) => form.has_unsaved_changes(),
             FormState::McpAdd(form) => form.has_unsaved_changes(),
+            FormState::PromptMeta(form) => form.has_unsaved_changes(),
         }
     }
 }

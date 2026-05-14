@@ -1,6 +1,7 @@
 use super::*;
 
 mod mcp;
+mod prompt;
 mod provider;
 mod tab;
 
@@ -27,6 +28,10 @@ impl App {
         }
 
         if let Some(action) = self.handle_mcp_focus_key(key) {
+            return action;
+        }
+
+        if let Some(action) = self.handle_prompt_meta_focus_key(key) {
             return action;
         }
 
@@ -58,6 +63,7 @@ impl App {
         match self.form.as_ref() {
             Some(FormState::ProviderAdd(_)) => self.build_provider_form_save_action(data),
             Some(FormState::McpAdd(_)) => self.build_mcp_form_save_action(),
+            Some(FormState::PromptMeta(_)) => self.build_prompt_meta_form_save_action(),
             None => Action::None,
         }
     }

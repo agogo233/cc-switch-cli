@@ -1,4 +1,7 @@
 use crate::app_config::AppType;
+use crate::cli::failover_policy::{
+    ensure_auto_failover_queue_ready, ensure_auto_failover_ready, inspect_auto_failover_gate,
+};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
@@ -15,11 +18,17 @@ pub(super) fn set_proxy_enabled(
         .enable_all()
         .build()
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
-    runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
+    let update = runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
+    let cleared_failover = update.cleared_auto_failover;
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         if enabled {
             crate::t!("Local proxy enabled.", "本地代理已开启。")
+        } else if cleared_failover > 0 {
+            crate::t!(
+                "Local proxy disabled. Automatic failover has been cleared.",
+                "本地代理已关闭，自动故障转移已清除。"
+            )
         } else {
             crate::t!("Local proxy disabled.", "本地代理已关闭。")
         },
@@ -57,12 +66,28 @@ pub(super) fn set_proxy_auto_failover(
         .build()
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
 
-    let queue_empty = state.db.get_failover_queue(app_type.as_str())?.is_empty();
-    runtime.block_on(async {
-        let mut config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
-        config.auto_failover_enabled = enabled;
-        state.db.update_proxy_config_for_app(config).await
-    })?;
+    if enabled {
+        let gate = runtime.block_on(inspect_auto_failover_gate(&state, &app_type))?;
+        ensure_auto_failover_ready(&gate)?;
+    }
+
+    if enabled {
+        runtime
+            .block_on(
+                state
+                    .proxy_service
+                    .enable_auto_failover_for_app(app_type.as_str()),
+            )
+            .map_err(AppError::Message)?;
+    } else {
+        runtime
+            .block_on(
+                state
+                    .proxy_service
+                    .set_auto_failover_for_app(app_type.as_str(), false),
+            )
+            .map_err(AppError::Message)?;
+    }
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
@@ -73,15 +98,38 @@ pub(super) fn set_proxy_auto_failover(
         },
         super::super::app::ToastKind::Success,
     );
-    if enabled && queue_empty {
-        ctx.app.push_toast(
-            crate::t!(
-                "Add providers to the failover queue before routing traffic through the proxy.",
-                "请先将供应商加入故障转移队列，再让流量经过代理。"
-            ),
-            super::super::app::ToastKind::Warning,
-        );
-    }
+    Ok(())
+}
+
+pub(super) fn enable_proxy_and_auto_failover(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+    let gate = runtime.block_on(inspect_auto_failover_gate(&state, &app_type))?;
+    ensure_auto_failover_queue_ready(&gate)?;
+
+    runtime
+        .block_on(async {
+            state
+                .proxy_service
+                .enable_proxy_and_auto_failover_for_app(app_type.as_str())
+                .await
+        })
+        .map_err(AppError::Message)?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        crate::t!(
+            "Proxy routing and automatic failover enabled.",
+            "代理路由和自动故障转移已开启。"
+        ),
+        super::super::app::ToastKind::Success,
+    );
     Ok(())
 }
 

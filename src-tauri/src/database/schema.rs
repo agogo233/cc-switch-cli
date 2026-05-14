@@ -361,9 +361,7 @@ impl Database {
         if version > SCHEMA_VERSION {
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
-            return Err(AppError::Database(format!(
-                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
-            )));
+            return Err(Self::future_schema_error(version));
         }
 
         let result = (|| {
@@ -429,6 +427,7 @@ impl Database {
                 }
                 version = Self::get_user_version(conn)?;
             }
+            Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
         })();
 
@@ -761,7 +760,8 @@ impl Database {
                  circuit_error_rate_threshold, circuit_min_requests)
                  VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![app, old_config.0, old_config.1, old_config.3,
-                    if takeover { 1 } else { 0 }, if failover { 1 } else { 0 },
+                    if takeover { 1 } else { 0 },
+                    if takeover && failover && Self::has_failover_queue(conn, app)? { 1 } else { 0 },
                     retries, fb, idle, old_config.6, cb_f, cb_s, cb_t, cb_r, cb_m]
             ).map_err(|e| AppError::Database(format!("插入 {app} 配置失败: {e}")))?;
         }
@@ -777,6 +777,75 @@ impl Database {
         )?;
 
         log::info!("proxy_config 已迁移为三行结构");
+        Ok(())
+    }
+
+    fn has_failover_queue(conn: &Connection, app_type: &str) -> Result<bool, AppError> {
+        if !Self::table_exists(conn, "providers")?
+            || !Self::has_column(conn, "providers", "app_type")?
+            || !Self::has_column(conn, "providers", "in_failover_queue")?
+        {
+            return Ok(false);
+        }
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM providers
+                 WHERE app_type = ?1 AND in_failover_queue = 1",
+                [app_type],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(format!("读取故障转移队列失败: {e}")))?;
+
+        Ok(count > 0)
+    }
+
+    fn normalize_auto_failover_requires_takeover(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_config")?
+            || !Self::has_column(conn, "proxy_config", "app_type")?
+            || !Self::has_column(conn, "proxy_config", "enabled")?
+            || !Self::has_column(conn, "proxy_config", "auto_failover_enabled")?
+        {
+            return Ok(());
+        }
+
+        let changed = conn
+            .execute(
+                "UPDATE proxy_config
+                 SET auto_failover_enabled = 0
+                 WHERE enabled = 0 AND auto_failover_enabled != 0",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("清理无代理接管的故障转移状态失败: {e}")))?;
+
+        if changed > 0 {
+            log::warn!("已清理 {changed} 个未启用代理接管的故障转移状态");
+        }
+
+        if Self::table_exists(conn, "providers")?
+            && Self::has_column(conn, "providers", "app_type")?
+            && Self::has_column(conn, "providers", "in_failover_queue")?
+        {
+            let changed = conn
+                .execute(
+                    "UPDATE proxy_config
+                     SET auto_failover_enabled = 0
+                     WHERE auto_failover_enabled != 0
+                       AND NOT EXISTS (
+                           SELECT 1 FROM providers
+                           WHERE providers.app_type = proxy_config.app_type
+                             AND providers.in_failover_queue = 1
+                       )",
+                    [],
+                )
+                .map_err(|e| AppError::Database(format!("清理空队列故障转移状态失败: {e}")))?;
+
+            if changed > 0 {
+                log::warn!("已清理 {changed} 个空故障转移队列的自动故障转移状态");
+            }
+        }
+
         Ok(())
     }
 
@@ -1837,6 +1906,16 @@ impl Database {
     }
 
     // --- 辅助方法 ---
+
+    pub(crate) fn future_schema_error(version: i32) -> AppError {
+        AppError::Database(format!(
+            "当前数据库由较新版本的 CC Switch 创建，旧版本无法打开。\n\
+             数据库版本: {version}\n\
+             当前应用: v{}，最高支持数据库版本: {SCHEMA_VERSION}\n\
+             请运行 `cc-switch update` 升级到最新版；如果仍然失败，请从 GitHub Releases 安装最新版本。",
+            env!("CARGO_PKG_VERSION")
+        ))
+    }
 
     pub(crate) fn get_user_version(conn: &Connection) -> Result<i32, AppError> {
         conn.query_row("PRAGMA user_version;", [], |row| row.get(0))

@@ -28,7 +28,7 @@ pub(crate) use helpers::{app_display_name, queue_managed_proxy_action};
 #[cfg(test)]
 pub(crate) use helpers::{
     import_mcp_for_current_app_with, open_proxy_help_overlay_with,
-    run_external_editor_for_current_editor,
+    run_external_editor_for_current_editor, run_external_editor_for_prompt_form_content,
 };
 
 fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> super::route::Route {
@@ -144,11 +144,13 @@ pub(crate) fn handle_action(
         Action::None => Ok(()),
         Action::ReloadData => {
             *ctx.data = UiData::load(&ctx.app.app_type)?;
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
         Action::SetAppType(next) => {
             let next_data = UiData::load(&next)?;
             apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
         Action::LocalEnvRefresh => {
@@ -173,6 +175,7 @@ pub(crate) fn handle_action(
         }
         Action::SwitchRoute(route) => {
             ctx.app.route = route;
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
         Action::Quit => {
@@ -238,8 +241,24 @@ pub(crate) fn handle_action(
         Action::McpImport => mcp::import_current_app(&mut ctx),
         Action::PromptActivate { id } => prompts::activate(&mut ctx, id),
         Action::PromptDeactivate { id } => prompts::deactivate(&mut ctx, id),
-        Action::PromptRename { id, name } => prompts::rename(&mut ctx, id, name),
+        Action::PromptUpdateMetadata {
+            old_id,
+            new_id,
+            name,
+            description,
+        } => prompts::update_metadata(&mut ctx, old_id, new_id, name, description),
+        Action::PromptSave {
+            old_id,
+            new_id,
+            name,
+            description,
+            content,
+        } => prompts::save(&mut ctx, old_id, new_id, name, description, content),
         Action::PromptDelete { id } => prompts::delete(&mut ctx, id),
+        Action::PromptFormOpenExternal => prompts::open_form_external(&mut ctx),
+        Action::PromptOpenImportCandidate { filename, content } => {
+            prompts::open_import_candidate(&mut ctx, filename, content)
+        }
         Action::ConfigExport { path } => config::export(&mut ctx, path),
         Action::ConfigShowFull => config::show_full(&mut ctx),
         Action::ConfigImport { path } => config::import(&mut ctx, path),
@@ -306,6 +325,9 @@ pub(crate) fn handle_action(
         Action::SetProxyListenPort { port } => settings::set_proxy_listen_port(&mut ctx, port),
         Action::SetProxyAutoFailover { app_type, enabled } => {
             settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
+        }
+        Action::EnableProxyAndAutoFailover { app_type } => {
+            settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
         Action::SetProxyTakeover { app_type, enabled } => {

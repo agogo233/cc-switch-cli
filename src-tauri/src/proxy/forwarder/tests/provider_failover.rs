@@ -273,6 +273,7 @@ async fn failover_enabled_single_queued_negative_provider_does_not_use_non_queue
         .get_proxy_config_for_app("claude")
         .await
         .expect("load proxy config");
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config)
         .await
@@ -341,6 +342,7 @@ async fn failover_enabled_multiple_queued_providers_transfer_by_queue_priority()
         .get_proxy_config_for_app("claude")
         .await
         .expect("load proxy config");
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config)
         .await
@@ -407,6 +409,7 @@ async fn failover_enabled_all_queued_providers_unavailable_fails_after_attemptin
         .get_proxy_config_for_app("claude")
         .await
         .expect("load proxy config");
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config)
         .await

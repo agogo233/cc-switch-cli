@@ -1,7 +1,7 @@
 use clap::Subcommand;
 
 use crate::app_config::AppType;
-use crate::cli::ui::{highlight, info, success};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::{AppState, ProxyConfig};
 
@@ -77,7 +77,9 @@ fn show_proxy() -> Result<(), AppError> {
 fn set_proxy_enabled(enabled: bool) -> Result<(), AppError> {
     let state = get_state()?;
     let runtime = create_runtime()?;
-    let config = runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
+    let update = runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
+    let config = update.config;
+    let cleared_failover = update.cleared_auto_failover;
 
     println!(
         "{}",
@@ -91,6 +93,14 @@ fn set_proxy_enabled(enabled: bool) -> Result<(), AppError> {
             }
         ))
     );
+    if !enabled && cleared_failover > 0 {
+        println!(
+            "{}",
+            warning(&format!(
+                "Cleared automatic failover for {cleared_failover} app(s) because the proxy was disabled."
+            ))
+        );
+    }
 
     Ok(())
 }
@@ -471,7 +481,17 @@ mod tests {
     #[test]
     fn proxy_overview_lines_report_configured_auto_failover_state() {
         let db = Arc::new(Database::memory().expect("create database"));
-        db.set_proxy_flags_sync("codex", false, true)
+        let provider = crate::Provider::with_id(
+            "codex-p1".to_string(),
+            "Codex P1".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save codex failover provider");
+        db.add_to_failover_queue("codex", &provider.id)
+            .expect("queue codex failover provider");
+        db.set_proxy_flags_sync("codex", true, true)
             .expect("enable codex auto failover");
         let state = crate::AppState {
             db: db.clone(),

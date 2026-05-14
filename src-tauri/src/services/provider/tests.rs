@@ -4552,3 +4552,72 @@ fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() 
         Some(true)
     );
 }
+
+#[test]
+#[serial]
+fn delete_rejects_last_failover_queue_provider_while_active() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "current".to_string();
+        manager.providers.insert(
+            "current".to_string(),
+            with_common_enabled(Provider::with_id(
+                "current".to_string(),
+                "Current".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token",
+                        "ANTHROPIC_BASE_URL": "https://current.example"
+                    }
+                }),
+                None,
+            )),
+        );
+        manager.providers.insert(
+            "queued".to_string(),
+            with_common_enabled(Provider::with_id(
+                "queued".to_string(),
+                "Queued".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token",
+                        "ANTHROPIC_BASE_URL": "https://queued.example"
+                    }
+                }),
+                None,
+            )),
+        );
+    }
+    let state = state_from_config(config);
+    state
+        .db
+        .add_to_failover_queue("claude", "queued")
+        .expect("queue provider");
+    state
+        .db
+        .set_proxy_flags_sync("claude", true, true)
+        .expect("enable takeover and failover");
+
+    let err = ProviderService::delete(&state, AppType::Claude, "queued")
+        .expect_err("delete should be rejected while active failover needs the queue");
+
+    assert!(matches!(
+        err,
+        AppError::Localized {
+            key: "provider.delete.last_failover_queue_entry",
+            ..
+        }
+    ));
+    assert!(state
+        .db
+        .get_provider_by_id("queued", "claude")
+        .expect("read queued provider")
+        .is_some());
+}

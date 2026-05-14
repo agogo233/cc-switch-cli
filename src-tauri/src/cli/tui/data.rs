@@ -11,6 +11,7 @@ use crate::openclaw_config::{
     OpenClawAgentsDefaults, OpenClawEnvConfig, OpenClawHealthWarning, OpenClawToolsConfig,
 };
 use crate::prompt::Prompt;
+use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
 use crate::services::SubscriptionQuota;
@@ -170,9 +171,16 @@ pub struct PromptRow {
     pub prompt: Prompt,
 }
 
+#[derive(Debug, Clone)]
+pub struct PromptImportCandidate {
+    pub filename: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PromptsSnapshot {
     pub rows: Vec<PromptRow>,
+    pub import_candidate: Option<PromptImportCandidate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -722,14 +730,48 @@ fn load_prompts(state: &AppState, app_type: &AppType) -> Result<PromptsSnapshot,
         .map(|(id, prompt)| PromptRow { id, prompt })
         .collect::<Vec<_>>();
 
-    rows.sort_by(|a, b| {
-        b.prompt
-            .updated_at
-            .unwrap_or(0)
-            .cmp(&a.prompt.updated_at.unwrap_or(0))
-    });
+    sort_prompt_rows(&mut rows);
 
-    Ok(PromptsSnapshot { rows })
+    let import_candidate = if rows.is_empty() {
+        load_prompt_import_candidate(app_type)
+    } else {
+        None
+    };
+
+    Ok(PromptsSnapshot {
+        rows,
+        import_candidate,
+    })
+}
+
+fn sort_prompt_rows(rows: &mut [PromptRow]) {
+    rows.sort_by(|a, b| {
+        a.prompt
+            .created_at
+            .unwrap_or(0)
+            .cmp(&b.prompt.created_at.unwrap_or(0))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn load_prompt_import_candidate(app_type: &AppType) -> Option<PromptImportCandidate> {
+    let path = prompt_file_path(app_type).ok()?;
+    if !path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string());
+
+    Some(PromptImportCandidate { filename, content })
 }
 
 fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSnapshot, AppError> {
@@ -997,6 +1039,7 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::Prompt;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
     use serial_test::serial;
@@ -1091,6 +1134,42 @@ mod tests {
         }
     }
 
+    fn prompt_row(id: &str, created_at: Option<i64>, updated_at: Option<i64>) -> PromptRow {
+        PromptRow {
+            id: id.to_string(),
+            prompt: Prompt {
+                id: id.to_string(),
+                name: id.to_string(),
+                content: String::new(),
+                description: None,
+                enabled: false,
+                created_at,
+                updated_at,
+            },
+        }
+    }
+
+    #[test]
+    fn prompt_rows_sort_by_stable_created_time_not_updated_time() {
+        let mut rows = vec![
+            prompt_row("first", Some(1), Some(300)),
+            prompt_row("second", Some(2), Some(200)),
+            prompt_row("third", Some(3), Some(100)),
+        ];
+
+        sort_prompt_rows(&mut rows);
+        let initial_order = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(initial_order, vec!["first", "second", "third"]);
+
+        rows[0].prompt.updated_at = Some(1);
+        rows[1].prompt.updated_at = Some(999);
+        rows[2].prompt.updated_at = Some(500);
+
+        sort_prompt_rows(&mut rows);
+        let refreshed_order = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(refreshed_order, vec!["first", "second", "third"]);
+    }
+
     #[test]
     #[serial]
     fn load_proxy_snapshot_reads_app_auto_failover_state() {
@@ -1099,6 +1178,20 @@ mod tests {
         let _home = HomeGuard::set(temp.path());
 
         let state = load_state().expect("load state");
+        let provider = Provider::with_id(
+            "queued".to_string(),
+            "Queued".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://queued.example"}}),
+            None,
+        );
+        state
+            .db
+            .save_provider("claude", &provider)
+            .expect("save queued provider");
+        state
+            .db
+            .add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1109,6 +1202,7 @@ mod tests {
                 .get_proxy_config_for_app("claude")
                 .await
                 .expect("read claude app proxy config");
+            config.enabled = true;
             config.auto_failover_enabled = true;
             state
                 .db

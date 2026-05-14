@@ -4,11 +4,35 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
+use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
 use rusqlite::{params, Connection};
 use serde_json::json;
-use std::collections::HashMap;
+use std::{collections::HashMap, ffi::OsString, path::Path};
+
+struct ConfigDirEnvGuard {
+    original: Option<OsString>,
+}
+
+impl ConfigDirEnvGuard {
+    fn set(path: &Path) -> Self {
+        let original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", path);
+        }
+        Self { original }
+    }
+}
+
+impl Drop for ConfigDirEnvGuard {
+    fn drop(&mut self) {
+        match self.original.as_ref() {
+            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+        }
+    }
+}
 
 const LEGACY_SCHEMA_SQL: &str = r#"
     CREATE TABLE providers (
@@ -176,9 +200,37 @@ fn schema_migration_rejects_future_version() {
 
     let err =
         Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
+    let message = err.to_string();
+    assert!(message.contains("由较新版本的 CC Switch 创建"));
+    assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 1)));
+    assert!(message.contains(&format!("最高支持数据库版本: {SCHEMA_VERSION}")));
+    assert!(message.contains("cc-switch update"));
+}
+
+#[test]
+#[serial_test::serial]
+fn init_rejects_future_schema_before_creating_tables() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    drop(conn);
+
+    let err = match Database::init() {
+        Ok(_) => panic!("future schema should fail init"),
+        Err(err) => err,
+    };
     assert!(
-        err.to_string().contains("数据库版本过新"),
+        err.to_string().contains("由较新版本的 CC Switch 创建"),
         "unexpected error: {err}"
+    );
+
+    let conn = Connection::open(&db_path).expect("reopen db");
+    assert!(
+        !Database::table_exists(&conn, "providers").expect("check providers table"),
+        "future schema init should not create tables"
     );
 }
 
@@ -1037,6 +1089,85 @@ fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
 }
 
 #[test]
+fn schema_migration_masks_legacy_failover_without_takeover() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+
+    Database::set_user_version(&conn, 2).expect("set user_version");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO settings (key, value) VALUES
+            ('proxy_takeover_claude', 'false'),
+            ('auto_failover_enabled_claude', 'true'),
+            ('proxy_takeover_codex', 'true'),
+            ('auto_failover_enabled_codex', 'true');
+
+        CREATE TABLE proxy_config (
+            id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+            listen_port INTEGER NOT NULL DEFAULT 5000,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            request_timeout INTEGER NOT NULL DEFAULT 300,
+            enable_logging INTEGER NOT NULL DEFAULT 1,
+            target_app TEXT NOT NULL DEFAULT 'claude',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO proxy_config (id, enabled) VALUES (1, 1);
+        "#,
+    )
+    .expect("seed legacy proxy state");
+
+    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let claude: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled, auto_failover_enabled FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read claude proxy config");
+    assert_eq!(claude, (0, 0));
+
+    let codex: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled, auto_failover_enabled FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read codex proxy config");
+    assert_eq!(codex, (1, 0));
+}
+
+#[test]
+fn schema_migration_clears_current_failover_without_takeover() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+
+    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::set_user_version(&conn, SCHEMA_VERSION).expect("set current user_version");
+    conn.execute(
+        "UPDATE proxy_config
+         SET enabled = 0, auto_failover_enabled = 1
+         WHERE app_type = 'claude'",
+        [],
+    )
+    .expect("seed invalid current proxy config");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let auto_failover_enabled: i64 = conn
+        .query_row(
+            "SELECT auto_failover_enabled FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read auto_failover_enabled");
+    assert_eq!(auto_failover_enabled, 0);
+}
+
+#[test]
 fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute("PRAGMA foreign_keys = ON;", [])
@@ -1225,6 +1356,53 @@ fn dry_run_validates_schema_compatibility() {
     assert!(
         result.is_ok(),
         "Dry-run should succeed with provider data: {result:?}"
+    );
+}
+
+#[test]
+fn json_migration_imports_opencode_and_openclaw_prompts() {
+    let mut config = MultiAppConfig::default();
+    config.prompts.opencode.prompts.insert(
+        "oc-prompt".to_string(),
+        Prompt {
+            id: "oc-prompt".to_string(),
+            name: "OpenCode Prompt".to_string(),
+            content: "opencode content".to_string(),
+            description: None,
+            enabled: true,
+            created_at: Some(1),
+            updated_at: Some(2),
+        },
+    );
+    config.prompts.openclaw.prompts.insert(
+        "claw-prompt".to_string(),
+        Prompt {
+            id: "claw-prompt".to_string(),
+            name: "OpenClaw Prompt".to_string(),
+            content: "openclaw content".to_string(),
+            description: None,
+            enabled: false,
+            created_at: Some(3),
+            updated_at: Some(4),
+        },
+    );
+
+    let db = Database::memory().expect("create memory db");
+    db.migrate_from_json(&config).expect("migrate prompts");
+
+    let opencode = db.get_prompts("opencode").expect("load opencode prompts");
+    let openclaw = db.get_prompts("openclaw").expect("load openclaw prompts");
+
+    assert_eq!(
+        opencode.get("oc-prompt").expect("opencode prompt").content,
+        "opencode content"
+    );
+    assert_eq!(
+        openclaw
+            .get("claw-prompt")
+            .expect("openclaw prompt")
+            .content,
+        "openclaw content"
     );
 }
 

@@ -26,7 +26,7 @@ use crate::{
             ConfigSnapshot, McpSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
             ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData,
         },
-        form::{FormFocus, ProviderAddField, TextInput},
+        form::{FormFocus, FormState, PromptMetaFormState, ProviderAddField, TextInput},
         route::{NavItem, Route},
         theme::theme_for,
     },
@@ -705,6 +705,27 @@ fn header_renders_proxy_chip_left_of_provider() {
 }
 
 #[test]
+fn header_renders_failover_indicator_inside_proxy_chip() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.proxy.running = true;
+    data.proxy.claude_takeover = true;
+    data.proxy.auto_failover_enabled = true;
+
+    let buf = render(&app, &data);
+    let header = line_at(&buf, 1);
+    let proxy_label = texts::tui_header_proxy_status_with_failover(true, true);
+
+    assert!(header.contains(&proxy_label), "{header}");
+}
+
+#[test]
 #[serial(home_settings)]
 fn header_hides_gemini_by_default() {
     let _lock = lock_env();
@@ -1184,6 +1205,30 @@ fn providers_pane_has_border_and_selected_row_is_accent() {
 }
 
 #[test]
+fn providers_empty_state_matches_gui_copy_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &UiData::default()));
+    let compact = all.replace(' ', "");
+
+    assert!(compact.contains("还没有添加任何供应商"), "{all}");
+    assert!(
+        compact.contains(
+            "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在default供应商中"
+        ),
+        "{all}"
+    );
+    assert!(compact.contains("Enter导入当前配置"), "{all}");
+    assert!(compact.contains("a添加供应商"), "{all}");
+}
+
+#[test]
 fn focused_pane_border_keeps_v500_bold_style_in_ansi256_mode() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -1367,6 +1412,28 @@ fn editor_key_bar_shows_ctrl_o_external_editor_hint() {
 
     let has_ctrl_o = (0..buf.area.height).any(|y| line_at(&buf, y).contains("Ctrl+O"));
     assert!(has_ctrl_o, "editor key bar should show the Ctrl+O hint");
+}
+
+#[test]
+fn prompt_form_content_key_bar_shows_ctrl_o_external_editor_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Prompts;
+    app.focus = Focus::Content;
+    let mut form = PromptMetaFormState::new("prompt-one".to_string(), "Prompt One".to_string());
+    form.focus = FormFocus::Content;
+    app.form = Some(FormState::PromptMeta(form));
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+
+    let has_ctrl_o = (0..buf.area.height).any(|y| line_at(&buf, y).contains("Ctrl+O"));
+    assert!(
+        has_ctrl_o,
+        "prompt content editor key bar should show the Ctrl+O hint"
+    );
 }
 
 #[test]
@@ -1645,8 +1712,52 @@ fn home_footer_shows_proxy_on_shortcut_when_stopped() {
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(footer.contains("proxy on"), "{footer}");
+    assert!(!footer.contains("NAV"), "{footer}");
+    assert!(!footer.contains("ACT"), "{footer}");
     assert!(all.contains("___  ___"));
     assert!(!all.contains("Proxy Dashboard"));
+}
+
+#[test]
+fn home_footer_keeps_proxy_shortcut_visible_on_narrow_chinese_terminal() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _lang = use_test_language(Language::Chinese);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render_with_size(&app, &data, 80, 24);
+    let footer = line_at(&buf, buf.area.height - 1);
+    let compact_footer = footer.replace(' ', "");
+
+    assert!(footer.contains("P"), "{footer}");
+    assert!(compact_footer.contains("P代理开"), "{footer}");
+    assert!(!compact_footer.contains("导航"), "{footer}");
+    assert!(!compact_footer.contains("功能"), "{footer}");
+}
+
+#[test]
+fn home_footer_keeps_proxy_shortcut_visible_on_narrow_chinese_no_color_terminal() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let _lang = use_test_language(Language::Chinese);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render_with_size(&app, &data, 80, 24);
+    let footer = line_at(&buf, buf.area.height - 1);
+    let compact_footer = footer.replace(' ', "");
+
+    assert!(footer.contains("P"), "{footer}");
+    assert!(compact_footer.contains("P代理开"), "{footer}");
+    assert!(!compact_footer.contains("导航"), "{footer}");
+    assert!(!compact_footer.contains("功能"), "{footer}");
 }
 
 #[test]
@@ -2096,8 +2207,32 @@ fn skills_page_renders_sync_method_and_installed_rows() {
 
     assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
+    assert!(all.contains(AppType::Claude.as_str()));
+    assert!(all.contains(AppType::Codex.as_str()));
+    assert!(all.contains(AppType::Gemini.as_str()));
+    assert!(all.contains(AppType::OpenCode.as_str()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
+}
+
+#[test]
+fn skills_page_empty_state_keeps_mcp_style_table() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Skills;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::header_name()));
+    assert!(all.contains(AppType::Claude.as_str()));
+    assert!(all.contains(AppType::OpenCode.as_str()));
+    assert!(!all.contains(texts::tui_skills_empty_title()));
+    assert!(!all.contains(texts::tui_skills_empty_subtitle()));
 }
 
 #[test]
@@ -2447,6 +2582,41 @@ fn text_input_overlay_renders_inner_input_box() {
 }
 
 #[test]
+fn prompts_page_uses_space_toggle_and_add_key() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Prompts;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.prompts.rows.push(crate::cli::tui::data::PromptRow {
+        id: "work".to_string(),
+        prompt: crate::prompt::Prompt {
+            id: "work".to_string(),
+            name: "Work Prompt".to_string(),
+            content: "Use concise answers.".to_string(),
+            description: None,
+            enabled: true,
+            created_at: None,
+            updated_at: None,
+        },
+    });
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("Prompts"));
+    assert!(all.contains(AppType::Claude.as_str()));
+    assert!(all.contains("Space=toggle"));
+    assert!(all.contains("a=add"));
+    assert!(!all.contains("c=create"));
+    assert!(!all.contains("x=deactivate"));
+    assert!(all.contains(&texts::tui_prompts_summary(1, "Work Prompt")));
+}
+
+#[test]
 fn editor_unsaved_changes_confirm_overlay_shows_three_actions_and_is_compact() {
     let _lock = lock_env();
 
@@ -2673,6 +2843,8 @@ fn footer_shows_only_global_actions() {
         footer.contains("switch app") && footer.contains("/ filter"),
         "expected footer to show global actions; got: {footer:?}"
     );
+    assert!(!footer.contains("NAV"), "{footer}");
+    assert!(!footer.contains("ACT"), "{footer}");
     assert!(
         !footer.contains("clear") && !footer.contains("apply"),
         "expected footer to not show overlay/page actions; got: {footer:?}"
@@ -6681,7 +6853,7 @@ fn provider_form_model_field_enter_hint_uses_fetch_model() {
 }
 
 #[test]
-fn provider_detail_key_bar_shows_stream_check_hint() {
+fn provider_detail_key_bar_shows_test_hint() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6701,11 +6873,12 @@ fn provider_detail_key_bar_shows_stream_check_hint() {
         all.push('\n');
     }
 
-    assert!(all.contains("stream check"));
+    assert!(all.contains("t test"));
+    assert!(!all.contains("c stream check"));
 }
 
 #[test]
-fn openclaw_provider_list_key_bar_hides_stream_check_hint() {
+fn openclaw_provider_list_key_bar_shows_test_hint_only() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6723,12 +6896,54 @@ fn openclaw_provider_list_key_bar_hides_stream_check_hint() {
         all.push('\n');
     }
 
-    assert!(all.contains("speedtest"));
+    assert!(all.contains("t test"));
+    assert!(!all.contains("speedtest"));
     assert!(!all.contains("stream check"));
 }
 
 #[test]
-fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
+fn provider_test_menu_renders_supported_test_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::ProviderTestMenu {
+        provider_id: "p1".to_string(),
+        selected: 0,
+    };
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Test"), "{all}");
+    assert!(all.contains("speedtest"), "{all}");
+    assert!(all.contains("stream check"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_test_menu_hides_stream_check() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::ProviderTestMenu {
+        provider_id: "p1".to_string(),
+        selected: 0,
+    };
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("speedtest"), "{all}");
+    assert!(!all.contains("stream check"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_list_key_bar_uses_common_provider_actions() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6746,13 +6961,14 @@ fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
         all.push('\n');
     }
 
-    assert!(all.contains("s add/remove"));
-    assert!(all.contains("x set default"));
-    assert!(!all.contains("s switch"));
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("t test"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+    assert!(!all.contains("s add/remove"), "{all}");
 }
 
 #[test]
-fn failover_provider_list_key_bar_hides_move_hint_and_gates_switch_hint() {
+fn failover_provider_list_key_bar_hides_move_hint_and_keeps_common_switch_hint() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6769,7 +6985,7 @@ fn failover_provider_list_key_bar_hides_move_hint_and_gates_switch_hint() {
     data.proxy.auto_failover_enabled = true;
     let enabled_text = all_text(&render_with_size(&app, &data, 180, 40));
     let enabled_keys = line_with(&enabled_text, "manage failover");
-    assert!(!enabled_keys.contains("Space"), "{enabled_keys}");
+    assert!(enabled_keys.contains("Space"), "{enabled_keys}");
     assert!(!enabled_keys.contains("</>"), "{enabled_keys}");
 }
 
@@ -6799,14 +7015,7 @@ fn failover_provider_list_marks_queue_entries_when_enabled() {
         .find(|line| line.contains("Queued Provider") && line.contains("https://example.com"))
         .expect("queued provider row rendered");
 
-    assert!(
-        !current_line.contains(texts::tui_marker_active()),
-        "{current_line}"
-    );
-    assert!(
-        queued_line.contains(texts::tui_marker_active()),
-        "{queued_line}"
-    );
+    assert!(!current_line.contains("#"), "{current_line}");
     assert!(queued_line.contains("#1"), "{queued_line}");
 }
 
@@ -6891,9 +7100,10 @@ fn opencode_provider_list_key_bar_uses_config_membership_actions() {
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("s add/remove"), "{all}");
-    assert!(all.contains("c stream check"), "{all}");
-    assert!(!all.contains("s switch"), "{all}");
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("t test"), "{all}");
+    assert!(!all.contains("s add/remove"), "{all}");
+    assert!(!all.contains("c stream check"), "{all}");
     assert!(!all.contains("x set default"), "{all}");
 }
 
@@ -6920,7 +7130,7 @@ fn opencode_provider_list_marks_rows_in_config_without_current_marker() {
 }
 
 #[test]
-fn openclaw_provider_detail_key_bar_hides_stream_check_hint() {
+fn openclaw_provider_detail_key_bar_shows_test_hint_only() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6940,12 +7150,13 @@ fn openclaw_provider_detail_key_bar_hides_stream_check_hint() {
         all.push('\n');
     }
 
-    assert!(all.contains("speedtest"));
+    assert!(all.contains("t test"));
+    assert!(!all.contains("speedtest"));
     assert!(!all.contains("stream check"));
 }
 
 #[test]
-fn openclaw_provider_detail_key_bar_uses_additive_mode_actions() {
+fn openclaw_provider_detail_key_bar_uses_common_provider_actions() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -6965,9 +7176,10 @@ fn openclaw_provider_detail_key_bar_uses_additive_mode_actions() {
         all.push('\n');
     }
 
-    assert!(all.contains("s add/remove"));
-    assert!(all.contains("x set default"));
-    assert!(!all.contains("s switch"));
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("t test"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+    assert!(!all.contains("s add/remove"), "{all}");
 }
 
 #[test]
@@ -6984,8 +7196,10 @@ fn opencode_provider_detail_key_bar_uses_config_membership_actions() {
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("s add/remove"), "{all}");
-    assert!(all.contains("c stream check"), "{all}");
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("t test"), "{all}");
+    assert!(!all.contains("s add/remove"), "{all}");
+    assert!(!all.contains("c stream check"), "{all}");
     assert!(
         all.contains(texts::tui_label_provider_config_status()),
         "{all}"
@@ -7307,8 +7521,10 @@ fn openclaw_provider_list_key_bar_localizes_actions_in_chinese() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
     let compact = all.replace(' ', "");
 
-    assert!(compact.contains("s添加/移除"), "{all}");
+    assert!(compact.contains("Space切换"), "{all}");
+    assert!(compact.contains("t测试"), "{all}");
     assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!compact.contains("s添加/移除"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
 }
@@ -7328,8 +7544,10 @@ fn openclaw_provider_detail_key_bar_localizes_actions_in_chinese() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
     let compact = all.replace(' ', "");
 
-    assert!(compact.contains("s添加/移除"), "{all}");
+    assert!(compact.contains("Space切换"), "{all}");
+    assert!(compact.contains("t测试"), "{all}");
     assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!compact.contains("s添加/移除"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
 }
@@ -7355,7 +7573,7 @@ fn provider_detail_keys_line_does_not_include_q_back() {
         all.push('\n');
     }
 
-    assert!(all.contains("speedtest"));
+    assert!(all.contains("t test"));
     assert!(
         !all.contains("q=back"),
         "provider detail inline keys should not include q=back"

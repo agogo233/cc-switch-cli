@@ -8,19 +8,35 @@ pub enum EditorKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorSubmit {
-    PromptCreate { name: String },
-    PromptEdit { id: String },
+    PromptCreate {
+        id: String,
+        name: String,
+        description: Option<String>,
+    },
+    PromptEdit {
+        id: String,
+    },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,
     ProviderAdd,
-    ProviderEdit { id: String },
+    ProviderEdit {
+        id: String,
+    },
     McpAdd,
-    McpEdit { id: String },
-    ConfigCommonSnippet { app_type: AppType },
-    OpenClawWorkspaceFile { filename: String },
-    OpenClawDailyMemoryFile { filename: String },
+    McpEdit {
+        id: String,
+    },
+    ConfigCommonSnippet {
+        app_type: AppType,
+    },
+    OpenClawWorkspaceFile {
+        filename: String,
+    },
+    OpenClawDailyMemoryFile {
+        filename: String,
+    },
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,
@@ -258,6 +274,59 @@ impl EditorState {
             TextEditCommand::DeleteBackward => self.backspace(),
             TextEditCommand::DeleteForward => self.delete(),
             TextEditCommand::DeleteWordBackward => self.delete_word_backward(),
+        }
+    }
+
+    pub(crate) fn apply_editor_key(&mut self, key: KeyEvent, viewport: Size) -> bool {
+        if let Some(command) = TextEditCommand::from_key(key) {
+            self.apply_text_command(command);
+            self.ensure_cursor_visible(viewport);
+            return true;
+        }
+
+        let jump_rows = viewport.height as usize;
+        match key.code {
+            KeyCode::Up => {
+                self.cursor_row = self.cursor_row.saturating_sub(1);
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Down => {
+                if !self.lines.is_empty() {
+                    self.cursor_row = (self.cursor_row + 1).min(self.lines.len() - 1);
+                }
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(jump_rows);
+                self.cursor_row = self.cursor_row.saturating_sub(jump_rows);
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::PageDown => {
+                if !self.lines.is_empty() {
+                    self.scroll = (self.scroll + jump_rows).min(self.lines.len() - 1);
+                    self.cursor_row = (self.cursor_row + jump_rows).min(self.lines.len() - 1);
+                    self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                }
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Enter => {
+                self.newline();
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Tab => {
+                self.insert_str("  ");
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            _ => false,
         }
     }
 

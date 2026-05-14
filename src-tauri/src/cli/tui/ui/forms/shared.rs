@@ -63,6 +63,7 @@ pub(crate) fn add_form_key_items(
                 ("↑↓", texts::tui_key_scroll()),
             ]);
         }
+        FormFocus::Content => {}
     }
 
     keys
@@ -223,5 +224,6 @@ pub(crate) fn render_add_form(
             render_provider_add_form(frame, app, data, provider, area, theme)
         }
         FormState::McpAdd(mcp) => render_mcp_add_form(frame, app, mcp, area, theme),
+        FormState::PromptMeta(prompt) => render_prompt_meta_form(frame, app, prompt, area, theme),
     }
 }

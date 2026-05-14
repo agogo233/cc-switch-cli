@@ -246,7 +246,7 @@ async fn proxy_service_updates_global_enabled_switch() {
         .await
         .expect("enable proxy globally");
     assert!(
-        updated.proxy_enabled,
+        updated.config.proxy_enabled,
         "service should return updated switch state"
     );
 

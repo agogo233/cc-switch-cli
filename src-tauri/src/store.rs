@@ -292,24 +292,6 @@ fn persist_multi_app_config_to_db_preserving_current_providers(
             }
         }
 
-        // Prompts
-        let desired_prompts = match &app {
-            AppType::Claude => &config.prompts.claude.prompts,
-            AppType::Codex => &config.prompts.codex.prompts,
-            AppType::Gemini => &config.prompts.gemini.prompts,
-            AppType::OpenCode => &config.prompts.opencode.prompts,
-            AppType::OpenClaw => &config.prompts.openclaw.prompts,
-        };
-        let existing_prompts = db.get_prompts(app_key)?;
-        for prompt in desired_prompts.values() {
-            db.save_prompt(app_key, prompt)?;
-        }
-        for (id, _) in existing_prompts.iter() {
-            if !desired_prompts.contains_key(id) {
-                db.delete_prompt(app_key, id)?;
-            }
-        }
-
         // Common config snippets
         db.set_config_snippet(app_key, config.common_config_snippets.get(&app).cloned())?;
     }

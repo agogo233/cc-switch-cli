@@ -39,6 +39,14 @@ use common::strip_codex_common_config_from_full_text;
 /// 供应商相关业务逻辑
 pub struct ProviderService;
 
+fn active_failover_last_provider_error() -> AppError {
+    AppError::localized(
+        "provider.delete.last_failover_queue_entry",
+        "代理故障转移激活时，故障转移队列中必须至少保留一个供应商",
+        "At least one provider must remain in the failover queue while proxy failover is active",
+    )
+}
+
 fn current_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2222,6 +2230,21 @@ impl ProviderService {
                 state.db.get_current_provider(app_type.as_str())?,
             )
         };
+        if app_type.supports_failover() {
+            let app_key = app_type.as_str();
+            let (takeover_enabled, auto_failover_enabled) = state.db.get_proxy_flags_sync(app_key);
+            if takeover_enabled && auto_failover_enabled {
+                let queue = state.db.get_failover_queue(app_key)?;
+                if queue.len() == 1
+                    && queue
+                        .first()
+                        .is_some_and(|item| item.provider_id == provider_id)
+                {
+                    return Err(active_failover_last_provider_error());
+                }
+            }
+        }
+
         let provider_snapshot = {
             let config = state.config.read().map_err(AppError::from)?;
             let manager = config

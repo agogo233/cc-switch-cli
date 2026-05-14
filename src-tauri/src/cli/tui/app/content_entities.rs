@@ -1,18 +1,7 @@
 use super::*;
 
 impl App {
-    fn provider_switch_action(&mut self, row: &super::data::ProviderRow, data: &UiData) -> Action {
-        if supports_failover_controls(&self.app_type) && data.proxy.auto_failover_enabled {
-            self.push_toast(
-                crate::t!(
-                    "Manage provider priority in the failover queue while automatic failover is enabled.",
-                    "自动故障转移开启时，请在故障转移队列中管理供应商优先级。"
-                ),
-                ToastKind::Info,
-            );
-            return Action::None;
-        }
-
+    fn provider_switch_action(&mut self, row: &super::data::ProviderRow) -> Action {
         if matches!(self.app_type, AppType::OpenCode) {
             if row.is_in_config {
                 return Action::ProviderRemoveFromConfig { id: row.id.clone() };
@@ -41,6 +30,36 @@ impl App {
         Action::ProviderSwitch { id: row.id.clone() }
     }
 
+    pub(crate) fn provider_speedtest_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        let Some(url) = row.api_url.clone() else {
+            self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
+            return Action::None;
+        };
+        self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
+        Action::ProviderSpeedtest { url }
+    }
+
+    pub(crate) fn provider_stream_check_action(
+        &mut self,
+        row: &super::data::ProviderRow,
+    ) -> Action {
+        if !supports_provider_stream_check(&self.app_type) {
+            return Action::None;
+        }
+        self.overlay = Overlay::StreamCheckRunning {
+            provider_id: row.id.clone(),
+            provider_name: super::data::provider_display_name(&self.app_type, row),
+        };
+        Action::ProviderStreamCheck { id: row.id.clone() }
+    }
+
+    pub(crate) fn open_provider_test_menu(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::ProviderTestMenu {
+            provider_id: row.id.clone(),
+            selected: 0,
+        };
+    }
+
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
@@ -55,6 +74,9 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
+                if data.providers.rows.is_empty() {
+                    return Action::ProviderImportLiveConfig;
+                }
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
@@ -63,13 +85,6 @@ impl App {
             KeyCode::Char('a') => {
                 self.open_provider_add_form();
                 Action::None
-            }
-            KeyCode::Char('i') => {
-                if data.providers.rows.is_empty() {
-                    Action::ProviderImportLiveConfig
-                } else {
-                    Action::None
-                }
             }
             KeyCode::Char('e') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -82,7 +97,7 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                self.provider_switch_action(row, data)
+                self.provider_switch_action(row)
             }
             KeyCode::Char('x') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -135,12 +150,8 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                let Some(url) = row.api_url.clone() else {
-                    self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
-                    return Action::None;
-                };
-                self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
-                Action::ProviderSpeedtest { url }
+                self.open_provider_test_menu(row);
+                Action::None
             }
             KeyCode::Char('o') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -150,19 +161,6 @@ impl App {
                     return Action::None;
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
-            }
-            KeyCode::Char('c') => {
-                if !supports_provider_stream_check(&self.app_type) {
-                    return Action::None;
-                }
-                let Some(row) = visible.get(self.provider_idx) else {
-                    return Action::None;
-                };
-                self.overlay = Overlay::StreamCheckRunning {
-                    provider_id: row.id.clone(),
-                    provider_name: super::data::provider_display_name(&self.app_type, row),
-                };
-                Action::ProviderStreamCheck { id: row.id.clone() }
             }
             KeyCode::Char('f') => {
                 if !supports_failover_controls(&self.app_type) {
@@ -210,7 +208,7 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => Action::None,
-            KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row, data),
+            KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row),
             KeyCode::Char('x') => {
                 if !matches!(self.app_type, AppType::OpenClaw) {
                     return Action::None;
@@ -235,28 +233,14 @@ impl App {
                 }
             }
             KeyCode::Char('t') => {
-                let Some(url) = row.api_url.clone() else {
-                    self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
-                    return Action::None;
-                };
-                self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
-                Action::ProviderSpeedtest { url }
+                self.open_provider_test_menu(row);
+                Action::None
             }
             KeyCode::Char('o') => {
                 if !supports_temporary_provider_launch(&self.app_type) {
                     return Action::None;
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
-            }
-            KeyCode::Char('c') => {
-                if !supports_provider_stream_check(&self.app_type) {
-                    return Action::None;
-                }
-                self.overlay = Overlay::StreamCheckRunning {
-                    provider_id: row.id.clone(),
-                    provider_name: super::data::provider_display_name(&self.app_type, row),
-                };
-                Action::ProviderStreamCheck { id: row.id.clone() }
             }
             KeyCode::Char('f') => {
                 if !supports_failover_controls(&self.app_type) {
@@ -346,11 +330,10 @@ impl App {
     pub(crate) fn on_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_prompts(&self.filter, data);
         match key.code {
-            KeyCode::Char('c') => {
-                self.open_prompt_create_name_input();
+            KeyCode::Char('a') => {
+                self.open_prompt_create_form(data);
                 Action::None
             }
-            KeyCode::Char('r') => Action::ReloadData,
             KeyCode::Up => {
                 self.prompt_idx = self.prompt_idx.saturating_sub(1);
                 Action::None
@@ -373,23 +356,14 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('a') => {
+            KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
-                Action::PromptActivate { id: row.id.clone() }
-            }
-            KeyCode::Char('x') => {
-                let active = data.prompts.rows.iter().find(|p| p.prompt.enabled);
-                let Some(active) = active else {
-                    self.push_toast(
-                        texts::tui_toast_prompt_no_active_to_deactivate(),
-                        ToastKind::Info,
-                    );
-                    return Action::None;
-                };
-                Action::PromptDeactivate {
-                    id: active.id.clone(),
+                if row.prompt.enabled {
+                    Action::PromptDeactivate { id: row.id.clone() }
+                } else {
+                    Action::PromptActivate { id: row.id.clone() }
                 }
             }
             KeyCode::Char('d') => {
@@ -414,25 +388,12 @@ impl App {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
-                self.open_editor(
-                    texts::tui_prompt_title(&row.prompt.name),
-                    EditorKind::Plain,
-                    row.prompt.content.clone(),
-                    EditorSubmit::PromptEdit { id: row.id.clone() },
-                );
-                Action::None
-            }
-            KeyCode::Char('n') => {
-                let Some(row) = visible.get(self.prompt_idx) else {
-                    return Action::None;
-                };
-                self.overlay = Overlay::TextInput(TextInputState {
-                    title: texts::tui_prompt_rename_title().to_string(),
-                    prompt: texts::tui_prompt_rename_prompt().to_string(),
-                    input: TextInput::new(row.prompt.name.clone()),
-                    submit: TextSubmit::PromptRename { id: row.id.clone() },
-                    secret: false,
-                });
+                self.filter.active = false;
+                self.editor = None;
+                self.overlay = Overlay::None;
+                self.form = Some(FormState::PromptMeta(PromptMetaFormState::from_prompt(
+                    &row.prompt,
+                )));
                 Action::None
             }
             _ => Action::None,

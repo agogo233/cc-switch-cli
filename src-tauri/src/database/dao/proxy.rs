@@ -2,6 +2,7 @@
 //!
 //! 处理代理配置、Provider健康状态和使用统计的数据库操作
 
+use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::proxy::types::*;
 use rust_decimal::Decimal;
@@ -10,6 +11,29 @@ use super::super::{lock_conn, Database};
 
 impl Database {
     // ==================== Global Proxy Config ====================
+
+    fn should_persist_auto_failover(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+        enabled: bool,
+        requested_auto_failover: bool,
+    ) -> Result<bool, AppError> {
+        if !enabled || !requested_auto_failover {
+            return Ok(false);
+        }
+
+        let queued_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM providers
+                 WHERE app_type = ?1 AND in_failover_queue = 1",
+                [app_type],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(queued_count > 0)
+    }
 
     /// 获取全局代理配置（统一字段）
     ///
@@ -73,7 +97,38 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        if !config.proxy_enabled {
+            for app_type in AppType::all().filter(|app| app.supports_failover()) {
+                conn.execute(
+                    "UPDATE proxy_config
+                     SET auto_failover_enabled = 0, updated_at = datetime('now')
+                     WHERE app_type = ?1 AND auto_failover_enabled != 0",
+                    [app_type.as_str()],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// 清除所有支持自动故障转移的应用开关
+    pub async fn clear_auto_failover_for_supported_apps(&self) -> Result<usize, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut cleared = 0usize;
+
+        for app_type in AppType::all().filter(|app| app.supports_failover()) {
+            cleared += conn
+                .execute(
+                    "UPDATE proxy_config
+                     SET auto_failover_enabled = 0, updated_at = datetime('now')
+                     WHERE app_type = ?1 AND auto_failover_enabled != 0",
+                    [app_type.as_str()],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        Ok(cleared)
     }
 
     /// 获取默认成本倍率
@@ -253,6 +308,12 @@ impl Database {
         config: AppProxyConfig,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let auto_failover_enabled = Self::should_persist_auto_failover(
+            &conn,
+            &config.app_type,
+            config.enabled,
+            config.auto_failover_enabled,
+        )?;
 
         conn.execute(
             "UPDATE proxy_config SET
@@ -272,7 +333,7 @@ impl Database {
             rusqlite::params![
                 config.app_type,
                 if config.enabled { 1 } else { 0 },
-                if config.auto_failover_enabled { 1 } else { 0 },
+                if auto_failover_enabled { 1 } else { 0 },
                 config.max_retries as i32,
                 config.streaming_first_byte_timeout as i32,
                 config.streaming_idle_timeout as i32,
@@ -833,6 +894,8 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| AppError::Database(format!("Mutex lock failed: {e}")))?;
+        let auto_failover_enabled =
+            Self::should_persist_auto_failover(&conn, app_type, enabled, auto_failover_enabled)?;
 
         conn.execute(
             "UPDATE proxy_config SET enabled = ?2, auto_failover_enabled = ?3, updated_at = datetime('now') WHERE app_type = ?1",
@@ -852,6 +915,20 @@ impl Database {
 mod tests {
     use crate::database::Database;
     use crate::error::AppError;
+    use crate::provider::Provider;
+    use serde_json::json;
+
+    fn save_queue_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
+        let provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"env": {"BASE_URL": "https://example.com"}}),
+            None,
+        );
+        db.save_provider(app_type, &provider)?;
+        db.add_to_failover_queue(app_type, id)?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_default_cost_multiplier_round_trip() -> Result<(), AppError> {
@@ -911,6 +988,107 @@ mod tests {
             }
         ));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clears_supported_failover_rows() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        save_queue_provider(&db, "claude", "claude-p1")?;
+        save_queue_provider(&db, "codex", "codex-p1")?;
+        save_queue_provider(&db, "gemini", "gemini-p1")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+        db.set_proxy_flags_sync("codex", true, true)?;
+        db.set_proxy_flags_sync("gemini", true, true)?;
+
+        let cleared = db.clear_auto_failover_for_supported_apps().await?;
+
+        assert_eq!(cleared, 3);
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("gemini"), (true, false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabling_global_proxy_config_clears_supported_failover_rows() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        save_queue_provider(&db, "claude", "claude-p1")?;
+        save_queue_provider(&db, "codex", "codex-p1")?;
+        save_queue_provider(&db, "gemini", "gemini-p1")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+        db.set_proxy_flags_sync("codex", true, true)?;
+        db.set_proxy_flags_sync("gemini", true, true)?;
+
+        let mut config = db.get_global_proxy_config().await?;
+        config.proxy_enabled = false;
+        db.update_global_proxy_config(config).await?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("gemini"), (true, false));
+        Ok(())
+    }
+
+    #[test]
+    fn set_proxy_flags_sync_masks_failover_without_takeover() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        db.set_proxy_flags_sync("claude", false, true)?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+        Ok(())
+    }
+
+    #[test]
+    fn set_proxy_flags_sync_masks_failover_with_empty_queue() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        db.set_proxy_flags_sync("claude", true, true)?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_proxy_config_for_app_masks_failover_without_takeover() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut config = db.get_proxy_config_for_app("claude").await?;
+        config.enabled = false;
+        config.auto_failover_enabled = true;
+
+        db.update_proxy_config_for_app(config).await?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_proxy_config_for_app_masks_failover_with_empty_queue() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut config = db.get_proxy_config_for_app("claude").await?;
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+
+        db.update_proxy_config_for_app(config).await?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_proxy_config_for_app_preserves_failover_with_non_empty_queue(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        save_queue_provider(&db, "claude", "claude-p1")?;
+        let mut config = db.get_proxy_config_for_app("claude").await?;
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+
+        db.update_proxy_config_for_app(config).await?;
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, true));
         Ok(())
     }
 }

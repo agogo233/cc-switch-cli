@@ -77,7 +77,11 @@ pub(super) fn submit(
     content: String,
 ) -> Result<(), AppError> {
     match submit {
-        EditorSubmit::PromptCreate { name } => submit_prompt_create(ctx, name, content),
+        EditorSubmit::PromptCreate {
+            id,
+            name,
+            description,
+        } => submit_prompt_create(ctx, id, name, description, content),
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
         EditorSubmit::ProviderFormApplyOpenClawModels => {
@@ -111,20 +115,29 @@ pub(super) fn submit(
 
 fn submit_prompt_create(
     ctx: &mut RuntimeActionContext<'_>,
+    id: String,
     name: String,
+    description: Option<String>,
     content: String,
 ) -> Result<(), AppError> {
     let state = load_state()?;
-    let prompt =
-        match PromptService::create_prompt(&state, ctx.app.app_type.clone(), &name, &content) {
-            Ok(prompt) => prompt,
-            Err(err) => {
-                ctx.app.push_toast(err.to_string(), ToastKind::Error);
-                return Ok(());
-            }
-        };
+    let prompt = match PromptService::create_prompt_with_id(
+        &state,
+        ctx.app.app_type.clone(),
+        Some(&id),
+        &name,
+        description.as_deref(),
+        &content,
+    ) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Error);
+            return Ok(());
+        }
+    };
 
     ctx.app.editor = None;
+    ctx.app.form = None;
     ctx.app
         .push_toast(texts::tui_toast_prompt_created(), ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
@@ -959,8 +972,14 @@ mod tests {
             model_fetch_req_tx: None,
         };
 
-        submit_prompt_create(&mut ctx, "Prompt One".to_string(), "hello".to_string())
-            .expect("create prompt succeeds");
+        submit_prompt_create(
+            &mut ctx,
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+            Some("Demo description".to_string()),
+            "hello".to_string(),
+        )
+        .expect("create prompt succeeds");
 
         let refreshed = UiData::load(&AppType::Claude).expect("reload ui data");
         assert!(
@@ -968,7 +987,9 @@ mod tests {
                 .prompts
                 .rows
                 .iter()
-                .any(|row| row.id == "prompt-one" && row.prompt.name == "Prompt One"),
+                .any(|row| row.id == "prompt-one"
+                    && row.prompt.name == "Prompt One"
+                    && row.prompt.description.as_deref() == Some("Demo description")),
             "runtime create should persist the prompt"
         );
         assert!(matches!(

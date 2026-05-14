@@ -93,6 +93,12 @@ pub(super) fn render_main(
         .last_error
         .clone()
         .unwrap_or_else(|| texts::none().to_string());
+    let auto_failover_queue_len = data
+        .providers
+        .rows
+        .iter()
+        .filter(|row| row.provider.in_failover_queue)
+        .count();
     let current_quota_line = data
         .providers
         .rows
@@ -295,6 +301,8 @@ pub(super) fn render_main(
             &proxy_last_error_text,
             data.proxy.last_error.is_some(),
             &format!("{}:{}", data.proxy.listen_address, data.proxy.listen_port),
+            data.proxy.auto_failover_enabled,
+            auto_failover_queue_len,
             data.proxy.estimated_input_tokens_total,
             data.proxy.estimated_output_tokens_total,
         );
@@ -324,6 +332,8 @@ fn render_proxy_activity_dashboard(
     proxy_last_error_text: &str,
     has_proxy_error: bool,
     listen_text: &str,
+    auto_failover_enabled: bool,
+    auto_failover_queue_len: usize,
     input_tokens_total: u64,
     output_tokens_total: u64,
 ) -> Rect {
@@ -387,6 +397,23 @@ fn render_proxy_activity_dashboard(
         uptime_text,
         Style::default().fg(theme.cyan),
     );
+    if auto_failover_enabled {
+        let auto_failover_value = if auto_failover_queue_len > 0 {
+            format!(
+                "{} · {} {}",
+                crate::t!("enabled", "开启"),
+                crate::t!("Queue", "队列"),
+                auto_failover_queue_len
+            )
+        } else {
+            crate::t!("enabled", "开启").to_string()
+        };
+        push_segment(
+            crate::t!("Automatic failover", "自动故障转移"),
+            auto_failover_value.as_str(),
+            Style::default().fg(theme.ok),
+        );
+    }
     if has_proxy_error {
         push_segment(
             texts::tui_label_last_proxy_error(),

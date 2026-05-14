@@ -377,6 +377,36 @@ impl Database {
     /// 删除供应商
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let (takeover_enabled, auto_failover_enabled, queued_count, deleting_queued): (
+            bool,
+            bool,
+            i64,
+            bool,
+        ) = conn
+            .query_row(
+                "SELECT
+                     COALESCE((SELECT enabled FROM proxy_config WHERE app_type = ?1), 0),
+                     COALESCE((SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1), 0),
+                     (SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1),
+                     COALESCE((SELECT in_failover_queue FROM providers WHERE app_type = ?1 AND id = ?2), 0)",
+                params![app_type, id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)? != 0,
+                        row.get::<_, i32>(1)? != 0,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i32>(3)? != 0,
+                    ))
+                },
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        if takeover_enabled && auto_failover_enabled && queued_count == 1 && deleting_queued {
+            return Err(AppError::InvalidInput(
+                "At least one provider must remain in the failover queue while proxy failover is active.".to_string(),
+            ));
+        }
+
         conn.execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
@@ -461,6 +491,38 @@ impl Database {
             params![provider_id, app_type, url],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+    use serde_json::json;
+
+    fn provider(id: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"env": {"BASE_URL": "https://example.com"}}),
+            None,
+        )
+    }
+
+    #[test]
+    fn delete_provider_rejects_last_failover_queue_entry_while_active() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("current"))?;
+        db.save_provider("claude", &provider("queued"))?;
+        db.set_current_provider("claude", "current")?;
+        db.add_to_failover_queue("claude", "queued")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+
+        let err = db.delete_provider("claude", "queued").unwrap_err();
+
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(db.get_provider_by_id("queued", "claude")?.is_some());
         Ok(())
     }
 }

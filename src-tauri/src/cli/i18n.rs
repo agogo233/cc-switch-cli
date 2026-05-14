@@ -437,9 +437,9 @@ pub mod texts {
 
     pub fn tui_footer_global() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  s 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  ←→ focus menu/content  ↑↓ move  Enter details  s switch  / filter  Esc back  ? help"
+            "[ ] switch app  ←→ focus menu/content  ↑↓ move  Enter details  Space switch  / filter  Esc back  ? help"
         }
     }
 
@@ -469,9 +469,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 详情  s 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter details  s switch  / filter  Esc back  ? help"
+            "[ ] switch app  Enter details  Space switch  / filter  Esc back  ? help"
         }
     }
 
@@ -485,17 +485,17 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_providers() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 详情  s 切换  a 添加  e 编辑  d 删除  t 测速  c 健康检查  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Enter 详情  Space 切换  a 新增  e 编辑  d 删除  t 测试  r 刷新  o 临时启动  f 管理故障转移  x 设为默认  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter details  s switch  a add  e edit  d delete  t speedtest  c stream check  / filter  Esc back  ? help"
+            "[ ] switch app  Enter details  Space switch  a add  e edit  d delete  t test  r refresh  o launch temp  f manage failover  x set default  / filter  Esc back  ? help"
         }
     }
 
     pub fn tui_footer_action_keys_provider_detail() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  s 切换  e 编辑  t 测速  c 健康检查  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Space 切换  e 编辑  t 测试  r 刷新  o 临时启动  f 管理故障转移  x 设为默认  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  s switch  e edit  t speedtest  c stream check  / filter  Esc back  ? help"
+            "[ ] switch app  Space switch  e edit  t test  r refresh  o launch temp  f manage failover  x set default  / filter  Esc back  ? help"
         }
     }
 
@@ -509,9 +509,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_prompts() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  c 新建  r 刷新  Enter 查看  a 激活  x 取消激活  n 重命名  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Space 启用/禁用  a 新增  Enter 查看  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  c create  r refresh  Enter view  a activate  x deactivate  n rename  e edit  d delete  / filter  Esc back  ? help"
+            "[ ] switch app  Space toggle  a add  Enter view  e edit  d delete  / filter  Esc back  ? help"
         }
     }
 
@@ -565,9 +565,9 @@ pub mod texts {
 
     pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：c 新建，r 刷新，Enter 查看，a 激活，x 取消激活(当前)，n 重命名，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，Space 切换，a 新增，e 编辑，d 删除，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- 供应商详情：Space 切换，e 编辑，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Space 启用/禁用，a 新增，Enter 查看，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: c create, r refresh, Enter view, a activate, x deactivate active, n rename, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, Space switch, a add, e edit, d delete, t test, r refresh, o launch temp, f manage failover, x set default\n- Provider Detail: Space switch, e edit, t test, r refresh, o launch temp, f manage failover, x set default\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Space toggle, a add, Enter view, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
@@ -695,6 +695,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_test_menu_title() -> &'static str {
+        if is_chinese() {
+            "测试"
+        } else {
+            "Test"
+        }
+    }
+
     pub fn tui_main_hint() -> &'static str {
         if is_chinese() {
             "使用左侧菜单（↑↓ + Enter）。←→ 在菜单与内容间切换焦点。"
@@ -709,6 +717,18 @@ pub mod texts {
         } else {
             format!("Proxy: {}", if enabled { "On" } else { "Off" })
         }
+    }
+
+    pub fn tui_header_proxy_status_with_failover(enabled: bool, failover_enabled: bool) -> String {
+        let mut text = tui_header_proxy_status(enabled);
+        if enabled && failover_enabled {
+            if is_chinese() {
+                text.push_str(" · 故障转移");
+            } else {
+                text.push_str(" · Failover");
+            }
+        }
+        text
     }
 
     pub fn tui_header_config_error() -> &'static str {
@@ -2130,6 +2150,38 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_empty_title() -> &'static str {
+        if is_chinese() {
+            "还没有添加任何供应商"
+        } else {
+            "No providers have been added yet"
+        }
+    }
+
+    pub fn tui_provider_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中"
+        } else {
+            "If you already have a config, use \"Import Current Config\". Everything will be safely stored in the default provider."
+        }
+    }
+
+    pub fn tui_key_import_current_config() -> &'static str {
+        if is_chinese() {
+            "导入当前配置"
+        } else {
+            "import current config"
+        }
+    }
+
+    pub fn tui_key_add_provider() -> &'static str {
+        if is_chinese() {
+            "添加供应商"
+        } else {
+            "add provider"
+        }
+    }
+
     pub fn tui_codex_official_no_api_key_tip() -> &'static str {
         if is_chinese() {
             "官方无需填写 API Key，直接保存即可。"
@@ -2156,9 +2208,9 @@ pub mod texts {
 
     pub fn tui_provider_detail_keys() -> &'static str {
         if is_chinese() {
-            "按键：s=切换  e=编辑  t=测速  c=健康检查"
+            "按键：Space=切换  e=编辑  t=测试"
         } else {
-            "Keys: s=switch  e=edit  t=speedtest  c=stream check"
+            "Keys: Space=switch  e=edit  t=test"
         }
     }
 
@@ -2199,6 +2251,14 @@ pub mod texts {
             "测速"
         } else {
             "speedtest"
+        }
+    }
+
+    pub fn tui_key_test() -> &'static str {
+        if is_chinese() {
+            "测试"
+        } else {
+            "test"
         }
     }
 
@@ -2279,6 +2339,14 @@ pub mod texts {
             "导入"
         } else {
             "import"
+        }
+    }
+
+    pub fn tui_key_failover() -> &'static str {
+        if is_chinese() {
+            "管理故障转移"
+        } else {
+            "manage failover"
         }
     }
 
@@ -2634,11 +2702,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_prompt_no_active_summary() -> &'static str {
+        if is_chinese() {
+            "未激活"
+        } else {
+            "no active prompt"
+        }
+    }
+
+    pub fn tui_prompts_summary(count: usize, active: &str) -> String {
+        if is_chinese() {
+            format!("{count} 个提示词 · 当前: {active}")
+        } else {
+            format!("{count} prompts · active: {active}")
+        }
+    }
+
     pub fn tui_provider_list_keys() -> &'static str {
         if is_chinese() {
-            "按键：a=新增  e=编辑  Enter=详情  s=切换  /=搜索"
+            "按键：a=新增  e=编辑  Enter=详情  Space=切换  /=搜索"
         } else {
-            "Keys: a=add  e=edit  Enter=details  s=switch  /=filter"
+            "Keys: a=add  e=edit  Enter=details  Space=switch  /=filter"
         }
     }
 
@@ -4509,9 +4593,9 @@ pub mod texts {
 
     pub fn tui_prompt_rename_title() -> &'static str {
         if is_chinese() {
-            "重命名提示词"
+            "编辑提示词"
         } else {
-            "Rename Prompt"
+            "Edit Prompt"
         }
     }
 
@@ -4536,6 +4620,14 @@ pub mod texts {
             "输入新的提示词名称："
         } else {
             "Enter a new prompt name:"
+        }
+    }
+
+    pub fn tui_label_prompt_metadata() -> &'static str {
+        if is_chinese() {
+            "提示词元信息"
+        } else {
+            "Prompt Metadata"
         }
     }
 
@@ -4568,6 +4660,48 @@ pub mod texts {
             format!("确定删除提示词 '{}' ({})？", name, id)
         } else {
             format!("Delete prompt '{}' ({})?", name, id)
+        }
+    }
+
+    pub fn tui_confirm_import_prompt_title() -> &'static str {
+        if is_chinese() {
+            "导入现有提示词"
+        } else {
+            "Import Existing Prompt"
+        }
+    }
+
+    pub fn tui_confirm_import_prompt_message(filename: &str) -> String {
+        if is_chinese() {
+            format!("当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？")
+        } else {
+            format!(
+                "The prompt list is empty and {filename} already exists. Open it as a new editable prompt?"
+            )
+        }
+    }
+
+    pub fn tui_prompt_default_name() -> &'static str {
+        if is_chinese() {
+            "默认提示词"
+        } else {
+            "Default Prompt"
+        }
+    }
+
+    pub fn tui_prompt_imported_description(filename: &str) -> String {
+        if is_chinese() {
+            format!("从现有 {filename} 预填")
+        } else {
+            format!("Prefilled from existing {filename}")
+        }
+    }
+
+    pub fn tui_toast_prompt_import_candidate_missing() -> &'static str {
+        if is_chinese() {
+            "没有可导入的现有提示词文件。"
+        } else {
+            "No existing prompt file is available to import."
         }
     }
 
@@ -8867,8 +9001,8 @@ mod tests {
         let help = texts::tui_help_text();
         assert!(help.contains("文本输入：Ctrl+A/E 行首/行尾"));
         assert!(help.contains("供应商：Enter 详情"));
-        assert!(help.contains("供应商详情：s 切换"));
-        assert!(help.contains("提示词：c 新建"));
+        assert!(help.contains("供应商详情：Space 切换"));
+        assert!(help.contains("提示词：Space 启用/禁用"));
         assert!(help.contains("技能：Enter 详情"));
         assert!(help.contains("配置：Enter 打开/执行"));
         assert!(help.contains("设置：Enter 应用"));

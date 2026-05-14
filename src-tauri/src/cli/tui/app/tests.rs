@@ -14,7 +14,9 @@ mod tests {
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
     use crate::cli::tui::form::{McpEnvVarRow, McpTransport, TextInput};
-    use crate::cli::tui::runtime_actions::handle_action;
+    use crate::cli::tui::runtime_actions::{
+        handle_action, run_external_editor_for_prompt_form_content,
+    };
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
@@ -97,8 +99,48 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::ALT)
     }
 
+    fn open_prompt_editor(app: &mut App) {
+        app.open_editor(
+            "Prompt",
+            EditorKind::Plain,
+            "hello",
+            EditorSubmit::PromptEdit {
+                id: "pr1".to_string(),
+            },
+        );
+    }
+
     fn data() -> UiData {
         UiData::default()
+    }
+
+    fn claude_provider_row(id: &str) -> ProviderRow {
+        ProviderRow {
+            id: id.to_string(),
+            provider: Provider::with_id(
+                id.to_string(),
+                "Provider One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }
+    }
+
+    fn prompt_import_candidate(
+        filename: &str,
+        content: &str,
+    ) -> super::super::data::PromptImportCandidate {
+        super::super::data::PromptImportCandidate {
+            filename: filename.to_string(),
+            content: content.to_string(),
+        }
     }
 
     fn nav_index(app: &App, item: NavItem) -> usize {
@@ -882,7 +924,9 @@ mod tests {
             EditorKind::Plain,
             "first line\nalpha beta",
             EditorSubmit::PromptCreate {
+                id: "demo".to_string(),
                 name: "Demo".to_string(),
+                description: None,
             },
         );
         if let Some(editor) = app.editor.as_mut() {
@@ -986,6 +1030,30 @@ mod tests {
     }
 
     #[test]
+    fn providers_enter_key_imports_current_config_when_empty() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::ProviderImportLiveConfig));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn providers_i_key_is_noop() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('i')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
     fn providers_s_key_triggers_switch_action() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -1079,34 +1147,17 @@ mod tests {
     }
 
     #[test]
-    fn providers_c_key_requests_stream_check() {
+    fn providers_c_key_is_noop() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
         let mut data = UiData::default();
-        data.providers.rows.push(super::super::data::ProviderRow {
-            id: "p1".to_string(),
-            provider: crate::provider::Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
-                None,
-            ),
-            api_url: Some("https://example.com".to_string()),
-            is_current: false,
-            is_in_config: true,
-            is_saved: true,
-            is_default_model: false,
-            primary_model_id: None,
-            default_model_id: None,
-        });
+        data.providers.rows.push(claude_provider_row("p1"));
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
-        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
-        assert!(
-            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
-        );
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -1136,6 +1187,121 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn providers_t_key_opens_test_menu() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('t')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ProviderTestMenu {
+                ref provider_id,
+                selected: 0
+            } if provider_id == "p1"
+        ));
+    }
+
+    #[test]
+    fn provider_test_menu_enter_runs_speedtest() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 0,
+        };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(
+            matches!(action, Action::ProviderSpeedtest { ref url } if url == "https://example.com")
+        );
+        assert!(
+            matches!(app.overlay, Overlay::SpeedtestRunning { ref url } if url == "https://example.com")
+        );
+    }
+
+    #[test]
+    fn provider_test_menu_second_item_runs_stream_check() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 1,
+        };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::ProviderStreamCheck { ref id } if id == "p1"));
+        assert!(
+            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
+        );
+    }
+
+    #[test]
+    fn provider_test_menu_t_key_is_noop() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 0,
+        };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('t')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ProviderTestMenu {
+                ref provider_id,
+                selected: 0
+            } if provider_id == "p1"
+        ));
+    }
+
+    #[test]
+    fn provider_test_menu_c_key_is_noop() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 1,
+        };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('c')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ProviderTestMenu {
+                ref provider_id,
+                selected: 1
+            } if provider_id == "p1"
+        ));
     }
 
     #[test]
@@ -1461,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_detail_c_key_requests_stream_check() {
+    fn provider_detail_c_key_is_noop() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::ProviderDetail {
             id: "p1".to_string(),
@@ -1469,28 +1635,34 @@ mod tests {
         app.focus = Focus::Content;
 
         let mut data = UiData::default();
-        data.providers.rows.push(super::super::data::ProviderRow {
-            id: "p1".to_string(),
-            provider: crate::provider::Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
-                None,
-            ),
-            api_url: Some("https://example.com".to_string()),
-            is_current: false,
-            is_in_config: true,
-            is_saved: true,
-            is_default_model: false,
-            primary_model_id: None,
-            default_model_id: None,
-        });
+        data.providers.rows.push(claude_provider_row("p1"));
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
-        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
-        assert!(
-            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
-        );
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_detail_t_key_opens_test_menu() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('t')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ProviderTestMenu {
+                ref provider_id,
+                selected: 0
+            } if provider_id == "p1"
+        ));
     }
 
     #[test]
@@ -2273,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn prompts_a_key_triggers_activate_action() {
+    fn prompts_space_key_toggles_activate_and_deactivate_actions() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
@@ -2292,8 +2464,305 @@ mod tests {
             },
         });
 
-        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::PromptActivate { id } if id == "pr1"));
+
+        data.prompts.rows[0].prompt.enabled = true;
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::PromptDeactivate { id } if id == "pr1"));
+    }
+
+    #[test]
+    fn prompts_x_key_no_longer_deactivates_active_prompt() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "My Prompt".to_string(),
+                content: "Hello".to_string(),
+                description: None,
+                enabled: true,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn prompts_route_prompts_once_when_empty_and_live_prompt_exists() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.prompts.import_candidate =
+            Some(prompt_import_candidate("CLAUDE.md", "# Existing prompt"));
+
+        app.set_route_no_history(Route::Prompts);
+        app.maybe_prompt_import_candidate(&data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PromptOpenImportCandidate { .. },
+                ..
+            })
+        ));
+
+        app.overlay = Overlay::None;
+        app.maybe_prompt_import_candidate(&data);
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "the import prompt should not repeat in the same TUI session after dismissal"
+        );
+    }
+
+    #[test]
+    fn prompts_import_prompt_no_dismisses_without_repeating() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.prompts.import_candidate =
+            Some(prompt_import_candidate("CLAUDE.md", "# Existing prompt"));
+
+        app.set_route_no_history(Route::Prompts);
+        app.maybe_prompt_import_candidate(&data);
+
+        let action = app.on_key(key(KeyCode::Char('n')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.form.is_none());
+
+        app.maybe_prompt_import_candidate(&data);
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "declining should suppress the import prompt for this app in the same TUI session"
+        );
+    }
+
+    #[test]
+    fn prompts_import_prompt_esc_dismisses_without_repeating() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.prompts.import_candidate =
+            Some(prompt_import_candidate("CLAUDE.md", "# Existing prompt"));
+
+        app.set_route_no_history(Route::Prompts);
+        app.maybe_prompt_import_candidate(&data);
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.form.is_none());
+
+        app.maybe_prompt_import_candidate(&data);
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "escaping should suppress the import prompt for this app in the same TUI session"
+        );
+    }
+
+    #[test]
+    fn prompts_import_prompt_is_tracked_per_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.prompts.import_candidate =
+            Some(prompt_import_candidate("CLAUDE.md", "# Existing prompt"));
+
+        app.set_route_no_history(Route::Prompts);
+        app.maybe_prompt_import_candidate(&data);
+        app.overlay = Overlay::None;
+
+        app.app_type = AppType::Codex;
+        data.prompts.import_candidate = Some(prompt_import_candidate(
+            "AGENTS.md",
+            "# Existing codex prompt",
+        ));
+        app.maybe_prompt_import_candidate(&data);
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PromptOpenImportCandidate { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompts_route_does_not_prompt_when_prompt_rows_exist() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.prompts.import_candidate =
+            Some(prompt_import_candidate("CLAUDE.md", "# Existing prompt"));
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "My Prompt".to_string(),
+                content: "Hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        app.set_route_no_history(Route::Prompts);
+        app.maybe_prompt_import_candidate(&data);
+
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.prompt_import_prompted_apps.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn prompts_route_detects_live_prompt_file_and_prompts_import() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let prompt_path =
+            crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create prompt parent");
+        std::fs::write(&prompt_path, "# Existing prompt").expect("write prompt file");
+
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        let candidate = data
+            .prompts
+            .import_candidate
+            .as_ref()
+            .expect("import candidate");
+        assert_eq!(candidate.filename, "CLAUDE.md");
+        assert_eq!(candidate.content, "# Existing prompt");
+
+        run_runtime_action(&mut app, &mut data, Action::SwitchRoute(Route::Prompts))
+            .expect("switch to prompts");
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PromptOpenImportCandidate { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn prompts_reload_data_detects_live_prompt_file_and_prompts_import() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let prompt_path =
+            crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create prompt parent");
+        std::fs::write(&prompt_path, "# Existing prompt").expect("write prompt file");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+
+        run_runtime_action(&mut app, &mut data, Action::ReloadData).expect("reload data");
+
+        assert_eq!(
+            data.prompts
+                .import_candidate
+                .as_ref()
+                .expect("import candidate")
+                .content,
+            "# Existing prompt"
+        );
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PromptOpenImportCandidate { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn prompts_switch_app_detects_live_prompt_file_and_prompts_import() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let prompt_path =
+            crate::prompt_files::prompt_file_path(&AppType::Codex).expect("prompt path");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create prompt parent");
+        std::fs::write(&prompt_path, "# Codex prompt").expect("write prompt file");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        let mut data = UiData::load(&app.app_type).expect("load claude data");
+
+        run_runtime_action(&mut app, &mut data, Action::SetAppType(AppType::Codex))
+            .expect("switch app");
+
+        assert_eq!(app.app_type, AppType::Codex);
+        assert_eq!(
+            data.prompts
+                .import_candidate
+                .as_ref()
+                .expect("import candidate")
+                .filename,
+            "AGENTS.md"
+        );
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PromptOpenImportCandidate { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_config_migration_leaves_live_prompt_for_tui_import_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let mut legacy_config = crate::app_config::MultiAppConfig::default();
+        legacy_config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager")
+            .providers
+            .insert(
+                "provider-one".to_string(),
+                claude_provider_row("provider-one").provider,
+            );
+        legacy_config.save().expect("write legacy config");
+        let prompt_path =
+            crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create prompt parent");
+        std::fs::write(&prompt_path, "# Existing prompt").expect("write prompt file");
+
+        let state = crate::AppState::try_new().expect("migrate legacy config");
+
+        assert!(
+            PromptService::get_prompts(&state, AppType::Claude)
+                .expect("load prompts")
+                .is_empty(),
+            "legacy config migration must not silently import live prompt files"
+        );
+        let data = UiData::load(&AppType::Claude).expect("load ui data");
+        assert_eq!(
+            data.prompts
+                .import_candidate
+                .as_ref()
+                .expect("import candidate")
+                .content,
+            "# Existing prompt"
+        );
     }
 
     #[test]
@@ -7799,7 +8268,7 @@ mod tests {
     }
 
     #[test]
-    fn prompts_e_opens_editor_and_ctrl_s_submits() {
+    fn prompts_e_opens_edit_form_and_ctrl_s_submits() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
@@ -7811,7 +8280,7 @@ mod tests {
                 id: "pr1".to_string(),
                 name: "Demo".to_string(),
                 content: "hello".to_string(),
-                description: None,
+                description: Some("Demo description".to_string()),
                 enabled: false,
                 created_at: None,
                 updated_at: None,
@@ -7821,96 +8290,100 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('e')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.editor.as_ref().map(|e| &e.submit),
-            Some(EditorSubmit::PromptEdit { id }) if id == "pr1"
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if matches!(form.mode, FormMode::Edit { ref id } if id == "pr1")
+                    && form.id.value == "pr1"
+                    && form.name.value == "Demo"
+                    && form.description.value == "Demo description"
+                    && form.content.text() == "hello"
         ));
 
         let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
         assert!(matches!(
             submit,
-            Action::EditorSubmit {
-                submit: EditorSubmit::PromptEdit { .. },
+            Action::PromptSave {
+                old_id,
+                new_id,
+                name,
+                description,
                 content
-            } if content.contains("hello")
+            } if old_id.as_deref() == Some("pr1")
+                && new_id == "pr1"
+                && name == "Demo"
+                && description.as_deref() == Some("Demo description")
+                && content == "hello"
         ));
     }
 
     #[test]
-    fn prompts_c_opens_create_name_input() {
+    fn prompts_a_opens_create_metadata_form() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
 
-        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        let action = app.on_key(key(KeyCode::Char('a')), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.overlay,
-            Overlay::TextInput(TextInputState {
-                submit: TextSubmit::PromptCreateName,
-                ..
-            })
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if matches!(form.mode, FormMode::Add)
+                    && form.name.value.starts_with("Prompt ")
+                    && form.id.value.starts_with("prompt-")
         ));
     }
 
     #[test]
-    fn prompts_r_requests_reload() {
+    fn prompts_create_metadata_submit_returns_save_action() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
 
-        let action = app.on_key(key(KeyCode::Char('r')), &UiData::default());
-        assert!(matches!(action, Action::ReloadData));
-    }
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
+        if let Some(FormState::PromptMeta(form)) = app.form.as_mut() {
+            form.description.set("Demo description");
+            form.content.replace_text("Prompt body");
+        }
 
-    #[test]
-    fn prompts_create_name_submit_opens_editor() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Prompts;
-        app.focus = Focus::Content;
-
-        app.overlay = Overlay::TextInput(TextInputState {
-            title: texts::tui_prompt_create_title().to_string(),
-            prompt: texts::tui_prompt_create_prompt().to_string(),
-            input: TextInput::new("Prompt One".to_string()),
-            submit: TextSubmit::PromptCreateName,
-            secret: false,
-        });
-
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
-        assert!(matches!(action, Action::None));
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+        assert!(app.editor.is_none());
         assert!(matches!(
-            app.editor.as_ref().map(|editor| editor.submit.clone()),
-            Some(EditorSubmit::PromptCreate { name }) if name == "Prompt One"
+            action,
+            Action::PromptSave {
+                old_id: None,
+                new_id,
+                name,
+                description,
+                content,
+            } if new_id == "prompt-one"
+                    && name == "Prompt One"
+                    && description.as_deref() == Some("Demo description")
+                    && content == "Prompt body"
         ));
     }
 
     #[test]
-    fn prompts_create_name_empty_keeps_input_open() {
+    fn prompts_create_metadata_empty_name_keeps_form_open() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
 
-        app.overlay = Overlay::TextInput(TextInputState {
-            title: texts::tui_prompt_create_title().to_string(),
-            prompt: texts::tui_prompt_create_prompt().to_string(),
-            input: TextInput::new("   ".to_string()),
-            submit: TextSubmit::PromptCreateName,
-            secret: false,
-        });
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "   ".to_string(),
+        )));
 
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.overlay,
-            Overlay::TextInput(TextInputState {
-                submit: TextSubmit::PromptCreateName,
-                ..
-            })
-        ));
+        assert!(matches!(app.form, Some(FormState::PromptMeta(_))));
+        assert!(app.editor.is_none());
     }
 
     #[test]
-    fn prompts_n_opens_rename_input() {
+    fn prompts_n_no_longer_opens_metadata_form() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
@@ -7922,7 +8395,7 @@ mod tests {
                 id: "pr1".to_string(),
                 name: "Demo".to_string(),
                 content: "hello".to_string(),
-                description: None,
+                description: Some("Demo description".to_string()),
                 enabled: false,
                 created_at: None,
                 updated_at: None,
@@ -7931,63 +8404,337 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('n')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.overlay,
-            Overlay::TextInput(TextInputState {
-                submit: TextSubmit::PromptRename { ref id },
-                ref input,
-                ..
-            }) if id == "pr1" && input.value == "Demo"
-        ));
+        assert!(app.form.is_none());
+        assert!(app.editor.is_none());
     }
 
     #[test]
-    fn prompts_rename_empty_keeps_input_open() {
+    fn prompts_metadata_tab_switches_to_content_and_edits_body() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        app.last_size = Size {
+            width: 120,
+            height: 40,
+        };
 
-        app.overlay = Overlay::TextInput(TextInputState {
-            title: texts::tui_prompt_rename_title().to_string(),
-            prompt: texts::tui_prompt_rename_prompt().to_string(),
-            input: TextInput::new("   ".to_string()),
-            submit: TextSubmit::PromptRename {
-                id: "pr1".to_string(),
-            },
-            secret: false,
-        });
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
 
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let action = app.on_key(key(KeyCode::Tab), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.overlay,
-            Overlay::TextInput(TextInputState {
-                submit: TextSubmit::PromptRename { ref id },
-                ..
-            }) if id == "pr1"
+            app.form,
+            Some(FormState::PromptMeta(ref form)) if form.focus == FormFocus::Content
+        ));
+
+        app.on_key(key(KeyCode::Char('A')), &UiData::default());
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        app.on_key(key(KeyCode::Char('B')), &UiData::default());
+
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if form.focus == FormFocus::Content
+                    && form.content.text().starts_with("A\nB# Write your prompt here")
         ));
     }
 
     #[test]
-    fn prompts_rename_submit_returns_action() {
+    fn prompts_metadata_content_ctrl_o_requests_external_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
+
+        app.on_key(key(KeyCode::Tab), &UiData::default());
+        let action = app.on_key(ctrl(KeyCode::Char('o')), &UiData::default());
+
+        assert!(matches!(action, Action::PromptFormOpenExternal));
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form)) if form.focus == FormFocus::Content
+        ));
+    }
+
+    #[test]
+    fn prompts_metadata_content_tab_inserts_spaces() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
+
+        app.on_key(key(KeyCode::Tab), &UiData::default());
+        app.on_key(key(KeyCode::Tab), &UiData::default());
+
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if form.focus == FormFocus::Content
+                    && form.content.text().starts_with("  # Write your prompt here")
+        ));
+    }
+
+    #[test]
+    fn prompts_metadata_content_shift_tab_returns_to_fields() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
+
+        app.on_key(key(KeyCode::Tab), &UiData::default());
+        app.on_key(key(KeyCode::BackTab), &UiData::default());
+
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form)) if form.focus == FormFocus::Fields
+        ));
+    }
+
+    #[test]
+    fn prompt_form_external_editor_helper_updates_content_buffer() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::PromptMeta(PromptMetaFormState::new(
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+        )));
+        if let Some(FormState::PromptMeta(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Content;
+            form.content.replace_text("hello");
+        }
+
+        run_external_editor_for_prompt_form_content(&mut app, |current| {
+            assert_eq!(current, "hello");
+            Ok("hello from external\neditor".to_string())
+        })
+        .expect("external editor should update prompt form content");
+
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if form.content.text() == "hello from external\neditor"
+                    && form.content.initial_text == "# Write your prompt here\n"
+                    && form.has_unsaved_changes()
+        ));
+    }
+
+    #[test]
+    fn prompts_metadata_empty_name_keeps_form_open() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
 
-        app.overlay = Overlay::TextInput(TextInputState {
-            title: texts::tui_prompt_rename_title().to_string(),
-            prompt: texts::tui_prompt_rename_prompt().to_string(),
-            input: TextInput::new("Renamed".to_string()),
-            submit: TextSubmit::PromptRename {
-                id: "pr1".to_string(),
-            },
-            secret: false,
-        });
+        let prompt = Prompt {
+            id: "pr1".to_string(),
+            name: "Demo".to_string(),
+            content: "hello".to_string(),
+            description: None,
+            enabled: false,
+            created_at: None,
+            updated_at: None,
+        };
+        let mut form = PromptMetaFormState::from_prompt(&prompt);
+        form.name.set("   ");
+        app.form = Some(FormState::PromptMeta(form));
 
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::PromptMeta(_))));
+        assert!(app.editor.is_none());
+    }
+
+    #[test]
+    fn prompts_metadata_submit_returns_action() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let prompt = Prompt {
+            id: "pr1".to_string(),
+            name: "Demo".to_string(),
+            content: "hello".to_string(),
+            description: None,
+            enabled: false,
+            created_at: None,
+            updated_at: None,
+        };
+        let mut form = PromptMetaFormState::from_prompt(&prompt);
+        form.id.set("renamed-id");
+        form.name.set("Renamed");
+        form.description.set("Updated description");
+        form.content.replace_text("updated body");
+        app.form = Some(FormState::PromptMeta(form));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
         assert!(matches!(
             action,
-            Action::PromptRename { id, name } if id == "pr1" && name == "Renamed"
+            Action::PromptSave {
+                old_id,
+                new_id,
+                name,
+                description,
+                content,
+            } if old_id.as_deref() == Some("pr1")
+                && new_id == "renamed-id"
+                && name == "Renamed"
+                && description.as_deref() == Some("Updated description")
+                && content == "updated body"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_save_runtime_updates_metadata_and_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let state = crate::AppState::try_new().expect("load state");
+        PromptService::upsert_prompt(
+            &state,
+            AppType::Claude,
+            "pr1",
+            Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: Some(1),
+                updated_at: Some(1),
+            },
+        )
+        .expect("seed prompt");
+        state.save().expect("persist config");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.input.set("demo".to_string());
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::PromptSave {
+                old_id: Some("pr1".to_string()),
+                new_id: "renamed-id".to_string(),
+                name: "Renamed".to_string(),
+                description: Some("Updated description".to_string()),
+                content: "updated body".to_string(),
+            },
+        )
+        .expect("save prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.input.value.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "renamed-id");
+        assert_eq!(data.prompts.rows[0].prompt.name, "Renamed");
+        assert_eq!(
+            data.prompts.rows[0].prompt.description.as_deref(),
+            Some("Updated description")
+        );
+        assert_eq!(data.prompts.rows[0].prompt.content, "updated body");
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_save_runtime_creates_prompt_from_one_page_form() {
+        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let state = crate::AppState::try_new().expect("load state");
+        state.save().expect("persist empty state");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.input.set("focus".to_string());
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::PromptSave {
+                old_id: None,
+                new_id: "prompt-one".to_string(),
+                name: "Prompt One".to_string(),
+                description: Some("Demo description".to_string()),
+                content: "body".to_string(),
+            },
+        )
+        .expect("create prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.input.value.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "prompt-one");
+        assert_eq!(
+            data.prompts.rows[0].prompt.description.as_deref(),
+            Some("Demo description")
+        );
+        assert_eq!(data.prompts.rows[0].prompt.content, "body");
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_import_candidate_yes_opens_prefilled_add_form_without_saving() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let state = crate::AppState::try_new().expect("load state");
+        state.save().expect("persist empty state");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.active = true;
+        app.filter.input.set("old filter".to_string());
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        data.prompts.import_candidate = Some(prompt_import_candidate(
+            "CLAUDE.md",
+            "# Existing prompt\n\nBody",
+        ));
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::PromptOpenImportCandidate {
+                filename: "CLAUDE.md".to_string(),
+                content: "# Existing prompt\n\nBody".to_string(),
+            },
+        )
+        .expect("open import candidate");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.input.value.is_empty());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(
+            PromptService::get_prompts(&state, AppType::Claude)
+                .expect("load prompts")
+                .len(),
+            0,
+            "opening the import candidate should not save until the user submits the add form"
+        );
+        assert!(matches!(
+            app.form,
+            Some(FormState::PromptMeta(ref form))
+                if matches!(form.mode, FormMode::Add)
+                    && form.id.value == "default-prompt"
+                    && form.name.value == "Default Prompt"
+                    && form.description.value == "Prefilled from existing CLAUDE.md"
+                    && form.content.text() == "# Existing prompt\n\nBody"
         ));
     }
 
@@ -8010,7 +8757,9 @@ mod tests {
             &mut data,
             Action::EditorSubmit {
                 submit: EditorSubmit::PromptCreate {
+                    id: "prompt-one".to_string(),
                     name: "Prompt One".to_string(),
+                    description: None,
                 },
                 content: "body".to_string(),
             },
@@ -8057,9 +8806,11 @@ mod tests {
         run_runtime_action(
             &mut app,
             &mut data,
-            Action::PromptRename {
-                id: "pr1".to_string(),
+            Action::PromptUpdateMetadata {
+                old_id: "pr1".to_string(),
+                new_id: "pr1".to_string(),
                 name: "Renamed".to_string(),
+                description: None,
             },
         )
         .expect("rename prompt");
@@ -8077,26 +8828,11 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        open_prompt_editor(&mut app);
 
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
-
-        let action = app.on_key(key(KeyCode::Char('e')), &data);
-        assert!(matches!(action, Action::None));
         let submit = app.on_key(
             KeyEvent::new(KeyCode::Char('S'), KeyModifiers::CONTROL),
-            &data,
+            &UiData::default(),
         );
         assert!(
             matches!(
@@ -8115,24 +8851,9 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        open_prompt_editor(&mut app);
 
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
-
-        let action = app.on_key(key(KeyCode::Char('e')), &data);
-        assert!(matches!(action, Action::None));
-        let submit = app.on_key(key(KeyCode::Char('\u{13}')), &data);
+        let submit = app.on_key(key(KeyCode::Char('\u{13}')), &UiData::default());
         assert!(
             matches!(
                 submit,
@@ -8150,26 +8871,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
-
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
-
-        let action = app.on_key(key(KeyCode::Char('e')), &data);
-        assert!(matches!(action, Action::None));
+        open_prompt_editor(&mut app);
         assert!(app.editor.is_some(), "prompt editor should be opened first");
 
-        let action = app.on_key(ctrl(KeyCode::Char('o')), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('o')), &UiData::default());
         assert_eq!(format!("{action:?}"), "EditorOpenExternal");
         assert!(
             app.editor.is_some(),
@@ -8182,24 +8887,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        open_prompt_editor(&mut app);
 
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
-
-        app.on_key(key(KeyCode::Char('e')), &data);
-        app.on_key(key(KeyCode::Char('x')), &data);
-        let action = app.on_key(key(KeyCode::Esc), &data);
+        app.on_key(key(KeyCode::Char('x')), &UiData::default());
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(
             app.overlay,
@@ -8215,26 +8906,12 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        open_prompt_editor(&mut app);
 
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
+        app.on_key(key(KeyCode::Char('x')), &UiData::default());
+        app.on_key(key(KeyCode::Esc), &UiData::default());
 
-        app.on_key(key(KeyCode::Char('e')), &data);
-        app.on_key(key(KeyCode::Char('x')), &data);
-        app.on_key(key(KeyCode::Esc), &data);
-
-        let action = app.on_key(key(KeyCode::Char('y')), &data);
+        let action = app.on_key(key(KeyCode::Char('y')), &UiData::default());
         assert!(
             matches!(
                 action,
@@ -8252,26 +8929,12 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
+        open_prompt_editor(&mut app);
 
-        let mut data = UiData::default();
-        data.prompts.rows.push(super::super::data::PromptRow {
-            id: "pr1".to_string(),
-            prompt: crate::prompt::Prompt {
-                id: "pr1".to_string(),
-                name: "Demo".to_string(),
-                content: "hello".to_string(),
-                description: None,
-                enabled: false,
-                created_at: None,
-                updated_at: None,
-            },
-        });
+        app.on_key(key(KeyCode::Char('x')), &UiData::default());
+        app.on_key(key(KeyCode::Esc), &UiData::default());
 
-        app.on_key(key(KeyCode::Char('e')), &data);
-        app.on_key(key(KeyCode::Char('x')), &data);
-        app.on_key(key(KeyCode::Esc), &data);
-
-        let action = app.on_key(key(KeyCode::Char('n')), &data);
+        let action = app.on_key(key(KeyCode::Char('n')), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(
             app.editor.is_none(),
@@ -9681,7 +10344,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_space_is_blocked_when_failover_enabled() {
+    fn providers_space_switches_provider_when_failover_enabled() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -9697,12 +10360,11 @@ mod tests {
         ));
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Info));
+        assert!(matches!(action, Action::ProviderSwitch { id } if id == "p1"));
     }
 
     #[test]
-    fn providers_s_key_is_blocked_when_failover_enabled() {
+    fn providers_s_key_switches_provider_as_legacy_shortcut() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -9718,8 +10380,7 @@ mod tests {
         ));
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Info));
+        assert!(matches!(action, Action::ProviderSwitch { id } if id == "p1"));
     }
 
     #[test]
@@ -9806,10 +10467,71 @@ mod tests {
         data.proxy.auto_failover_enabled = false;
 
         let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Warning));
+    }
+
+    #[test]
+    fn settings_proxy_auto_failover_prompts_to_enable_proxy_when_not_routed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| *item == LocalProxySettingsItem::AutoFailover)
+            .expect("auto failover item should exist");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = false;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProxyEnableAndAutoFailover {
+                    app_type: AppType::Claude
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_auto_failover_toggles_when_proxy_is_routed_and_queue_exists() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| *item == LocalProxySettingsItem::AutoFailover)
+            .expect("auto failover item should exist");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
+        data.proxy.auto_failover_enabled = false;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(
             action,
             Action::SetProxyAutoFailover { app_type, enabled }
-                if app_type == AppType::Gemini && enabled
+                if app_type == AppType::Claude && enabled
         ));
     }
 
@@ -9984,7 +10706,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_proxy_auto_failover_toggles_while_proxy_running() {
+    fn settings_proxy_auto_failover_blocks_empty_queue() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::SettingsProxy;
         app.focus = Focus::Content;
@@ -9998,11 +10720,8 @@ mod tests {
         data.proxy.auto_failover_enabled = false;
 
         let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(
-            action,
-            Action::SetProxyAutoFailover { app_type, enabled }
-                if app_type == AppType::Claude && enabled
-        ));
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Warning));
     }
 
     #[test]

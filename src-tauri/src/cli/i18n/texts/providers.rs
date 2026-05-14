@@ -414,6 +414,38 @@ pub fn tui_provider_add_title() -> &'static str {
     }
 }
 
+pub fn tui_provider_empty_title() -> &'static str {
+    if is_chinese() {
+        "还没有添加任何供应商"
+    } else {
+        "No providers have been added yet"
+    }
+}
+
+pub fn tui_provider_empty_subtitle() -> &'static str {
+    if is_chinese() {
+        "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中"
+    } else {
+        "If you already have a config, use \"Import Current Config\". Everything will be safely stored in the default provider."
+    }
+}
+
+pub fn tui_key_import_current_config() -> &'static str {
+    if is_chinese() {
+        "导入当前配置"
+    } else {
+        "import current config"
+    }
+}
+
+pub fn tui_key_add_provider() -> &'static str {
+    if is_chinese() {
+        "添加供应商"
+    } else {
+        "add provider"
+    }
+}
+
 pub fn tui_codex_official_no_api_key_tip() -> &'static str {
     if is_chinese() {
         "官方无需填写 API Key，直接保存即可。"
@@ -440,9 +472,9 @@ pub fn tui_provider_edit_title(name: &str) -> String {
 
 pub fn tui_provider_detail_keys() -> &'static str {
     if is_chinese() {
-        "按键：s=切换  e=编辑  t=测速  c=健康检查"
+        "按键：Space=切换  e=编辑  t=测试"
     } else {
-        "Keys: s=switch  e=edit  t=speedtest  c=stream check"
+        "Keys: Space=switch  e=edit  t=test"
     }
 }
 
@@ -467,6 +499,14 @@ pub fn tui_key_speedtest() -> &'static str {
         "测速"
     } else {
         "speedtest"
+    }
+}
+
+pub fn tui_key_test() -> &'static str {
+    if is_chinese() {
+        "测试"
+    } else {
+        "test"
     }
 }
 
@@ -555,6 +595,14 @@ pub fn tui_key_import() -> &'static str {
         "导入"
     } else {
         "import"
+    }
+}
+
+pub fn tui_key_failover() -> &'static str {
+    if is_chinese() {
+        "管理故障转移"
+    } else {
+        "manage failover"
     }
 }
 
@@ -896,9 +944,9 @@ pub fn tui_key_deactivate_active() -> &'static str {
 
 pub fn tui_provider_list_keys() -> &'static str {
     if is_chinese() {
-        "按键：a=新增  e=编辑  Enter=详情  s=切换  /=搜索"
+        "按键：a=新增  e=编辑  Enter=详情  Space=切换  /=搜索"
     } else {
-        "Keys: a=add  e=edit  Enter=details  s=switch  /=filter"
+        "Keys: a=add  e=edit  Enter=details  Space=switch  /=filter"
     }
 }
 

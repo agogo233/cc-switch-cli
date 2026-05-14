@@ -83,6 +83,10 @@ const PROXY_CONFIG_EXPORT_DEFAULTS: &[SyncNeutralizedColumn] = &[
         value: SyncNeutralValue::Integer(0),
     },
     SyncNeutralizedColumn {
+        column: "auto_failover_enabled",
+        value: SyncNeutralValue::Integer(0),
+    },
+    SyncNeutralizedColumn {
         column: "live_takeover_active",
         value: SyncNeutralValue::Integer(0),
     },
@@ -167,6 +171,7 @@ impl Database {
         if let (Some(local_snapshot), Some(policy)) = (local_snapshot.as_ref(), policy) {
             Self::restore_sync_local_overlay(local_snapshot, &temp_conn, policy)?;
         }
+        Self::clear_imported_auto_failover_flags(&temp_conn)?;
 
         // 使用 Backup 将临时库原子写回主库
         {
@@ -295,6 +300,30 @@ impl Database {
         for group in policy.row_keyed_column_groups {
             Self::restore_row_keyed_column_group(source_conn, target_conn, group)?;
         }
+        Ok(())
+    }
+
+    fn clear_imported_auto_failover_flags(target_conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(target_conn, "proxy_config")? {
+            return Ok(());
+        }
+        let columns = Self::get_table_columns(target_conn, "proxy_config")?;
+        if !columns
+            .iter()
+            .any(|column| column == "auto_failover_enabled")
+        {
+            return Ok(());
+        }
+
+        target_conn
+            .execute(
+                "UPDATE proxy_config
+                 SET auto_failover_enabled = 0
+                 WHERE auto_failover_enabled != 0",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("清理导入的自动故障转移状态失败: {e}")))?;
+
         Ok(())
     }
 
@@ -926,7 +955,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_import_preserves_local_proxy_state_and_keeps_remote_strategy() -> Result<(), AppError> {
+    fn sync_import_preserves_local_proxy_state_and_clears_runtime_failover() -> Result<(), AppError>
+    {
         let remote_db = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(remote_db.conn);
@@ -977,7 +1007,7 @@ mod tests {
         let conn = crate::database::lock_conn!(local_db.conn);
         assert_eq!(
             read_proxy_row(&conn, "claude")?,
-            (true, "10.0.0.1".to_string(), 21001, true, true, 9)
+            (true, "10.0.0.1".to_string(), 21001, true, false, 9)
         );
         assert_eq!(
             read_proxy_row(&conn, "codex")?,
@@ -985,7 +1015,7 @@ mod tests {
         );
         assert_eq!(
             read_proxy_row(&conn, "gemini")?,
-            (true, "10.0.0.3".to_string(), 21003, false, true, 7)
+            (true, "10.0.0.3".to_string(), 21003, false, false, 7)
         );
 
         drop(conn);
@@ -995,6 +1025,28 @@ mod tests {
                 .expect("read local runtime session after overlay")
                 .as_deref(),
             Some("{\"pid\":123}")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plain_sql_import_clears_runtime_failover_state() -> Result<(), AppError> {
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            seed_provider(&conn, "remote-provider")?;
+            set_proxy_row(&conn, "claude", true, "127.0.0.1", 15721, true, true, 9)?;
+        }
+        let remote_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string(&remote_sql)?;
+
+        let conn = crate::database::lock_conn!(local_db.conn);
+        assert_eq!(
+            read_proxy_row(&conn, "claude")?,
+            (true, "127.0.0.1".to_string(), 15721, true, false, 9)
         );
 
         Ok(())
@@ -1025,7 +1077,7 @@ mod tests {
         let conn = crate::database::lock_conn!(old_client_db.conn);
         assert_eq!(
             read_proxy_row(&conn, "claude")?,
-            (false, "127.0.0.1".to_string(), 15721, false, true, 6)
+            (false, "127.0.0.1".to_string(), 15721, false, false, 6)
         );
         assert_eq!(
             read_proxy_row(&conn, "codex")?,
@@ -1033,7 +1085,7 @@ mod tests {
         );
         assert_eq!(
             read_proxy_row(&conn, "gemini")?,
-            (false, "127.0.0.1".to_string(), 15721, false, true, 4)
+            (false, "127.0.0.1".to_string(), 15721, false, false, 4)
         );
         drop(conn);
         assert!(

@@ -12,7 +12,7 @@ use crate::services::skill::SyncMethod;
 use super::data::UiData;
 use super::form::{
     CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType, McpAddField, McpAddFormState,
-    McpTransport, ProviderAddField, ProviderAddFormState,
+    McpTransport, PromptMetaField, PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
@@ -44,7 +44,7 @@ pub use types::{
 };
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
-    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    app_type.supports_failover()
 }
 
 const PROVIDER_NOTES_MAX_CHARS: usize = 120;

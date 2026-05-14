@@ -68,6 +68,8 @@ pub enum ConfirmAction {
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
+    ProxyEnableAndAutoFailover { app_type: AppType },
+    PromptOpenImportCandidate { filename: String, content: String },
     OpenClawDailyMemoryDelete { filename: String },
     FormSaveBeforeClose,
     EditorDiscard,
@@ -87,10 +89,6 @@ pub enum TextSubmit {
     ConfigExport,
     ConfigImport,
     ConfigBackupName,
-    PromptCreateName,
-    PromptRename {
-        id: String,
-    },
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
     SettingsOpenClawConfigDir,
@@ -184,6 +182,10 @@ pub enum Overlay {
     },
     TextView(TextViewState),
     CommonSnippetPicker {
+        selected: usize,
+    },
+    ProviderTestMenu {
+        provider_id: String,
         selected: usize,
     },
     FailoverQueueManager {

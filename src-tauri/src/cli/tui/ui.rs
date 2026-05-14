@@ -23,7 +23,8 @@ use super::{
     },
     data::{McpRow, ProviderRow, UiData},
     form::{
-        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, ProviderAddField,
+        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, PromptMetaField,
+        ProviderAddField,
     },
     route::{NavItem, Route},
     theme,

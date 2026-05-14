@@ -157,6 +157,7 @@ async fn test_failover_enabled_uses_queue_order_ignoring_current() {
     db.add_to_failover_queue("claude", "a").unwrap();
 
     let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -184,9 +185,16 @@ async fn test_failover_enabled_without_queue_returns_no_providers_configured() {
     db.save_provider("codex", &provider).unwrap();
     db.set_current_provider("codex", "codex-current").unwrap();
 
-    let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
-    config.auto_failover_enabled = true;
-    db.update_proxy_config_for_app(config).await.unwrap();
+    {
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "UPDATE proxy_config
+             SET enabled = 1, auto_failover_enabled = 1
+             WHERE app_type = 'codex'",
+            [],
+        )
+        .expect("seed legacy empty failover state");
+    }
 
     let router = ProviderRouter::new(db.clone());
     let error = router
@@ -225,6 +233,7 @@ async fn test_failover_enabled_single_open_queued_provider_does_not_use_non_queu
     db.add_to_failover_queue("claude", "queued").unwrap();
 
     let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -265,6 +274,7 @@ async fn test_select_providers_does_not_consume_half_open_permit() {
     db.add_to_failover_queue("claude", "b").unwrap();
 
     let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -300,6 +310,7 @@ async fn test_release_permit_neutral_frees_half_open_slot() {
     db.add_to_failover_queue("claude", "a").unwrap();
 
     let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
     config.auto_failover_enabled = true;
     db.update_proxy_config_for_app(config).await.unwrap();
 

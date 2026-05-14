@@ -62,6 +62,12 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct GlobalProxySwitchUpdate {
+    pub config: GlobalProxyConfig,
+    pub cleared_auto_failover: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PersistedProxyRuntimeSessionKind {
@@ -211,7 +217,6 @@ impl ProxyService {
         Self::ensure_managed_sessions_supported()?;
 
         let app_type = Self::takeover_app_from_str(app_type)?;
-        self.validate_app_proxy_activation(&app_type).await?;
         let current_status = self.get_status().await;
         if current_status.running {
             return Err(
@@ -219,6 +224,7 @@ impl ProxyService {
                     .to_string(),
             );
         }
+        self.validate_app_proxy_activation(&app_type, None).await?;
 
         let executable = Self::resolve_managed_proxy_executable()?;
         let session_token = uuid::Uuid::new_v4().to_string();
@@ -391,6 +397,7 @@ impl ProxyService {
             let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type);
 
             if !app_proxy.enabled && !has_backup && !live_taken_over {
+                self.clear_app_proxy_routing_flags(app_proxy).await?;
                 continue;
             }
 
@@ -404,16 +411,7 @@ impl ProxyService {
                 self.restore_live_from_current_provider(&app_type).await?;
             }
 
-            if app_proxy.enabled {
-                let mut cleared = app_proxy;
-                cleared.enabled = false;
-                self.db
-                    .update_proxy_config_for_app(cleared)
-                    .await
-                    .map_err(|error| {
-                        format!("clear takeover flag for {app_key} failed: {error}")
-                    })?;
-            }
+            self.clear_app_proxy_routing_flags(app_proxy).await?;
         }
 
         Ok(())
@@ -582,14 +580,121 @@ impl ProxyService {
         self.db.get_global_proxy_config().await
     }
 
-    pub async fn set_global_enabled(&self, enabled: bool) -> Result<GlobalProxyConfig, AppError> {
+    pub async fn set_global_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<GlobalProxySwitchUpdate, AppError> {
         let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
             .await
             .map_err(AppError::Message)?;
         let mut config = self.get_global_config().await?;
         config.proxy_enabled = enabled;
+        let cleared_auto_failover = if enabled {
+            0
+        } else {
+            self.db.clear_auto_failover_for_supported_apps().await?
+        };
         self.db.update_global_proxy_config(config.clone()).await?;
-        Ok(config)
+
+        Ok(GlobalProxySwitchUpdate {
+            config,
+            cleared_auto_failover,
+        })
+    }
+
+    fn first_failover_provider_id(&self, app_type: &str) -> Result<String, String> {
+        self.db
+            .get_failover_queue(app_type)
+            .map_err(|error| format!("load failover queue for {app_type} failed: {error}"))?
+            .first()
+            .map(|item| item.provider_id.clone())
+            .ok_or_else(|| "failover queue is empty".to_string())
+    }
+
+    async fn persist_auto_failover_for_app(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut config = self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await
+            .map_err(|error| format!("load proxy config for {app_type} failed: {error}"))?;
+        config.auto_failover_enabled = enabled;
+        self.db
+            .update_proxy_config_for_app(config)
+            .await
+            .map_err(|error| format!("update proxy config for {app_type} failed: {error}"))
+    }
+
+    pub async fn set_auto_failover_for_app(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if enabled {
+            return self.enable_auto_failover_for_app(app_type).await;
+        }
+
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        self.persist_auto_failover_for_app(app_type.as_str(), false)
+            .await
+    }
+
+    async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        if !self.is_running().await {
+            return Err("automatic failover requires the local proxy to be running".to_string());
+        }
+
+        let app_key = app_type.as_str();
+        let config = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+        if !config.enabled {
+            return Err(
+                "automatic failover requires proxy takeover for this app to be enabled".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    pub async fn enable_auto_failover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let first_provider_id = self.first_failover_provider_id(app_type)?;
+        self.ensure_proxy_routing_active_for_app(app_type).await?;
+        self.switch_proxy_target(app_type, &first_provider_id)
+            .await?;
+        self.persist_auto_failover_for_app(app_type, true).await
+    }
+
+    pub async fn enable_proxy_and_auto_failover_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let first_provider_id = self.first_failover_provider_id(app_type)?;
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        {
+            let _guard =
+                crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+            self.enable_takeover_for_app_unlocked_with_provider(
+                &app_type,
+                Some(&first_provider_id),
+            )
+            .await?;
+        }
+        self.set_global_enabled(true)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.switch_proxy_target(app_key, &first_provider_id)
+            .await?;
+        self.persist_auto_failover_for_app(app_key, true).await?;
+
+        Ok(())
     }
 
     pub async fn get_takeover_status(&self) -> Result<ProxyTakeoverStatus, String> {
@@ -885,7 +990,11 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn validate_app_proxy_activation(&self, app_type: &AppType) -> Result<(), String> {
+    async fn validate_app_proxy_activation(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
         let app_key = app_type.as_str();
         let app_proxy = self
             .db
@@ -893,18 +1002,34 @@ impl ProxyService {
             .await
             .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
 
-        if app_proxy.auto_failover_enabled {
-            if self
+        if app_proxy.auto_failover_enabled
+            && self
                 .db
                 .get_failover_queue(app_key)
                 .map_err(|error| format!("load failover queue for {app_key} failed: {error}"))?
                 .is_empty()
+        {
+            return Err(
+                "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
+                    .to_string(),
+            );
+        }
+
+        if let Some(provider_id) = fallback_provider_id {
+            if self
+                .db
+                .get_provider_by_id(provider_id, app_key)
+                .map_err(|error| {
+                    format!("load provider {provider_id} for {app_key} failed: {error}")
+                })?
+                .is_some()
             {
-                return Err(
-                    "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
-                        .to_string(),
-                );
+                return Ok(());
             }
+            return Err("cannot enable proxy because no active provider is selected".to_string());
+        }
+
+        if self.read_live_config_for_app(app_type).is_ok() {
             return Ok(());
         }
 
@@ -961,7 +1086,17 @@ impl ProxyService {
     }
 
     async fn enable_takeover_for_app_unlocked(&self, app_type: &AppType) -> Result<(), String> {
-        self.validate_app_proxy_activation(app_type).await?;
+        self.enable_takeover_for_app_unlocked_with_provider(app_type, None)
+            .await
+    }
+
+    async fn enable_takeover_for_app_unlocked_with_provider(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.validate_app_proxy_activation(app_type, fallback_provider_id)
+            .await?;
 
         if !self.is_running().await {
             let config = self.get_config().await.map_err(|e| e.to_string())?;
@@ -986,7 +1121,9 @@ impl ProxyService {
             return Ok(());
         }
 
-        let live = self.read_or_current_provider_live(app_type).await?;
+        let (live, sync_live_token_to_current) = self
+            .read_takeover_source_live(app_type, fallback_provider_id)
+            .await?;
         if !has_backup {
             let backup = serde_json::to_string(&live)
                 .map_err(|error| format!("serialize {app_key} live backup failed: {error}"))?;
@@ -995,8 +1132,10 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("save {app_key} live backup failed: {error}"))?;
         }
-        self.sync_live_config_to_current_provider(app_type, &live)
-            .await?;
+        if sync_live_token_to_current {
+            self.sync_live_config_to_current_provider(app_type, &live)
+                .await?;
+        }
 
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
         let mut taken_over = live;
@@ -1035,6 +1174,7 @@ impl ProxyService {
         let live_taken_over = self.detect_takeover_in_live_config_for_app(app_type);
 
         if !app_proxy.enabled && !has_backup && !live_taken_over {
+            self.clear_app_proxy_routing_flags(app_proxy).await?;
             return Ok(());
         }
 
@@ -1048,14 +1188,7 @@ impl ProxyService {
             self.restore_live_from_current_provider(app_type).await?;
         }
 
-        if app_proxy.enabled {
-            let mut cleared = app_proxy;
-            cleared.enabled = false;
-            self.db
-                .update_proxy_config_for_app(cleared)
-                .await
-                .map_err(|error| format!("clear takeover flag for {app_key} failed: {error}"))?;
-        }
+        self.clear_app_proxy_routing_flags(app_proxy).await?;
 
         self.db
             .clear_provider_health_for_app(app_key)
@@ -1073,6 +1206,23 @@ impl ProxyService {
         }
 
         Ok(())
+    }
+
+    async fn clear_app_proxy_routing_flags(
+        &self,
+        mut app_proxy: crate::proxy::types::AppProxyConfig,
+    ) -> Result<(), String> {
+        if !app_proxy.enabled && !app_proxy.auto_failover_enabled {
+            return Ok(());
+        }
+
+        let app_key = app_proxy.app_type.clone();
+        app_proxy.enabled = false;
+        app_proxy.auto_failover_enabled = false;
+        self.db
+            .update_proxy_config_for_app(app_proxy)
+            .await
+            .map_err(|error| format!("clear proxy routing flags for {app_key} failed: {error}"))
     }
 
     async fn restore_live_config_for_app(&self, app_type: &AppType) -> Result<(), String> {
@@ -1350,19 +1500,41 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn read_or_current_provider_live(&self, app_type: &AppType) -> Result<Value, String> {
-        match self.read_live_config_for_app(app_type) {
-            Ok(live) => Ok(live),
-            Err(_) => self
-                .current_provider_settings(app_type)
-                .await?
-                .ok_or_else(|| {
+    async fn read_takeover_source_live(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(Value, bool), String> {
+        if let Ok(live) = self.read_live_config_for_app(app_type) {
+            return Ok((live, true));
+        }
+
+        if let Some(provider_id) = fallback_provider_id {
+            let provider = self
+                .db
+                .get_provider_by_id(provider_id, app_type.as_str())
+                .map_err(|error| {
                     format!(
-                        "missing live config and current provider for {}",
+                        "load provider {} for {} failed: {error}",
+                        provider_id,
                         app_type.as_str()
                     )
-                }),
+                })?
+                .ok_or_else(|| format!("provider does not exist: {provider_id}"))?;
+            return self
+                .build_current_provider_restore_snapshot(app_type, &provider)
+                .map(|snapshot| (snapshot, false));
         }
+
+        self.current_provider_settings(app_type)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "missing live config and current provider for {}",
+                    app_type.as_str()
+                )
+            })
+            .map(|live| (live, false))
     }
 
     async fn build_proxy_urls(&self) -> Result<(String, String), String> {
@@ -1989,14 +2161,31 @@ impl ProxyService {
             .await
             .map_err(|error| format!("load global proxy config failed: {error}"))?;
         if config.proxy_enabled == enabled {
+            if !enabled {
+                self.db
+                    .clear_auto_failover_for_supported_apps()
+                    .await
+                    .map_err(|error| {
+                        format!("clear auto failover after proxy stop failed: {error}")
+                    })?;
+            }
             return Ok(());
+        }
+
+        if !enabled {
+            self.db
+                .clear_auto_failover_for_supported_apps()
+                .await
+                .map_err(|error| format!("clear auto failover after proxy stop failed: {error}"))?;
         }
 
         config.proxy_enabled = enabled;
         self.db
             .update_global_proxy_config(config)
             .await
-            .map_err(|error| format!("update global proxy switch failed: {error}"))
+            .map_err(|error| format!("update global proxy switch failed: {error}"))?;
+
+        Ok(())
     }
 
     fn read_gemini_live(&self) -> Result<Value, String> {
@@ -2036,6 +2225,39 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+
+    fn seed_proxy_flags_raw(
+        db: &Database,
+        app_type: &str,
+        enabled: bool,
+        auto_failover_enabled: bool,
+    ) {
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "UPDATE proxy_config
+             SET enabled = ?2, auto_failover_enabled = ?3
+             WHERE app_type = ?1",
+            rusqlite::params![
+                app_type,
+                if enabled { 1 } else { 0 },
+                if auto_failover_enabled { 1 } else { 0 },
+            ],
+        )
+        .expect("seed raw proxy flags");
+    }
+
+    fn save_queue_provider(db: &Database, app_type: &str, id: &str) {
+        let provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"env": {"BASE_URL": "https://example.com"}}),
+            None,
+        );
+        db.save_provider(app_type, &provider)
+            .expect("save failover provider");
+        db.add_to_failover_queue(app_type, &provider.id)
+            .expect("queue failover provider");
+    }
 
     struct ManagedRuntimeEnvGuard {
         old_kind: Option<OsString>,
@@ -2115,6 +2337,228 @@ mod tests {
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_auto_failover_for_app_switches_to_queue_head() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let mut provider_a = Provider::with_id(
+            "provider-a".to_string(),
+            "Provider A".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://a.example","ANTHROPIC_AUTH_TOKEN":"a"}}),
+            None,
+        );
+        provider_a.sort_index = Some(2);
+        let mut provider_b = Provider::with_id(
+            "provider-b".to_string(),
+            "Provider B".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://b.example","ANTHROPIC_AUTH_TOKEN":"b"}}),
+            None,
+        );
+        provider_b.sort_index = Some(1);
+        db.save_provider("claude", &provider_a)
+            .expect("save provider a");
+        db.save_provider("claude", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("claude", &provider_a.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&provider_a.id))
+            .expect("set settings current provider");
+        db.add_to_failover_queue("claude", &provider_b.id)
+            .expect("queue provider b");
+        db.add_to_failover_queue("claude", &provider_a.id)
+            .expect("queue provider a");
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .update_config(&runtime_config)
+            .await
+            .expect("persist runtime config");
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+
+        service
+            .enable_auto_failover_for_app("claude")
+            .await
+            .expect("enable auto failover");
+
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(config.auto_failover_enabled);
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("load database current provider")
+                .as_deref(),
+            Some("provider-b")
+        );
+        assert_eq!(
+            crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
+                .expect("load effective current provider")
+                .as_deref(),
+            Some("provider-b")
+        );
+
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_auto_failover_for_app_rejects_when_proxy_is_not_routed() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://a.example","ANTHROPIC_AUTH_TOKEN":"a"}}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+
+        let error = service
+            .enable_auto_failover_for_app("claude")
+            .await
+            .expect_err("failover should require active proxy routing");
+
+        assert!(
+            error.contains("local proxy") || error.contains("proxy takeover"),
+            "{error}"
+        );
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(!config.auto_failover_enabled);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_takeover_for_app_clears_auto_failover_without_stopping_other_takeovers() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_proxy_flags_sync("claude", true, true)
+            .expect("seed claude takeover and failover");
+        db.set_proxy_flags_sync("codex", true, false)
+            .expect("seed codex takeover");
+
+        service
+            .disable_takeover_for_app_unlocked(&AppType::Claude, true)
+            .await
+            .expect("disable claude takeover");
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disabling_global_proxy_clears_auto_failover_and_reports_count() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        save_queue_provider(&db, "claude", "claude-p1");
+        save_queue_provider(&db, "codex", "codex-p1");
+        db.set_proxy_flags_sync("claude", true, true)
+            .expect("seed claude takeover and failover");
+        db.set_proxy_flags_sync("codex", true, true)
+            .expect("seed codex takeover and failover");
+
+        let update = service
+            .set_global_enabled(false)
+            .await
+            .expect("disable global proxy");
+
+        assert!(!update.config.proxy_enabled);
+        assert_eq!(update.cleared_auto_failover, 2);
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_recovery_clears_orphaned_auto_failover() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_proxy_flags_raw(&db, "claude", false, true);
+
+        service
+            .recover_takeovers_on_startup()
+            .await
+            .expect("recover takeovers");
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_proxy_and_auto_failover_uses_queue_head_without_existing_current_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .update_config(&runtime_config)
+            .await
+            .expect("persist runtime config");
+
+        service
+            .enable_proxy_and_auto_failover_for_app("claude")
+            .await
+            .expect("enable proxy and auto failover");
+
+        let global = db
+            .get_global_proxy_config()
+            .await
+            .expect("load global proxy config");
+        let app_config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(global.proxy_enabled);
+        assert!(app_config.enabled);
+        assert!(app_config.auto_failover_enabled);
+        assert_eq!(
+            crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
+                .expect("load effective current provider")
+                .as_deref(),
+            Some("queue-head")
+        );
+
+        service.stop().await.expect("stop proxy runtime");
     }
 
     #[tokio::test]
@@ -2227,14 +2671,11 @@ mod tests {
             .expect("save claude provider");
         db.set_current_provider("claude", &provider.id)
             .expect("set current claude provider");
-        let mut app_proxy = db
+        let app_proxy = db
             .get_proxy_config_for_app("claude")
             .await
             .expect("load claude proxy config");
-        app_proxy.auto_failover_enabled = true;
-        db.update_proxy_config_for_app(app_proxy)
-            .await
-            .expect("enable auto failover");
+        seed_proxy_flags_raw(&db, &app_proxy.app_type, app_proxy.enabled, true);
 
         let error = service
             .set_takeover_for_app("claude", true)
@@ -2295,14 +2736,11 @@ mod tests {
             .expect("save claude provider");
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue claude provider");
-        let mut app_proxy = db
+        let app_proxy = db
             .get_proxy_config_for_app("claude")
             .await
             .expect("load claude proxy config");
-        app_proxy.auto_failover_enabled = true;
-        db.update_proxy_config_for_app(app_proxy)
-            .await
-            .expect("enable auto failover");
+        seed_proxy_flags_raw(&db, &app_proxy.app_type, app_proxy.enabled, true);
         let mut runtime_config = service.get_config().await.expect("get proxy config");
         runtime_config.listen_port = 0;
         service
@@ -2739,7 +3177,8 @@ base_url = "https://api.openai.com/v1"
     #[serial]
     async fn foreground_runtime_start_and_stop_syncs_global_proxy_switch() {
         let db = Arc::new(Database::memory().expect("create database"));
-        let service = ProxyService::new(db);
+        seed_proxy_flags_raw(&db, "claude", false, true);
+        let service = ProxyService::new(db.clone());
 
         assert!(
             !service
@@ -2775,6 +3214,11 @@ base_url = "https://api.openai.com/v1"
                 .expect("read global proxy config after stop")
                 .proxy_enabled,
             "stopping the foreground proxy runtime should disable the persisted global proxy switch"
+        );
+        assert_eq!(
+            db.get_proxy_flags_sync("claude"),
+            (false, false),
+            "stopping the proxy runtime should also clear app auto failover"
         );
     }
 
