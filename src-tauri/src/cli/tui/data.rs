@@ -13,6 +13,7 @@ use crate::openclaw_config::{
 use crate::prompt::Prompt;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
+use crate::provider::UsageResult;
 use crate::services::config::BackupInfo;
 use crate::services::SubscriptionQuota;
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
@@ -35,6 +36,7 @@ pub struct ProviderRow {
 pub(crate) enum QuotaTargetKind {
     SubscriptionTool { tool: String },
     CodexOAuth { account_id: Option<String> },
+    UsageScript,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,9 +54,16 @@ impl QuotaTarget {
             QuotaTargetKind::CodexOAuth { account_id } => {
                 format!("codex_oauth:{}", account_id.as_deref().unwrap_or("default"))
             }
+            QuotaTargetKind::UsageScript => "usage_script".to_string(),
         };
         format!("{}:{}:{kind}", self.app_type.as_str(), self.provider_id)
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProviderUsageQuota {
+    Subscription(SubscriptionQuota),
+    Script(UsageResult),
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +71,9 @@ pub(crate) struct ProviderQuotaState {
     pub(crate) target: QuotaTarget,
     pub(crate) loading: bool,
     pub(crate) manual: bool,
-    pub(crate) quota: Option<SubscriptionQuota>,
+    pub(crate) quota: Option<ProviderUsageQuota>,
     pub(crate) last_error: Option<String>,
+    pub(crate) updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,13 +99,14 @@ impl QuotaSnapshot {
                         manual,
                         quota: None,
                         last_error: None,
+                        updated_at: None,
                     },
                 );
             }
         }
     }
 
-    pub(crate) fn finish(&mut self, target: QuotaTarget, quota: SubscriptionQuota) {
+    pub(crate) fn finish(&mut self, target: QuotaTarget, quota: ProviderUsageQuota) {
         self.by_provider.insert(
             target.provider_id.clone(),
             ProviderQuotaState {
@@ -104,6 +115,7 @@ impl QuotaSnapshot {
                 manual: false,
                 quota: Some(quota),
                 last_error: None,
+                updated_at: Some(chrono::Utc::now().timestamp_millis()),
             },
         );
     }
@@ -115,6 +127,9 @@ impl QuotaSnapshot {
                 state.loading = false;
                 state.manual = false;
                 state.last_error = Some(error);
+                if state.quota.is_none() {
+                    state.updated_at = Some(chrono::Utc::now().timestamp_millis());
+                }
             }
             _ => {
                 self.by_provider.insert(
@@ -125,6 +140,7 @@ impl QuotaSnapshot {
                         manual: false,
                         quota: None,
                         last_error: Some(error),
+                        updated_at: Some(chrono::Utc::now().timestamp_millis()),
                     },
                 );
             }
@@ -260,7 +276,7 @@ impl ProxySnapshot {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UiData {
     pub providers: ProvidersSnapshot,
     pub mcp: McpSnapshot,
@@ -269,6 +285,20 @@ pub struct UiData {
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
     pub(crate) quota: QuotaSnapshot,
+}
+
+impl Default for UiData {
+    fn default() -> Self {
+        Self {
+            providers: ProvidersSnapshot::default(),
+            mcp: McpSnapshot::default(),
+            prompts: PromptsSnapshot::default(),
+            config: ConfigSnapshot::default(),
+            skills: SkillsSnapshot::default(),
+            proxy: ProxySnapshot::default(),
+            quota: QuotaSnapshot::default(),
+        }
+    }
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -331,6 +361,21 @@ pub(crate) fn quota_target_for_provider(
     app_type: &AppType,
     row: &ProviderRow,
 ) -> Option<QuotaTarget> {
+    if row
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.usage_script.as_ref())
+        .is_some_and(|script| script.enabled)
+    {
+        return Some(QuotaTarget {
+            app_type: app_type.clone(),
+            provider_id: row.id.clone(),
+            provider_name: provider_display_name(app_type, row),
+            kind: QuotaTargetKind::UsageScript,
+        });
+    }
+
     if is_codex_oauth_provider(row) {
         return Some(QuotaTarget {
             app_type: app_type.clone(),
@@ -784,6 +829,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         let common_snippet = common_snippets.get(app_type).cloned().unwrap_or_default();
         (common_snippet, common_snippets)
     };
+    let settings = crate::settings::get_settings();
     let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
     let openclaw_workspace = load_openclaw_workspace_snapshot(app_type)?;
 
@@ -793,7 +839,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         backups,
         common_snippet,
         common_snippets,
-        webdav_sync: crate::settings::get_webdav_sync_settings(),
+        webdav_sync: settings.webdav_sync,
         openclaw_config_path: openclaw_snapshot
             .as_ref()
             .map(|snapshot| snapshot.config_path.clone()),

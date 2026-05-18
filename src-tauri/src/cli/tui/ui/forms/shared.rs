@@ -1,4 +1,5 @@
 use super::super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
     if active {
@@ -40,6 +41,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::CommonSnippet
+                        | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels,
                     ) => texts::tui_key_open(),
                     Some(
@@ -64,6 +66,58 @@ pub(crate) fn add_form_key_items(
             ]);
         }
         FormFocus::Content => {}
+    }
+
+    keys
+}
+
+pub(crate) fn usage_query_form_key_items(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<super::form::UsageQueryField>,
+    extractor_available: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+    ];
+    if extractor_available {
+        keys.insert(0, ("Tab", texts::tui_key_focus()));
+    }
+
+    match focus {
+        FormFocus::Fields => {
+            keys.push(("↑↓", texts::tui_key_select()));
+            if editing {
+                keys.extend([
+                    ("←→", texts::tui_key_move()),
+                    ("Enter", texts::tui_key_exit_edit()),
+                ]);
+            } else {
+                let enter_action = match selected_field {
+                    Some(
+                        super::form::UsageQueryField::Enabled
+                        | super::form::UsageQueryField::Template
+                        | super::form::UsageQueryField::CodingPlanProvider,
+                    ) => texts::tui_key_toggle(),
+                    Some(super::form::UsageQueryField::Script) => texts::tui_key_open(),
+                    Some(_) => texts::tui_key_edit_mode(),
+                    None => texts::tui_key_edit_mode(),
+                };
+                keys.push(("Enter", enter_action));
+            }
+        }
+        FormFocus::JsonPreview => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_open()));
+            }
+        }
+        FormFocus::Content => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_view()));
+            }
+        }
+        FormFocus::Templates => {}
     }
 
     keys
@@ -148,6 +202,26 @@ pub(crate) fn render_form_json_preview(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    render_form_json_preview_with_highlights(
+        frame,
+        json_text,
+        scroll,
+        active,
+        area,
+        theme,
+        &BTreeSet::new(),
+    );
+}
+
+pub(crate) fn render_form_json_preview_with_highlights(
+    frame: &mut Frame<'_>,
+    json_text: &str,
+    scroll: usize,
+    active: bool,
+    area: Rect,
+    theme: &super::theme::Theme,
+    highlighted_lines: &BTreeSet<usize>,
+) {
     let json_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -156,9 +230,17 @@ pub(crate) fn render_form_json_preview(
     frame.render_widget(json_block.clone(), area);
     let json_inner = json_block.inner(area);
 
+    let highlight_style = Style::default().bg(theme.surface);
     let lines = json_text
         .lines()
-        .map(|s| Line::raw(s.to_string()))
+        .enumerate()
+        .map(|(idx, s)| {
+            if highlighted_lines.contains(&idx) {
+                Line::from(Span::styled(s.to_string(), highlight_style))
+            } else {
+                Line::raw(s.to_string())
+            }
+        })
         .collect::<Vec<_>>();
 
     let height = json_inner.height as usize;

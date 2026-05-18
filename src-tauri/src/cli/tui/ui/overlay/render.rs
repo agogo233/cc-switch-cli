@@ -59,16 +59,6 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
-        Overlay::CommonSnippetView { view, .. } => {
-            super::basic::render_common_snippet_view_overlay(
-                frame,
-                content_area,
-                theme,
-                &view.title,
-                &view.lines,
-                view.scroll,
-            )
-        }
         Overlay::ClaudeModelPicker { selected, editing } => {
             super::pickers::render_claude_model_picker_overlay(
                 frame,
@@ -81,6 +71,15 @@ pub(crate) fn render_overlay(
         }
         Overlay::ClaudeApiFormatPicker { selected } => {
             super::pickers::render_claude_api_format_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
+        Overlay::UsageQueryTemplatePicker { selected } => {
+            super::pickers::render_usage_query_template_picker_overlay(
                 frame,
                 app,
                 content_area,

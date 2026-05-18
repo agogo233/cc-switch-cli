@@ -1645,6 +1645,33 @@ fn provider_add_form_apply_provider_json_updates_fields_and_preserves_include_to
 }
 
 #[test]
+fn provider_add_form_defaults_common_config_from_effective_snippet_only() {
+    let no_snippet = ProviderAddFormState::new(AppType::Claude);
+    assert!(
+        !no_snippet.include_common_config,
+        "new provider should not attach common config when no usable snippet exists"
+    );
+
+    let comment_only_codex = ProviderAddFormState::new_with_common_snippet(
+        AppType::Codex,
+        "# comments do not create an effective snippet\n",
+    );
+    assert!(
+        !comment_only_codex.include_common_config,
+        "comment-only Codex snippets should not default-enable common config"
+    );
+
+    let with_snippet = ProviderAddFormState::new_with_common_snippet(
+        AppType::Claude,
+        r#"{"permissions":{"allow":["Bash"]}}"#,
+    );
+    assert!(
+        with_snippet.include_common_config,
+        "new provider should attach common config when a usable snippet exists"
+    );
+}
+
+#[test]
 fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     let provider = Provider::with_id(
         "legacy-provider".to_string(),
@@ -1681,7 +1708,40 @@ fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     )
     .expect("toggle should succeed");
     let toggled = form.to_provider_json_value();
-    assert_eq!(toggled["meta"]["commonConfigEnabled"], false);
+    assert_eq!(toggled["meta"]["commonConfigEnabled"], true);
+}
+
+#[test]
+fn provider_edit_form_missing_meta_inferrs_common_config_from_subset() {
+    let provider = Provider::with_id(
+        "legacy-provider".to_string(),
+        "Legacy Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example",
+                "CC_SWITCH_SHARED": "1"
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#,
+    );
+
+    assert!(
+        form.include_common_config,
+        "missing-meta edit should infer common config usage when provider settings contain the snippet"
+    );
+    let raw = form.to_provider_json_value();
+    assert!(
+        raw.get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "inferred missing-meta usage should not force explicit meta until the user toggles"
+    );
 }
 
 #[test]
@@ -1974,6 +2034,10 @@ fn provider_add_form_opencode_includes_dedicated_fields() {
     assert!(
         fields.len() > 6,
         "OpenCode should expose dedicated provider/model fields instead of only common metadata"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonSnippet),
+        "OpenCode should not expose common config controls; upstream common config is limited to Claude/Codex/Gemini"
     );
 }
 
@@ -2796,4 +2860,199 @@ fn provider_edit_form_roundtrip_preserves_upstream_meta_auth_and_type_fields() {
         meta.get("githubAccountId").and_then(|value| value.as_str()),
         Some("gh-123")
     );
+}
+
+#[test]
+fn provider_add_form_does_not_write_usage_script_until_touched() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.name.set("Provider One");
+
+    form.open_usage_query_page();
+    let provider = form.to_provider_json_value();
+
+    assert!(
+        provider
+            .get("meta")
+            .and_then(|meta| meta.get("usage_script"))
+            .is_none(),
+        "default Usage Query state should not create provider meta"
+    );
+}
+
+#[test]
+fn provider_add_form_usage_query_defaults_match_upstream() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+
+    assert!(!form.usage_query_enabled);
+    assert_eq!(form.usage_query_template, UsageQueryTemplate::General);
+    assert_eq!(form.usage_query_timeout.value, "10");
+    assert_eq!(form.usage_query_auto_interval.value, "5");
+    assert_eq!(
+        form.usage_query_code,
+        ProviderAddFormState::USAGE_QUERY_GENERAL_PRESET
+    );
+
+    form.claude_base_url.set("https://api.deepseek.com");
+    form.open_usage_query_page();
+    assert!(!form.usage_query_enabled);
+    assert_eq!(form.usage_query_template, UsageQueryTemplate::Balance);
+    assert!(form.usage_query_code.is_empty());
+}
+
+#[test]
+fn provider_add_form_usage_query_balance_default_uses_app_specific_base_url() {
+    let mut codex = ProviderAddFormState::new(AppType::Codex);
+    codex.codex_base_url.set("https://openrouter.ai/api/v1");
+    codex.open_usage_query_page();
+    assert_eq!(codex.usage_query_template, UsageQueryTemplate::Balance);
+
+    let mut openclaw = ProviderAddFormState::new(AppType::OpenClaw);
+    openclaw
+        .opencode_base_url
+        .set("https://api.novita.ai/v3/openai");
+    openclaw.open_usage_query_page();
+    assert_eq!(openclaw.usage_query_template, UsageQueryTemplate::Balance);
+}
+
+#[test]
+fn provider_add_form_writes_usage_script_after_enable_toggle() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.name.set("Provider One");
+    form.toggle_usage_query_enabled();
+
+    let provider = form.to_provider_json_value();
+    let script = &provider["meta"]["usage_script"];
+
+    assert_eq!(script["enabled"], true);
+    assert_eq!(script["language"], "javascript");
+    assert_eq!(script["templateType"], "general");
+    assert_eq!(script["timeout"], 10);
+    assert_eq!(script["autoQueryInterval"], 5);
+}
+
+#[test]
+fn provider_add_form_usage_query_template_fields_match_upstream_visibility() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+
+    assert_eq!(form.usage_query_fields(), vec![UsageQueryField::Enabled]);
+
+    form.toggle_usage_query_enabled();
+    form.set_usage_query_template(UsageQueryTemplate::Custom);
+    assert_eq!(
+        form.usage_query_fields(),
+        vec![
+            UsageQueryField::Enabled,
+            UsageQueryField::Template,
+            UsageQueryField::Timeout,
+            UsageQueryField::AutoInterval,
+            UsageQueryField::Script,
+        ]
+    );
+
+    form.set_usage_query_template(UsageQueryTemplate::Balance);
+    assert_eq!(
+        form.usage_query_fields(),
+        vec![
+            UsageQueryField::Enabled,
+            UsageQueryField::Template,
+            UsageQueryField::Timeout,
+            UsageQueryField::AutoInterval,
+            UsageQueryField::Script,
+        ]
+    );
+
+    assert_eq!(
+        form.available_usage_query_templates(),
+        vec![
+            UsageQueryTemplate::Custom,
+            UsageQueryTemplate::General,
+            UsageQueryTemplate::NewApi,
+            UsageQueryTemplate::Balance,
+        ]
+    );
+    assert!(!form
+        .available_usage_query_templates()
+        .contains(&UsageQueryTemplate::TokenPlan));
+}
+
+#[test]
+fn provider_add_form_usage_query_table_fields_hide_script_row() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.toggle_usage_query_enabled();
+    form.set_usage_query_template(UsageQueryTemplate::General);
+
+    assert!(form.usage_query_fields().contains(&UsageQueryField::Script));
+    assert!(!form
+        .usage_query_table_fields()
+        .contains(&UsageQueryField::Script));
+}
+
+#[test]
+fn provider_add_form_usage_query_custom_template_includes_dynamic_variable_comments() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.claude_base_url.set("https://nowcoding.ai/v1");
+    form.claude_api_key
+        .set("sk-S56IHzWqgbyW6Yfp9F5qc2A0RpdYFmqCfop3FkPFFKCrzmJq");
+
+    form.set_usage_query_template(UsageQueryTemplate::Custom);
+
+    assert!(form.usage_query_code.starts_with(
+        "// 支持的变量\n\
+// {{baseUrl}}\n\
+// =\n\
+// https://nowcoding.ai/v1\n\
+// {{apiKey}}\n\
+// =\n\
+// sk-S56IHzWqgbyW6Yfp9F5qc2A0RpdYFmqCfop3FkPFFKCrzmJq\n\n"
+    ));
+    assert!(form
+        .usage_query_code
+        .contains(ProviderAddFormState::USAGE_QUERY_CUSTOM_PRESET));
+}
+
+#[test]
+fn provider_add_form_usage_query_custom_variable_comments_refresh_without_replacing_body() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.codex_base_url.set("https://old.example/v1");
+    form.codex_api_key.set("sk-old");
+    form.set_usage_query_template(UsageQueryTemplate::Custom);
+    form.usage_query_code.push_str("\n// custom user edit");
+
+    form.codex_base_url.set("https://new.example/v1");
+    form.codex_api_key.set("sk-new");
+    form.refresh_usage_query_custom_variable_comment();
+
+    assert!(form.usage_query_code.starts_with(
+        "// 支持的变量\n\
+// {{baseUrl}}\n\
+// =\n\
+// https://new.example/v1\n\
+// {{apiKey}}\n\
+// =\n\
+// sk-new\n\n"
+    ));
+    assert!(form.usage_query_code.ends_with("// custom user edit"));
+}
+
+#[test]
+fn provider_add_form_usage_query_numeric_fields_match_upstream_normalization() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.name.set("Provider One");
+    form.toggle_usage_query_enabled();
+    form.usage_query_timeout.set("12.9");
+    form.usage_query_auto_interval.set("1440.8");
+
+    let provider = form.to_provider_json_value();
+    let script = &provider["meta"]["usage_script"];
+
+    assert_eq!(script["timeout"], 12);
+    assert_eq!(script["autoQueryInterval"], 1440);
+
+    form.usage_query_timeout.set("-1");
+    form.usage_query_auto_interval.set("");
+    let provider = form.to_provider_json_value();
+    let script = &provider["meta"]["usage_script"];
+
+    assert_eq!(script["timeout"], 10);
+    assert_eq!(script["autoQueryInterval"], 0);
 }

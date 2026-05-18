@@ -493,6 +493,10 @@ pub fn tui_editor_json_field_title() -> &'static str {
     "JSON"
 }
 
+pub fn tui_editor_toml_field_title() -> &'static str {
+    "TOML"
+}
+
 pub fn tui_editor_hint_view() -> &'static str {
     if is_chinese() {
         "Enter 编辑  ↑↓ 滚动  Ctrl+S 保存  Esc 返回"
@@ -1126,6 +1130,16 @@ pub fn tui_quota_just_now() -> &'static str {
         "刚刚"
     } else {
         "just now"
+    }
+}
+
+pub fn tui_quota_seconds_ago(count: i64) -> String {
+    if is_chinese() {
+        format!("{count} 秒前")
+    } else if count == 1 {
+        "1 second ago".to_string()
+    } else {
+        format!("{count} seconds ago")
     }
 }
 
