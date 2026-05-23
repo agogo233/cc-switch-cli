@@ -173,6 +173,14 @@ pub enum Action {
     OpenClawOpenDirectory {
         subdir: String,
     },
+    HermesMemoryOpen {
+        kind: crate::hermes_config::MemoryKind,
+    },
+    HermesMemorySetEnabled {
+        kind: crate::hermes_config::MemoryKind,
+        enabled: bool,
+    },
+    HermesOpenMemoryDirectory,
     ConfigReset,
 
     EditorSubmit {
@@ -212,10 +220,6 @@ pub enum Action {
     },
     SetOpenClawConfigDir {
         path: Option<String>,
-    },
-    SetProxyTakeover {
-        app_type: AppType,
-        enabled: bool,
     },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
@@ -505,6 +509,7 @@ pub struct App {
     pub config_idx: usize,
     pub workspace_idx: usize,
     pub daily_memory_idx: usize,
+    pub hermes_memory_idx: usize,
     pub openclaw_tools_form: Option<OpenClawToolsFormState>,
     pub openclaw_agents_form: Option<OpenClawAgentsFormState>,
     pub openclaw_daily_memory_search_query: String,

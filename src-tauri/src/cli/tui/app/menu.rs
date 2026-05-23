@@ -56,6 +56,7 @@ impl App {
             config_idx: 0,
             workspace_idx: 0,
             daily_memory_idx: 0,
+            hermes_memory_idx: 0,
             openclaw_tools_form: None,
             openclaw_agents_form: None,
             openclaw_daily_memory_search_query: String::new(),
@@ -85,6 +86,7 @@ impl App {
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
+            Route::HermesMemory => NavItem::HermesMemory,
             Route::Config => NavItem::Config,
             Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
                 if matches!(app_type, AppType::OpenClaw) {
@@ -294,17 +296,38 @@ impl App {
         self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
-    fn structured_form_is_editing_text_field(&self) -> bool {
-        match self.route {
-            Route::ConfigOpenClawTools => false,
-            Route::ConfigOpenClawAgents => false,
-            _ => false,
+    fn overlay_text_input_is_active(&self) -> bool {
+        self.overlay.is_editing()
+    }
+
+    fn form_text_input_is_active(&self) -> bool {
+        self.form.as_ref().is_some_and(|f| f.is_editing())
+    }
+
+    fn text_input_is_active(&self) -> bool {
+        self.overlay_text_input_is_active()
+            || self.editor.is_some()
+            || self.filter.active
+            || self.form_text_input_is_active()
+    }
+
+    fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
+        if self.text_input_is_active() {
+            return key;
+        }
+
+        match key.code {
+            KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
+            KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
+            KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
+            KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
+            _ => key,
         }
     }
 
     fn should_route_printable_content_input_before_globals(&self, key: &KeyEvent) -> bool {
         matches!(self.focus, Focus::Content)
-            && self.structured_form_is_editing_text_field()
+            && self.text_input_is_active()
             && matches!(key.code, KeyCode::Char(c) if !c.is_control())
             && !key.modifiers.contains(KeyModifiers::CONTROL)
     }
@@ -319,6 +342,17 @@ impl App {
             self.should_quit = true;
             return Action::Quit;
         }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char(','))
+            && !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+        {
+            return self.push_route_and_switch(Route::Settings);
+        }
+
+        let key = self.normalize_vim_navigation_key(key);
 
         if self.overlay.is_active() {
             return self.on_overlay_key(key, data);
@@ -336,21 +370,6 @@ impl App {
             return self.on_filter_key(key);
         }
 
-        // Vim-style hjkl navigation
-        let key = if matches!(self.focus, Focus::Content)
-            && self.structured_form_is_editing_text_field()
-        {
-            key
-        } else {
-            match key.code {
-                KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
-                KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
-                KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
-                KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
-                _ => key,
-            }
-        };
-
         if self.should_route_printable_content_input_before_globals(&key) {
             return self.on_content_key(key, data);
         }
@@ -362,6 +381,10 @@ impl App {
                 return Action::None;
             }
             KeyCode::Char('/') => {
+                self.filter.active = true;
+                return Action::None;
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.active = true;
                 return Action::None;
             }
@@ -488,6 +511,7 @@ impl App {
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
+            Route::HermesMemory => self.on_hermes_memory_key(key, data),
             Route::Config => self.on_config_key(key, data),
             Route::ConfigOpenClawWorkspace => self.on_config_openclaw_workspace_key(key, data),
             Route::ConfigOpenClawDailyMemory => self.on_config_openclaw_daily_memory_key(key, data),
@@ -579,6 +603,13 @@ impl App {
             self.daily_memory_idx = 0;
         } else {
             self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
+        }
+
+        let hermes_memory_len = crate::cli::tui::app::HERMES_MEMORY_ROW_COUNT;
+        if hermes_memory_len == 0 {
+            self.hermes_memory_idx = 0;
+        } else {
+            self.hermes_memory_idx = self.hermes_memory_idx.min(hermes_memory_len - 1);
         }
 
         let config_webdav_len = visible_webdav_config_items(&self.filter).len();

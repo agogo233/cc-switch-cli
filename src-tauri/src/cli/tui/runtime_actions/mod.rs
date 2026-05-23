@@ -46,12 +46,27 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SettingsProxy => route.clone(),
             _ => super::route::Route::Main,
         },
+        AppType::Hermes => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Mcp
+            | super::route::Route::HermesMemory
+            | super::route::Route::Skills
+            | super::route::Route::SkillsDiscover
+            | super::route::Route::SkillsRepos
+            | super::route::Route::SkillDetail { .. }
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy => route.clone(),
+            _ => super::route::Route::Main,
+        },
         _ => match route {
             super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
             | super::route::Route::ConfigOpenClawEnv
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+            super::route::Route::HermesMemory => super::route::Route::Main,
             _ => route.clone(),
         },
     }
@@ -305,6 +320,11 @@ pub(crate) fn handle_action(
         Action::OpenClawOpenDirectory { subdir } => {
             config::open_openclaw_directory(&mut ctx, subdir)
         }
+        Action::HermesMemoryOpen { kind } => config::open_hermes_memory(&mut ctx, kind),
+        Action::HermesMemorySetEnabled { kind, enabled } => {
+            config::set_hermes_memory_enabled(&mut ctx, kind, enabled)
+        }
+        Action::HermesOpenMemoryDirectory => config::open_hermes_memory_directory(&mut ctx),
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
             crate::settings::set_skip_claude_onboarding(enabled)?;
@@ -340,9 +360,6 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetProxyTakeover { app_type, enabled } => {
-            settings::set_proxy_takeover(&mut ctx, app_type, enabled)
-        }
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
@@ -595,6 +612,7 @@ mod tests {
             codex: true,
             gemini: true,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -604,6 +622,7 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -663,6 +682,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -684,6 +704,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },
@@ -711,6 +732,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -721,6 +743,7 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::Claude));
@@ -757,6 +780,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -775,6 +799,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },

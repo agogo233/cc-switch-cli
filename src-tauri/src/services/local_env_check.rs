@@ -8,6 +8,56 @@ pub enum LocalTool {
     Codex,
     Gemini,
     OpenCode,
+    Hermes,
+    OpenClaw,
+}
+
+impl LocalTool {
+    pub const ALL: [LocalTool; 6] = [
+        LocalTool::Claude,
+        LocalTool::Codex,
+        LocalTool::Gemini,
+        LocalTool::OpenCode,
+        LocalTool::Hermes,
+        LocalTool::OpenClaw,
+    ];
+
+    pub fn all() -> &'static [LocalTool] {
+        &Self::ALL
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            LocalTool::Claude => "Claude",
+            LocalTool::Codex => "Codex",
+            LocalTool::Gemini => "Gemini",
+            LocalTool::OpenCode => "OpenCode",
+            LocalTool::Hermes => "Hermes",
+            LocalTool::OpenClaw => "OpenClaw",
+        }
+    }
+
+    fn binary_name(self) -> &'static str {
+        match self {
+            LocalTool::Claude => "claude",
+            LocalTool::Codex => "codex",
+            LocalTool::Gemini => "gemini",
+            LocalTool::OpenCode => "opencode",
+            LocalTool::Hermes => "hermes",
+            LocalTool::OpenClaw => "openclaw",
+        }
+    }
+
+    fn version_args(self) -> &'static [&'static str] {
+        match self {
+            LocalTool::Claude => &["--version", "version"],
+            LocalTool::Codex => &["--version"],
+            LocalTool::Gemini => &["--version", "-v"],
+            LocalTool::OpenCode => &["--version", "version"],
+            LocalTool::Hermes => &["--version", "version"],
+            LocalTool::OpenClaw => &["--version", "version"],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -25,29 +75,12 @@ pub struct ToolCheckResult {
 }
 
 pub fn check_local_environment() -> Vec<ToolCheckResult> {
-    const SPECS: &[(LocalTool, &str, &str, &[&str])] = &[
-        (
-            LocalTool::Claude,
-            "claude",
-            "Claude",
-            &["--version", "version"],
-        ),
-        (LocalTool::Codex, "codex", "Codex", &["--version"]),
-        (LocalTool::Gemini, "gemini", "Gemini", &["--version", "-v"]),
-        (
-            LocalTool::OpenCode,
-            "opencode",
-            "OpenCode",
-            &["--version", "version"],
-        ),
-    ];
-
-    SPECS
+    LocalTool::all()
         .iter()
-        .map(|(tool, bin, display_name, args)| ToolCheckResult {
+        .map(|tool| ToolCheckResult {
             tool: *tool,
-            display_name,
-            status: check_tool_version(bin, args),
+            display_name: tool.display_name(),
+            status: check_tool_version(tool.binary_name(), tool.version_args()),
         })
         .collect()
 }
@@ -140,7 +173,22 @@ pub(crate) fn parse_version(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::{parse_version, LocalTool};
+
+    #[test]
+    fn local_tool_specs_include_all_supported_clis() {
+        let display_names = LocalTool::all()
+            .iter()
+            .map(|tool| tool.display_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            display_names,
+            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw"]
+        );
+        assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
+        assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");
+    }
 
     #[test]
     fn parse_version_extracts_semver() {
