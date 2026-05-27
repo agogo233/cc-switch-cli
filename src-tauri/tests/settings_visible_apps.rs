@@ -213,7 +213,7 @@ use app_config::AppType;
 use error::AppError;
 use settings_impl::{
     default_visible_apps, get_settings, get_visible_apps, next_visible_app, reload_test_settings,
-    set_visible_apps, update_settings, AppSettings, VisibleApps,
+    set_visible_apps, update_settings, AppSettings, VisibleApps, VisibleAppsMode,
 };
 
 struct HomeGuard {
@@ -293,8 +293,8 @@ fn default_visible_apps_hide_gemini() {
             AppType::Claude,
             AppType::Codex,
             AppType::OpenCode,
-            AppType::OpenClaw,
             AppType::Hermes,
+            AppType::OpenClaw,
         ]
     );
     assert!(!visible.is_enabled_for(&AppType::Gemini));
@@ -423,6 +423,44 @@ fn missing_visible_apps_field_uses_defaults_without_losing_other_fields() {
     let settings = get_settings();
     assert!(!settings.show_in_tray);
     assert_eq!(settings.language.as_deref(), Some("zh"));
+}
+
+#[test]
+#[serial]
+fn new_settings_default_to_auto_visible_apps_mode_with_pending_prompt() {
+    let _home = HomeGuard::new();
+
+    let settings = get_settings();
+    assert_eq!(settings.visible_apps_settings.mode, VisibleAppsMode::Auto);
+    assert!(!settings.visible_apps_settings.auto_prompt_decided);
+}
+
+#[test]
+#[serial]
+fn existing_settings_without_visible_apps_settings_migrate_to_manual_mode() {
+    let home = HomeGuard::new();
+    write_settings_json(
+        &home,
+        json!({
+            "visibleApps": {
+                "claude": true,
+                "codex": false,
+                "gemini": true,
+                "opencode": false,
+                "hermes": false,
+                "openclaw": true
+            }
+        }),
+    );
+
+    reload_test_settings();
+
+    let settings = get_settings();
+    assert_eq!(settings.visible_apps_settings.mode, VisibleAppsMode::Manual);
+    assert!(settings.visible_apps_settings.auto_prompt_decided);
+    assert!(settings.visible_apps.claude);
+    assert!(settings.visible_apps.gemini);
+    assert!(settings.visible_apps.openclaw);
 }
 
 #[test]
@@ -560,19 +598,19 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenClaw, 1),
-        Some(AppType::Hermes)
-    );
-    assert_eq!(
-        next_visible_app(&visible, &AppType::Hermes, 1),
         Some(AppType::Claude)
     );
     assert_eq!(
+        next_visible_app(&visible, &AppType::Hermes, 1),
+        Some(AppType::OpenClaw)
+    );
+    assert_eq!(
         next_visible_app(&visible, &AppType::Claude, -1),
-        Some(AppType::Hermes)
+        Some(AppType::OpenClaw)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::Hermes, -1),
-        Some(AppType::OpenClaw)
+        Some(AppType::OpenCode)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenCode, -1),

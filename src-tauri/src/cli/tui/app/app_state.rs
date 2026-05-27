@@ -9,6 +9,23 @@ pub enum Action {
     SetAppType(AppType),
     LocalEnvRefresh,
 
+    SessionsRefresh,
+    SessionMessagesLoad {
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    SessionResume {
+        command: String,
+        cwd: Option<String>,
+    },
+    SessionDelete {
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
+
     SkillsToggle {
         directory: String,
         enabled: bool,
@@ -87,8 +104,25 @@ pub enum Action {
     ProviderModelFetch {
         base_url: String,
         api_key: Option<String>,
+        codex_oauth: bool,
+        codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
+    },
+
+    ManagedAuthRefresh {
+        auth_provider: String,
+    },
+    ManagedAuthStartLogin {
+        auth_provider: String,
+    },
+    ManagedAuthSetDefault {
+        auth_provider: String,
+        account_id: String,
+    },
+    ManagedAuthRemove {
+        auth_provider: String,
+        account_id: String,
     },
 
     McpToggle {
@@ -226,8 +260,18 @@ pub enum Action {
         enabled: bool,
     },
     SetLanguage(Language),
+    SetVisibleAppsMode {
+        mode: crate::settings::VisibleAppsMode,
+    },
     SetVisibleApps {
         apps: crate::settings::VisibleApps,
+    },
+    ConfirmVisibleAppsAutoDetection {
+        use_auto: bool,
+    },
+    SwitchVisibleAppsToManual {
+        apps: crate::settings::VisibleApps,
+        selected: usize,
     },
 
     CheckUpdate,
@@ -379,8 +423,10 @@ impl ConfigItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
     Language,
+    VisibleAppsMode,
     VisibleApps,
     OpenClawConfigDir,
+    ManagedAccounts,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
@@ -388,8 +434,10 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 7] = [
+    pub const ALL: [SettingsItem; 9] = [
+        SettingsItem::ManagedAccounts,
         SettingsItem::Language,
+        SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
@@ -495,6 +543,7 @@ pub struct App {
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,
 
+    pub sessions: SessionsState,
     pub provider_idx: usize,
     pub mcp_idx: usize,
     pub prompt_idx: usize,
@@ -520,4 +569,8 @@ pub struct App {
     pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
+    pub settings_managed_accounts_idx: usize,
+    pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
+    pub managed_auth_loading: bool,
+    pub managed_auth_login: Option<ManagedAuthLoginState>,
 }

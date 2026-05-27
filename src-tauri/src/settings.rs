@@ -59,6 +59,47 @@ pub fn default_visible_apps() -> VisibleApps {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum VisibleAppsMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibleAppsSettings {
+    #[serde(default)]
+    pub mode: VisibleAppsMode,
+    #[serde(default)]
+    pub auto_prompt_decided: bool,
+    #[serde(default)]
+    pub manual_hidden_installed_notices: HashMap<String, bool>,
+    #[serde(default)]
+    pub last_detected_installed: HashMap<String, bool>,
+}
+
+impl Default for VisibleAppsSettings {
+    fn default() -> Self {
+        Self {
+            mode: VisibleAppsMode::Auto,
+            auto_prompt_decided: false,
+            manual_hidden_installed_notices: HashMap::new(),
+            last_detected_installed: HashMap::new(),
+        }
+    }
+}
+
+fn migrated_visible_apps_settings() -> VisibleAppsSettings {
+    VisibleAppsSettings {
+        mode: VisibleAppsMode::Manual,
+        auto_prompt_decided: true,
+        manual_hidden_installed_notices: HashMap::new(),
+        last_detected_installed: HashMap::new(),
+    }
+}
+
 impl Default for VisibleApps {
     fn default() -> Self {
         default_visible_apps()
@@ -340,6 +381,8 @@ pub struct AppSettings {
     pub current_provider_openclaw: Option<String>,
     #[serde(default = "default_visible_apps")]
     pub visible_apps: VisibleApps,
+    #[serde(default = "migrated_visible_apps_settings")]
+    pub visible_apps_settings: VisibleAppsSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// 是否开机自启
@@ -354,6 +397,9 @@ pub struct AppSettings {
     pub webdav_sync: Option<WebDavSyncSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_retain_count: Option<u32>,
+    /// 首选终端应用，用于会话恢复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_terminal: Option<String>,
     /// Claude 自定义端点列表
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints_claude: HashMap<String, CustomEndpoint>,
@@ -392,12 +438,14 @@ impl Default for AppSettings {
             current_provider_hermes: None,
             current_provider_openclaw: None,
             visible_apps: default_visible_apps(),
+            visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
             launch_on_startup: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
             backup_retain_count: None,
+            preferred_terminal: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
         }
@@ -464,6 +512,13 @@ impl AppSettings {
         if let Some(webdav) = self.webdav_sync.as_mut() {
             webdav.normalize();
         }
+
+        self.preferred_terminal = self
+            .preferred_terminal
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
     }
 
     fn normalize_loaded(&mut self) {
@@ -562,6 +617,13 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     let mut guard = settings_store().write().expect("写入设置锁失败");
     *guard = new_settings;
     Ok(())
+}
+
+pub fn get_preferred_terminal() -> Option<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.preferred_terminal.clone())
 }
 
 pub fn ensure_security_auth_selected_type(selected_type: &str) -> Result<(), AppError> {
@@ -672,6 +734,20 @@ pub fn set_visible_apps(visible_apps: VisibleApps) -> Result<(), AppError> {
 
     let mut settings = get_settings();
     settings.visible_apps = visible_apps;
+    update_settings(settings)
+}
+
+pub fn get_visible_apps_settings() -> VisibleAppsSettings {
+    settings_store()
+        .read()
+        .map(|settings| settings.visible_apps_settings.clone())
+        .unwrap_or_default()
+}
+
+pub fn set_visible_apps_mode(mode: VisibleAppsMode) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.visible_apps_settings.mode = mode;
+    settings.visible_apps_settings.auto_prompt_decided = true;
     update_settings(settings)
 }
 

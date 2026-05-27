@@ -1,12 +1,14 @@
 pub mod auth;
 pub mod balance;
 pub mod codex_oauth;
+pub mod codex_oauth_models;
 pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
 pub mod env_manager;
 pub mod local_env_check;
 pub mod mcp;
+pub mod model_fetch;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
@@ -15,6 +17,7 @@ pub mod speedtest;
 pub(crate) mod state_coordination;
 pub mod stream_check;
 pub mod subscription;
+pub mod visible_apps;
 pub mod webdav;
 pub mod webdav_sync;
 
@@ -22,6 +25,7 @@ pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, M
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use mcp::McpService;
+pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;
 pub use provider::ProviderService;
 pub use proxy::ProxyService;

@@ -725,6 +725,18 @@ impl App {
                     };
                     Action::SetLanguage(next)
                 }
+                Some(SettingsItem::VisibleAppsMode) => {
+                    let current = crate::settings::get_visible_apps_settings().mode;
+                    let next = match current {
+                        crate::settings::VisibleAppsMode::Auto => {
+                            crate::settings::VisibleAppsMode::Manual
+                        }
+                        crate::settings::VisibleAppsMode::Manual => {
+                            crate::settings::VisibleAppsMode::Auto
+                        }
+                    };
+                    Action::SetVisibleAppsMode { mode: next }
+                }
                 Some(SettingsItem::VisibleApps) => {
                     self.overlay = Overlay::VisibleAppsPicker {
                         selected: app_type_picker_index(&self.app_type),
@@ -744,6 +756,15 @@ impl App {
                         secret: false,
                     });
                     Action::None
+                }
+                Some(SettingsItem::ManagedAccounts) => {
+                    let action = self.push_route_and_switch(Route::SettingsManagedAccounts);
+                    if self.managed_auth_status.is_none() {
+                        return Action::ManagedAuthRefresh {
+                            auth_provider: "codex_oauth".to_string(),
+                        };
+                    }
+                    action
                 }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
@@ -891,6 +912,56 @@ impl App {
             _ => Action::None,
         }
     }
+
+    pub(crate) fn on_settings_managed_accounts_key(
+        &mut self,
+        key: KeyEvent,
+        _data: &UiData,
+    ) -> Action {
+        match key.code {
+            KeyCode::Up => {
+                self.settings_managed_accounts_idx = 0;
+                Action::None
+            }
+            KeyCode::Down => {
+                self.settings_managed_accounts_idx = 0;
+                Action::None
+            }
+            KeyCode::Enter => self.activate_managed_account_row(),
+            _ => Action::None,
+        }
+    }
+
+    fn activate_managed_account_row(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        let Some(status) = self.managed_auth_status.as_ref() else {
+            return Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            };
+        };
+
+        if let Some(account) = status
+            .accounts
+            .iter()
+            .find(|account| account.is_default)
+            .or_else(|| status.accounts.first())
+        {
+            self.overlay = Overlay::ManagedAccountActionPicker {
+                auth_provider: "codex_oauth".to_string(),
+                account_id: account.id.clone(),
+                selected: 0,
+            };
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
     pub fn open_editor(
         &mut self,
         title: impl Into<String>,

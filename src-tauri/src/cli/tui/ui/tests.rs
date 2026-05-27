@@ -61,6 +61,169 @@ fn provider_form_shows_full_api_key_in_table_value() {
 }
 
 #[test]
+fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+
+    let _lang = use_test_language(Language::English);
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("No local sessions found"), "{all}");
+    assert!(all.contains("local session files"), "{all}");
+    assert!(all.contains("database"), "{all}");
+}
+
+#[test]
+fn tui_sessions_renders_split_detail_and_message_preview() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Refactor proxy routing".to_string()),
+        summary: Some("Tighten worker routing".to_string()),
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("codex resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions
+        .messages
+        .push(crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "Please review this module".to_string(),
+            ts: Some(1_735_689_900_000),
+        });
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("Overview"), "{all}");
+    assert!(all.contains("Time"), "{all}");
+    assert!(all.contains("Work Dir"), "{all}");
+    assert!(all.contains("Title"), "{all}");
+    assert!(all.contains("Resume Command"), "{all}");
+    assert!(all.contains("Refactor proxy routing"), "{all}");
+    assert!(!all.contains("Tighten worker routing"), "{all}");
+    assert!(all.contains("demo-project"), "{all}");
+    assert!(all.contains("codex resume abcdef123456"), "{all}");
+    assert!(all.contains("Please review"), "{all}");
+}
+
+#[test]
+fn tui_sessions_list_time_column_uses_relative_time_before_date() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.time_anchor_ms = 1_735_689_900_000;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Recent session".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_600_000),
+        source_path: Some("/tmp/recent.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "old-session".to_string(),
+        title: Some("Old session".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_084_800_000),
+        last_active_at: Some(1_735_084_800_000),
+        source_path: Some("/tmp/old.jsonl".to_string()),
+        resume_command: Some("claude --resume old-session".to_string()),
+    });
+
+    let content = content_text(
+        &app,
+        &render_with_size(&app, &minimal_data(&app.app_type), 160, 40),
+    );
+    let recent_row = line_with(&content, "Recent session");
+    assert!(recent_row.contains("5 min ago"), "{recent_row}");
+
+    let old_row = line_with(&content, "Old session");
+    let expected = chrono::DateTime::from_timestamp_millis(1_735_084_800_000)
+        .expect("timestamp should be valid")
+        .with_timezone(&chrono::Local);
+    assert!(
+        old_row.contains(&expected.format("%Y/%m/%d").to_string()),
+        "{old_row}"
+    );
+    assert!(
+        !old_row.contains(&expected.format("%Y/%m/%d %H:%M").to_string()),
+        "{old_row}"
+    );
+}
+
+#[test]
+fn tui_sessions_filters_rows_by_current_app() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "claude-session".to_string(),
+        title: Some("Claude visible".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/claude-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/claude.jsonl".to_string()),
+        resume_command: Some("claude --resume claude-session".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "codex-session".to_string(),
+        title: Some("Codex hidden".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/codex-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/codex.jsonl".to_string()),
+        resume_command: Some("codex resume codex-session".to_string()),
+    });
+
+    let claude = all_text(&render(&app, &minimal_data(&app.app_type)));
+    assert!(claude.contains("Claude visible"), "{claude}");
+    assert!(!claude.contains("Codex hidden"), "{claude}");
+
+    app.app_type = AppType::Codex;
+    let codex = all_text(&render(&app, &minimal_data(&app.app_type)));
+    assert!(!codex.contains("Claude visible"), "{codex}");
+    assert!(codex.contains("Codex hidden"), "{codex}");
+}
+
+#[test]
 fn openclaw_tui_form_masks_api_key_in_default_view() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -632,6 +795,33 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
     }
 }
 
+fn managed_auth_status() -> crate::services::ManagedAuthStatus {
+    crate::services::ManagedAuthStatus {
+        provider: "codex_oauth".to_string(),
+        authenticated: true,
+        default_account_id: Some("acc-default".to_string()),
+        migration_error: None,
+        accounts: vec![
+            crate::services::ManagedAuthAccount {
+                id: "acc-default".to_string(),
+                provider: "codex_oauth".to_string(),
+                login: "default@example.com".to_string(),
+                avatar_url: None,
+                authenticated_at: 1,
+                is_default: true,
+            },
+            crate::services::ManagedAuthAccount {
+                id: "acc-alt".to_string(),
+                provider: "codex_oauth".to_string(),
+                login: "alt@example.com".to_string(),
+                avatar_url: None,
+                authenticated_at: 2,
+                is_default: false,
+            },
+        ],
+    }
+}
+
 fn failover_provider_row(
     id: &str,
     name: &str,
@@ -1026,6 +1216,32 @@ fn settings_page_shows_visible_apps_row_value() {
 
 #[test]
 #[serial(home_settings)]
+fn settings_page_shows_visible_apps_mode_row_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
+        .expect("save visible apps mode");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_mode_label()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_mode_manual()),
+        "{all}"
+    );
+}
+
+#[test]
+#[serial(home_settings)]
 fn settings_page_shows_openclaw_config_dir_default_value() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -1073,6 +1289,95 @@ fn settings_page_shows_openclaw_config_dir_override_value() {
 }
 
 #[test]
+fn settings_page_shows_managed_accounts_summary() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.managed_auth_status = Some(managed_auth_status());
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_managed_accounts_title()),
+        "{all}"
+    );
+    assert!(all.contains("default@example.com"), "{all}");
+}
+
+#[test]
+fn settings_managed_accounts_page_renders_chatgpt_left_and_details_right() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsManagedAccounts;
+    app.focus = Focus::Content;
+    app.managed_auth_status = Some(managed_auth_status());
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_managed_accounts_title()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_managed_accounts_provider_column()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_managed_accounts_chatgpt_provider()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_managed_accounts_details_title()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_managed_accounts_authenticated()),
+        "{all}"
+    );
+    assert!(all.contains("default@example.com"), "{all}");
+    assert!(!all.contains("alt@example.com"), "{all}");
+    assert!(all.contains("acc-default"), "{all}");
+    assert!(all.contains(texts::tui_managed_accounts_default()), "{all}");
+    assert!(
+        all.contains(texts::tui_managed_accounts_login_idle()),
+        "{all}"
+    );
+}
+
+#[test]
+fn managed_account_binding_picker_renders_follow_default_and_accounts() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.managed_auth_status = Some(managed_auth_status());
+    app.overlay = Overlay::ManagedAccountPicker {
+        auth_provider: "codex_oauth".to_string(),
+        selected: 0,
+        binding: true,
+        selected_account_id: None,
+    };
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains(texts::tui_label_chatgpt_account()), "{all}");
+    assert!(
+        all.contains(texts::tui_managed_accounts_follow_default()),
+        "{all}"
+    );
+    assert!(all.contains("default@example.com"), "{all}");
+    assert!(all.contains("alt@example.com"), "{all}");
+}
+
+#[test]
 fn zero_selection_warning_toast_renders_after_picker_rejection() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -1102,6 +1407,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
         all.contains(texts::tui_settings_visible_apps_title()),
         "{all}"
     );
+    assert!(all.contains(AppType::Hermes.as_str()), "{all}");
     assert!(all.contains(AppType::OpenClaw.as_str()), "{all}");
     assert!(
         all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
@@ -1133,6 +1439,44 @@ fn visible_apps_picker_uses_space_toggle_key() {
 
     assert!(all.contains("Space=toggle"), "{all}");
     assert!(!all.contains("x=toggle"), "{all}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Auto)
+        .expect("save visible apps mode");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::VisibleAppsPicker {
+        selected: 2,
+        apps: crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            hermes: true,
+            openclaw: true,
+        },
+    };
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains(AppType::Gemini.as_str()), "{all}");
+    assert!(
+        !all.contains(&format!(
+            "{}  {}",
+            AppType::Gemini.as_str(),
+            texts::tui_settings_visible_apps_mode_auto()
+        )),
+        "{all}"
+    );
 }
 
 #[test]
@@ -2056,6 +2400,40 @@ fn home_proxy_dashboard_keeps_current_app_off_semantics_when_another_app_is_acti
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Shared runtime ready"), "{all}");
     assert!(!all.contains("x1.00"), "{all}");
+}
+
+#[test]
+fn home_proxy_dashboard_stays_off_for_current_worker_without_takeover() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.tick = 1;
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.running = true;
+    data.proxy.managed_runtime = true;
+    data.proxy.active_worker_apps =
+        std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
+    data.proxy.claude_takeover = false;
+    data.proxy.codex_takeover = false;
+    data.proxy.listen_address = "127.0.0.1".to_string();
+    data.proxy.listen_port = 15721;
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let header = line_at(&buf, 1);
+    let footer = line_at(&buf, buf.area.height - 1);
+
+    assert!(
+        header.contains(&texts::tui_header_proxy_status(false)),
+        "{header}"
+    );
+    assert!(footer.contains("proxy on"), "{footer}");
+    assert!(!all.contains("Proxy Dashboard"), "{all}");
+    assert!(all.contains("___  ___"), "{all}");
 }
 
 #[test]
@@ -5293,6 +5671,7 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     let expected = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Sessions,
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
@@ -5323,16 +5702,22 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
     let app = App::new(Some(AppType::Claude));
     let all = nav_text(&app, &render(&app, &minimal_data(&app.app_type)));
 
-    for item in [
+    let expected = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Mcp,
         NavItem::Skills,
+        NavItem::Sessions,
         NavItem::Prompts,
         NavItem::Config,
-    ] {
-        assert!(all.contains(&nav_label_text(item)), "{all}");
-    }
+    ]
+    .map(nav_label_text);
+    let positions = expected
+        .iter()
+        .map(|label| all.find(label).expect("generic nav label should render"))
+        .collect::<Vec<_>>();
+
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{all}");
     for item in [
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,

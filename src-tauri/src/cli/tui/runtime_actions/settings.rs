@@ -5,8 +5,17 @@ use crate::cli::failover_policy::{
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
+use super::super::app::ToastKind;
 use super::super::data::{load_state, UiData};
+use super::super::runtime_systems::ManagedAuthReq;
 use super::RuntimeActionContext;
+
+fn visible_apps_mode_label(mode: crate::settings::VisibleAppsMode) -> &'static str {
+    match mode {
+        crate::settings::VisibleAppsMode::Auto => texts::tui_settings_visible_apps_mode_auto(),
+        crate::settings::VisibleAppsMode::Manual => texts::tui_settings_visible_apps_mode_manual(),
+    }
+}
 
 pub(super) fn set_proxy_enabled(
     ctx: &mut RuntimeActionContext<'_>,
@@ -202,6 +211,269 @@ pub(super) fn set_visible_apps(
     set_visible_apps_with(ctx, apps, UiData::load)
 }
 
+pub(super) fn switch_visible_apps_to_manual(
+    ctx: &mut RuntimeActionContext<'_>,
+    apps: crate::settings::VisibleApps,
+    selected: usize,
+) -> Result<(), AppError> {
+    if apps.ordered_enabled().is_empty() {
+        ctx.app.push_toast(
+            texts::tui_toast_visible_apps_zero_selection_warning(),
+            super::super::app::ToastKind::Warning,
+        );
+        ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+            selected,
+            apps: crate::settings::get_visible_apps(),
+        };
+        return Ok(());
+    }
+
+    let next_app_data = if apps.is_enabled_for(&ctx.app.app_type) {
+        None
+    } else {
+        let next = match crate::settings::next_visible_app(&apps, &ctx.app.app_type, 1) {
+            Some(next) => next,
+            None => {
+                ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+                    selected,
+                    apps: crate::settings::get_visible_apps(),
+                };
+                return Err(AppError::InvalidInput(
+                    "At least one app must remain visible".to_string(),
+                ));
+            }
+        };
+        match UiData::load(&next) {
+            Ok(next_data) => Some((next, next_data)),
+            Err(err) => {
+                ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+                    selected,
+                    apps: crate::settings::get_visible_apps(),
+                };
+                return Err(err);
+            }
+        }
+    };
+
+    let mut settings = crate::settings::get_settings();
+    settings.visible_apps = apps;
+    settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Manual;
+    settings.visible_apps_settings.auto_prompt_decided = true;
+    if let Err(err) = crate::settings::update_settings(settings) {
+        ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+            selected,
+            apps: crate::settings::get_visible_apps(),
+        };
+        return Err(err);
+    }
+
+    if let Some((next, next_data)) = next_app_data {
+        super::apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
+    }
+
+    ctx.app.push_toast(
+        texts::tui_toast_visible_apps_saved(),
+        super::super::app::ToastKind::Success,
+    );
+    ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+        selected,
+        apps: crate::settings::get_visible_apps(),
+    };
+    Ok(())
+}
+
+pub(super) fn managed_auth_refresh(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::Refresh { auth_provider }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_start_login(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::StartLogin { auth_provider }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_set_default(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+    account_id: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::SetDefault {
+        auth_provider,
+        account_id,
+    }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_remove(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+    account_id: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::Remove {
+        auth_provider,
+        account_id,
+    }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn set_visible_apps_mode(
+    ctx: &mut RuntimeActionContext<'_>,
+    mode: crate::settings::VisibleAppsMode,
+) -> Result<(), AppError> {
+    crate::settings::set_visible_apps_mode(mode)?;
+    if mode == crate::settings::VisibleAppsMode::Auto {
+        let detection = crate::services::visible_apps::detect_visible_app_installation();
+        let outcome = crate::services::visible_apps::apply_startup_policy(&detection)?;
+        for notice in &outcome.notices {
+            ctx.app.push_toast(
+                crate::services::visible_apps::notice_message(notice),
+                super::super::app::ToastKind::Info,
+            );
+        }
+        switch_current_app_if_hidden(ctx)?;
+        if !outcome.notices.is_empty() {
+            return Ok(());
+        }
+    }
+
+    ctx.app.push_toast(
+        texts::tui_toast_visible_apps_mode_saved(visible_apps_mode_label(mode)),
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
+pub(super) fn confirm_visible_apps_auto_detection(
+    ctx: &mut RuntimeActionContext<'_>,
+    use_auto: bool,
+) -> Result<(), AppError> {
+    let detection = crate::services::visible_apps::detect_visible_app_installation();
+    if use_auto {
+        let changed = crate::services::visible_apps::accept_auto_detection(&detection)?;
+        if !changed.is_empty() {
+            let notice =
+                crate::services::visible_apps::VisibleAppsNotice::AutoUpdated { apps: changed };
+            ctx.app.push_toast(
+                crate::services::visible_apps::notice_message(&notice),
+                super::super::app::ToastKind::Info,
+            );
+        } else {
+            ctx.app.push_toast(
+                texts::tui_toast_visible_apps_mode_saved(
+                    texts::tui_settings_visible_apps_mode_auto(),
+                ),
+                super::super::app::ToastKind::Success,
+            );
+        }
+    } else {
+        crate::services::visible_apps::keep_manual_visibility(&detection)?;
+        ctx.app.push_toast(
+            texts::tui_toast_visible_apps_mode_saved(texts::tui_settings_visible_apps_mode_manual()),
+            super::super::app::ToastKind::Success,
+        );
+    }
+
+    switch_current_app_if_hidden(ctx)?;
+
+    Ok(())
+}
+
+fn switch_current_app_if_hidden(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    let visible_apps = crate::settings::get_visible_apps();
+    if visible_apps.is_enabled_for(&ctx.app.app_type) {
+        return Ok(());
+    }
+
+    let next = crate::settings::next_visible_app(&visible_apps, &ctx.app.app_type, 1)
+        .unwrap_or_else(|| ctx.app.app_type.clone());
+    if next == ctx.app.app_type {
+        return Ok(());
+    }
+
+    let next_data = UiData::load(&next)?;
+    super::apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
+    Ok(())
+}
+
 pub(super) fn set_visible_apps_with<F>(
     ctx: &mut RuntimeActionContext<'_>,
     apps: crate::settings::VisibleApps,
@@ -372,11 +644,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_openclaw_config_dir(&mut ctx, Some(target_dir.display().to_string()))
@@ -432,11 +706,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_openclaw_config_dir(&mut ctx, None).expect("clear openclaw config dir");

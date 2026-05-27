@@ -41,16 +41,24 @@ use runtime_systems::{
 };
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
-    handle_local_env_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,
-    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
-    handle_webdav_msg, start_local_env_system, start_model_fetch_system, start_proxy_system,
-    start_quota_system, start_skills_system, start_speedtest_system, start_stream_check_system,
-    start_update_system, start_webdav_system, LocalEnvReq, QuotaReq, RequestTracker,
+    handle_local_env_msg, handle_managed_auth_msg, handle_model_fetch_msg, handle_proxy_msg,
+    handle_quota_msg, handle_session_msg, handle_skills_msg, handle_speedtest_msg,
+    handle_stream_check_msg, handle_update_msg, handle_webdav_msg, start_local_env_system,
+    start_managed_auth_system, start_model_fetch_system, start_proxy_system, start_quota_system,
+    start_session_system, start_skills_system, start_speedtest_system, start_stream_check_system,
+    start_update_system, start_webdav_system, LocalEnvReq, ManagedAuthReq, QuotaReq,
+    RequestTracker,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
 pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
 const QUOTA_REFRESH_INTERVAL_TICKS: u64 = 5 * 60 * 1000 / 200;
+
+fn apply_visible_apps_startup_policy(
+) -> Result<crate::services::visible_apps::VisibleAppsStartupOutcome, AppError> {
+    let detection = crate::services::visible_apps::detect_visible_app_installation();
+    crate::services::visible_apps::apply_startup_policy(&detection)
+}
 
 fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
     let requested = app_override.unwrap_or(AppType::Claude);
@@ -63,17 +71,30 @@ fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
     crate::settings::next_visible_app(&visible_apps, &requested, 1).unwrap_or(requested)
 }
 
-fn initialize_app_state_with<F>(
+fn initialize_app_state_with<F, FVisibleApps>(
     app_override: Option<AppType>,
     load_data: F,
+    apply_visible_apps: FVisibleApps,
 ) -> Result<(App, data::UiData), AppError>
 where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
+    FVisibleApps:
+        FnOnce() -> Result<crate::services::visible_apps::VisibleAppsStartupOutcome, AppError>,
 {
+    let visible_apps_outcome = apply_visible_apps()?;
     let app_type = resolve_initial_app_type(app_override);
     let mut app = App::new(Some(app_type));
     app.common_config_notice_confirmed = crate::settings::get_common_config_confirmed();
     app.usage_query_notice_confirmed = crate::settings::get_usage_confirmed();
+    if visible_apps_outcome.should_prompt {
+        app.prompt_visible_apps_auto_detection();
+    }
+    for notice in &visible_apps_outcome.notices {
+        app.push_toast(
+            crate::services::visible_apps::notice_message(notice),
+            ToastKind::Info,
+        );
+    }
     let data = load_data(&app.app_type)?;
     Ok((app, data))
 }
@@ -86,7 +107,10 @@ fn initialize_app_state_for_test<F>(
 where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
 {
-    initialize_app_state_with(app_override, load_data)
+    let detection = crate::services::visible_apps::VisibleAppsDetection::default();
+    initialize_app_state_with(app_override, load_data, || {
+        crate::services::visible_apps::apply_startup_policy(&detection)
+    })
 }
 
 #[derive(Default)]
@@ -190,6 +214,32 @@ fn queue_current_quota_refresh_if_due(
     }
 }
 
+fn queue_managed_auth_refresh(
+    app: &mut App,
+    managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
+    auth_provider: &str,
+) {
+    let Some(tx) = managed_auth_req_tx else {
+        app.managed_auth_loading = false;
+        app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable("auth worker is not running"),
+            ToastKind::Warning,
+        );
+        return;
+    };
+
+    app.managed_auth_loading = true;
+    if let Err(error) = tx.send(ManagedAuthReq::Refresh {
+        auth_provider: auth_provider.to_string(),
+    }) {
+        app.managed_auth_loading = false;
+        app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&error.to_string()),
+            ToastKind::Warning,
+        );
+    }
+}
+
 fn queue_provider_quota_refresh(
     app: &mut App,
     data: &mut data::UiData,
@@ -207,10 +257,49 @@ fn queue_provider_quota_refresh(
     queue_quota_refresh(app, data, quota_req_tx, target, true);
 }
 
+fn queue_sessions_refresh_if_needed(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
+) {
+    if !matches!(app.route, route::Route::Sessions) {
+        return;
+    }
+    let provider_id = app.app_type.as_str().to_string();
+    if app.sessions.loaded_for_provider(&provider_id) || app.sessions.loading {
+        return;
+    }
+
+    let Some(tx) = session_req_tx else {
+        app.sessions.loading = false;
+        app.sessions.loaded_once = true;
+        app.push_toast(
+            texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+            ToastKind::Warning,
+        );
+        return;
+    };
+
+    let request_id = app.sessions.start_scan(provider_id.clone());
+    if let Err(err) = tx.send(runtime_systems::SessionReq::Refresh {
+        request_id,
+        provider_id,
+    }) {
+        app.sessions.fail_scan(request_id, err.to_string());
+        app.push_toast(
+            texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+}
+
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
-    let (mut app, mut data) = initialize_app_state_with(app_override, data::UiData::load)?;
+    let (mut app, mut data) = initialize_app_state_with(
+        app_override,
+        data::UiData::load,
+        apply_visible_apps_startup_policy,
+    )?;
     let mut proxy_open_flash = ProxyOpenFlash::default();
     app.reset_proxy_activity(
         data.proxy.estimated_input_tokens_total,
@@ -279,6 +368,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let sessions = match start_session_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_sessions_toast_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     let proxy_system = match start_proxy_system() {
         Ok(system) => Some(system),
         Err(err) => {
@@ -335,6 +435,21 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let managed_auth = match start_managed_auth_system() {
+        Ok(system) => {
+            queue_managed_auth_refresh(&mut app, Some(&system.req_tx), "codex_oauth");
+            Some(system)
+        }
+        Err(err) => {
+            app.managed_auth_loading = false;
+            app.push_toast(
+                texts::tui_toast_managed_auth_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     loop {
         app.last_size = terminal.size()?;
         app.observe_proxy_visual_state(&data);
@@ -346,6 +461,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             ui::render(f, &app, &data);
             proxy_open_flash.process(frame_dt, f.buffer_mut(), area);
         })?;
+
+        queue_sessions_refresh_if_needed(&mut app, sessions.as_ref().map(|s| &s.req_tx));
 
         if let Some(speedtest) = speedtest.as_ref() {
             while let Ok(msg) = speedtest.result_rx.try_recv() {
@@ -362,6 +479,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(local_env) = local_env.as_ref() {
             while let Ok(msg) = local_env.result_rx.try_recv() {
                 handle_local_env_msg(&mut app, msg);
+            }
+        }
+
+        if let Some(sessions) = sessions.as_ref() {
+            while let Ok(msg) = sessions.result_rx.try_recv() {
+                handle_session_msg(&mut app, msg);
             }
         }
 
@@ -407,6 +530,29 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        if let Some(auth) = managed_auth.as_ref() {
+            while let Ok(msg) = auth.result_rx.try_recv() {
+                handle_managed_auth_msg(&mut app, msg);
+            }
+        }
+
+        if app.should_poll_managed_auth_login() {
+            if let Some(login) = app.managed_auth_login.as_mut() {
+                login.next_poll_tick = app.tick.saturating_add(login.poll_interval_ticks.max(1));
+                if let Some(auth) = managed_auth.as_ref() {
+                    if let Err(err) = auth.req_tx.send(ManagedAuthReq::PollLogin {
+                        auth_provider: login.auth_provider.clone(),
+                        device_code: login.device_code.clone(),
+                    }) {
+                        app.push_toast(
+                            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+                            ToastKind::Warning,
+                        );
+                    }
+                }
+            }
+        }
+
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| AppError::Message(e.to_string()))? {
             match event::read().map_err(|e| AppError::Message(e.to_string()))? {
@@ -430,11 +576,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         proxy_system.as_ref().map(|s| &s.req_tx),
                         &mut proxy_loading,
                         local_env.as_ref().map(|s| &s.req_tx),
+                        sessions.as_ref().map(|s| &s.req_tx),
                         webdav.as_ref().map(|s| &s.req_tx),
                         &mut webdav_loading,
                         update_system.as_ref().map(|s| &s.req_tx),
                         &mut update_check,
                         model_fetch.as_ref().map(|s| &s.req_tx),
+                        managed_auth.as_ref().map(|s| &s.req_tx),
                         action,
                     ) {
                         if matches!(
@@ -472,11 +620,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             proxy_system.as_ref().map(|s| &s.req_tx),
                             &mut proxy_loading,
                             local_env.as_ref().map(|s| &s.req_tx),
+                            sessions.as_ref().map(|s| &s.req_tx),
                             webdav.as_ref().map(|s| &s.req_tx),
                             &mut webdav_loading,
                             update_system.as_ref().map(|s| &s.req_tx),
                             &mut update_check,
                             model_fetch.as_ref().map(|s| &s.req_tx),
+                            managed_auth.as_ref().map(|s| &s.req_tx),
                             action,
                         ) {
                             if matches!(
