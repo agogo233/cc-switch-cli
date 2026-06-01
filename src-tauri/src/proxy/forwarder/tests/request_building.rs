@@ -1,7 +1,7 @@
 use std::{env, ffi::OsString, sync::atomic::Ordering, time::Duration};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{
     bedrock_claude_provider, claude_provider, claude_request_body, spawn_scripted_upstream,
@@ -195,6 +195,49 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
     headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
     headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
     headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.11"));
+    headers.insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("client.example"),
+    );
+    headers.insert("x-forwarded-port", HeaderValue::from_static("443"));
+    headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+    headers.insert(
+        "forwarded",
+        HeaderValue::from_static("for=203.0.113.10;proto=https"),
+    );
+    headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.12"));
+    headers.insert("cf-ipcountry", HeaderValue::from_static("US"));
+    headers.insert("cf-ray", HeaderValue::from_static("ray-id"));
+    headers.insert(
+        "cf-visitor",
+        HeaderValue::from_static("{\"scheme\":\"https\"}"),
+    );
+    headers.insert("true-client-ip", HeaderValue::from_static("203.0.113.13"));
+    headers.insert("fastly-client-ip", HeaderValue::from_static("203.0.113.14"));
+    headers.insert("x-azure-clientip", HeaderValue::from_static("203.0.113.15"));
+    headers.insert("x-azure-fdid", HeaderValue::from_static("fdid"));
+    headers.insert("x-azure-ref", HeaderValue::from_static("ref"));
+    headers.insert("akamai-origin-hop", HeaderValue::from_static("1"));
+    headers.insert(
+        "x-akamai-config-log-detail",
+        HeaderValue::from_static("detail"),
+    );
+    headers.insert("x-request-id", HeaderValue::from_static("request-id"));
+    headers.insert(
+        "x-correlation-id",
+        HeaderValue::from_static("correlation-id"),
+    );
+    headers.insert("x-trace-id", HeaderValue::from_static("trace-id"));
+    headers.insert("x-amzn-trace-id", HeaderValue::from_static("amzn-trace-id"));
+    headers.insert("x-b3-traceid", HeaderValue::from_static("b3-trace"));
+    headers.insert("x-b3-spanid", HeaderValue::from_static("b3-span"));
+    headers.insert("x-b3-parentspanid", HeaderValue::from_static("b3-parent"));
+    headers.insert("x-b3-sampled", HeaderValue::from_static("1"));
+    headers.insert(
+        "traceparent",
+        HeaderValue::from_static("00-00000000000000000000000000000000-0000000000000000-01"),
+    );
+    headers.insert("tracestate", HeaderValue::from_static("vendor=value"));
 
     let request = build_request(
         &AppType::Claude,
@@ -211,7 +254,7 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
         header_value(&request, "anthropic-version"),
         Some("2023-06-01")
     );
-    assert_eq!(header_value(&request, "accept-encoding"), Some("identity"));
+    assert_eq!(header_value(&request, "accept-encoding"), Some("gzip"));
     assert_eq!(
         header_value(&request, "authorization"),
         Some("Bearer key-p1")
@@ -223,6 +266,31 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
         Some("203.0.113.10")
     );
     assert_eq!(header_value(&request, "x-real-ip"), Some("203.0.113.11"));
+    assert_eq!(header_value(&request, "x-forwarded-host"), None);
+    assert_eq!(header_value(&request, "x-forwarded-port"), None);
+    assert_eq!(header_value(&request, "x-forwarded-proto"), None);
+    assert_eq!(header_value(&request, "forwarded"), None);
+    assert_eq!(header_value(&request, "cf-connecting-ip"), None);
+    assert_eq!(header_value(&request, "cf-ipcountry"), None);
+    assert_eq!(header_value(&request, "cf-ray"), None);
+    assert_eq!(header_value(&request, "cf-visitor"), None);
+    assert_eq!(header_value(&request, "true-client-ip"), None);
+    assert_eq!(header_value(&request, "fastly-client-ip"), None);
+    assert_eq!(header_value(&request, "x-azure-clientip"), None);
+    assert_eq!(header_value(&request, "x-azure-fdid"), None);
+    assert_eq!(header_value(&request, "x-azure-ref"), None);
+    assert_eq!(header_value(&request, "akamai-origin-hop"), None);
+    assert_eq!(header_value(&request, "x-akamai-config-log-detail"), None);
+    assert_eq!(header_value(&request, "x-request-id"), None);
+    assert_eq!(header_value(&request, "x-correlation-id"), None);
+    assert_eq!(header_value(&request, "x-trace-id"), None);
+    assert_eq!(header_value(&request, "x-amzn-trace-id"), None);
+    assert_eq!(header_value(&request, "x-b3-traceid"), None);
+    assert_eq!(header_value(&request, "x-b3-spanid"), None);
+    assert_eq!(header_value(&request, "x-b3-parentspanid"), None);
+    assert_eq!(header_value(&request, "x-b3-sampled"), None);
+    assert_eq!(header_value(&request, "traceparent"), None);
+    assert_eq!(header_value(&request, "tracestate"), None);
 }
 
 #[tokio::test]
@@ -240,6 +308,40 @@ async fn non_claude_prepare_request_skips_claude_specific_headers() {
         header_value(&request, "authorization"),
         Some("Bearer codex-key")
     );
+    assert_eq!(header_value(&request, "accept-encoding"), None);
+}
+
+#[tokio::test]
+async fn streaming_passthrough_prepare_request_forces_identity_accept_encoding() {
+    let mut headers = HeaderMap::new();
+    headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello",
+        "stream": true
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &codex_provider("https://example.com"),
+            "/v1/responses",
+            &request_body,
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare streaming passthrough request")
+        .build()
+        .expect("build streaming passthrough request");
+
+    assert_eq!(header_value(&request, "accept-encoding"), Some("identity"));
 }
 
 #[tokio::test]
@@ -439,6 +541,281 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
     );
 }
 
+#[tokio::test]
+async fn codex_oauth_prepare_request_rejects_proxy_managed_placeholder_header() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CodexOAuthService::reset_for_tests();
+    CodexOAuthService::seed_account_for_tests(
+        "acc-placeholder",
+        "rt-placeholder",
+        Some("placeholder@example.com"),
+        Some("at-placeholder"),
+        None,
+    )
+    .await
+    .expect("seed placeholder account");
+
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let provider = codex_oauth_provider(Some("acc-placeholder"));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-extra-auth",
+        HeaderValue::from_static("Bearer PROXY_MANAGED"),
+    );
+
+    let error = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &claude_request_body(),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect_err("managed upstream placeholder should be rejected before send");
+
+    assert!(
+        error.to_string().contains("PROXY_MANAGED"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn non_managed_upstream_allows_proxy_managed_placeholder_guard() {
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let provider = codex_provider("https://example.com");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-extra-auth",
+        HeaderValue::from_static("Bearer PROXY_MANAGED"),
+    );
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses",
+            &json!({"model": "gpt-5.4", "input": "hello"}),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("non-managed upstream should not reject placeholder-like caller header")
+        .build()
+        .expect("build request");
+
+    assert_eq!(
+        header_value(&request, "x-extra-auth"),
+        Some("Bearer PROXY_MANAGED")
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let mut headers = HeaderMap::new();
+    headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello",
+        "stream": true
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses",
+            &request_body,
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer codex-key")
+    );
+    assert_eq!(header_value(&request, "accept-encoding"), Some("identity"));
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "deepseek-chat");
+    assert!(body.get("input").is_none());
+    assert!(body["messages"].is_array());
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"], "hello");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_responses_query() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses?foo=bar&api-version=2025-01-01",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions?foo=bar&api-version=2025-01-01"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_responses_compact_query() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses/compact?foo=bar",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat compact bridge request")
+        .build()
+        .expect("build Codex Chat compact bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions?foo=bar"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_full_chat_endpoint_base_url() {
+    let provider = codex_chat_provider(
+        "https://example.com/openai/v1/chat/completions",
+        "deepseek-chat",
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/responses",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/openai/v1/chat/completions"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_query_with_full_chat_endpoint_base_url() {
+    let provider = codex_chat_provider(
+        "https://example.com/openai/v1/chat/completions",
+        "deepseek-chat",
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/responses?foo=bar",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/openai/v1/chat/completions?foo=bar"
+    );
+}
+
 async fn build_request(
     app_type: &AppType,
     provider: &Provider,
@@ -478,6 +855,24 @@ fn codex_provider(base_url: &str) -> Provider {
     )
 }
 
+fn codex_chat_provider(base_url: &str, model: &str) -> Provider {
+    let mut provider = Provider::with_id(
+        "codex-chat".to_string(),
+        "Codex Chat Provider".to_string(),
+        json!({
+            "base_url": base_url,
+            "apiKey": "codex-key",
+            "model": model,
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        ..Default::default()
+    });
+    provider
+}
+
 fn codex_oauth_provider(account_id: Option<&str>) -> Provider {
     Provider {
         id: "codex-oauth".to_string(),
@@ -511,4 +906,12 @@ fn header_value<'a>(request: &'a reqwest::Request, name: &str) -> Option<&'a str
         .headers()
         .get(name)
         .and_then(|value| value.to_str().ok())
+}
+
+fn request_body_json(request: &reqwest::Request) -> Value {
+    let bytes = request
+        .body()
+        .and_then(|body| body.as_bytes())
+        .expect("request should have JSON body bytes");
+    serde_json::from_slice(bytes).expect("parse request JSON body")
 }

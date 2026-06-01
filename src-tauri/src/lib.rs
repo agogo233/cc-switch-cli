@@ -3,6 +3,7 @@ mod app_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
+mod codex_history_migration;
 pub mod commands;
 mod config;
 #[cfg(unix)]
@@ -14,6 +15,7 @@ mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
 mod import_export;
+#[allow(dead_code)]
 mod init_status;
 mod mcp;
 mod openclaw_config;

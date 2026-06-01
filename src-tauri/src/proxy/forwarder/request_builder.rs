@@ -10,9 +10,15 @@ use super::super::{
     http_client,
     json_canonical::canonicalize_value,
     model_mapper::apply_model_mapping,
-    providers::{get_adapter, AuthStrategy, ProviderAdapter},
+    providers::{
+        apply_codex_chat_upstream_model, get_adapter, resolve_codex_chat_reasoning_config,
+        should_convert_codex_responses_to_chat, transform_codex_chat, AuthStrategy,
+        ProviderAdapter,
+    },
 };
 use super::{ForwardOptions, RequestForwarder};
+
+const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 const HEADER_BLACKLIST: &[&str] = &[
     "authorization",
@@ -26,6 +32,31 @@ const HEADER_BLACKLIST: &[&str] = &[
     "anthropic-version",
     "x-forwarded-for",
     "x-real-ip",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "forwarded",
+    "cf-connecting-ip",
+    "cf-ipcountry",
+    "cf-ray",
+    "cf-visitor",
+    "true-client-ip",
+    "fastly-client-ip",
+    "x-azure-clientip",
+    "x-azure-fdid",
+    "x-azure-ref",
+    "akamai-origin-hop",
+    "x-akamai-config-log-detail",
+    "x-request-id",
+    "x-correlation-id",
+    "x-trace-id",
+    "x-amzn-trace-id",
+    "x-b3-traceid",
+    "x-b3-spanid",
+    "x-b3-parentspanid",
+    "x-b3-sampled",
+    "traceparent",
+    "tracestate",
 ];
 
 impl RequestForwarder {
@@ -40,9 +71,12 @@ impl RequestForwarder {
     ) -> Result<reqwest::RequestBuilder, ProxyError> {
         let adapter = get_adapter(app_type);
         let is_claude_request = matches!(app_type, AppType::Claude);
-        let upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
+        let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
         let base_url = adapter.extract_base_url(provider)?;
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
+        let codex_responses_to_chat = should_convert_codex_responses_to_chat(provider, endpoint)
+            && matches!(app_type, AppType::Codex);
+        let needs_transform = adapter.needs_transform(provider);
 
         if is_claude_request && self.optimizer_config.enabled && is_bedrock_provider(provider) {
             if self.optimizer_config.thinking_optimizer {
@@ -56,7 +90,18 @@ impl RequestForwarder {
             }
         }
 
-        let request_body = if adapter.needs_transform(provider) {
+        let request_body = if codex_responses_to_chat {
+            upstream_endpoint = rewrite_codex_responses_endpoint_to_chat(endpoint);
+            if let Some(history) = self.codex_chat_history.as_ref() {
+                history.enrich_request(&mut mapped_body).await;
+            }
+            apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            let reasoning_config = resolve_codex_chat_reasoning_config(provider, &mapped_body);
+            transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                mapped_body,
+                reasoning_config.as_ref(),
+            )?
+        } else if needs_transform {
             if is_claude_request {
                 super::super::providers::transform_claude_request_for_api_format(
                     mapped_body,
@@ -72,6 +117,9 @@ impl RequestForwarder {
             mapped_body
         };
         let filtered_body = prepare_upstream_request_body(request_body);
+        let force_identity_encoding = needs_transform
+            || codex_responses_to_chat
+            || is_streaming_request(&upstream_endpoint, &filtered_body, headers);
         let client = self.client_for_provider(provider);
 
         build_request(
@@ -86,6 +134,7 @@ impl RequestForwarder {
             is_claude_request,
             self.session_client_provided
                 .then_some(self.session_id.as_str()),
+            force_identity_encoding,
         )
         .await
     }
@@ -115,10 +164,29 @@ async fn build_request(
     _options: ForwardOptions,
     is_claude_request: bool,
     client_session_id: Option<&str>,
+    force_identity_encoding: bool,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
-    let mut request = client.post(adapter.build_url(base_url, endpoint));
+    let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
+    let url = if base_url
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with("/chat/completions")
+        && endpoint_path.trim_matches('/') == "chat/completions"
+    {
+        append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
+    } else {
+        adapter.build_url(base_url, endpoint)
+    };
+    let mut request = client.post(url);
 
     for (key, value) in headers {
+        if key.as_str().eq_ignore_ascii_case("accept-encoding") {
+            if !force_identity_encoding {
+                request = request.header(key, value);
+            }
+            continue;
+        }
+
         if HEADER_BLACKLIST
             .iter()
             .any(|blocked| key.as_str().eq_ignore_ascii_case(blocked))
@@ -154,7 +222,9 @@ async fn build_request(
         request = request.header("x-real-ip", real_ip);
     }
 
-    request = request.header("accept-encoding", "identity");
+    if force_identity_encoding {
+        request = request.header("accept-encoding", "identity");
+    }
 
     if let Some(auth) = adapter.extract_auth(provider) {
         let mut effective_auth = auth.clone();
@@ -203,7 +273,96 @@ async fn build_request(
         request = request.header("anthropic-version", version);
     }
 
+    reject_proxy_placeholder_for_managed_account_upstream(&request)?;
     Ok(request.json(request_body))
+}
+
+fn split_endpoint_and_query(endpoint: &str) -> (&str, Option<&str>) {
+    endpoint
+        .split_once('?')
+        .map_or((endpoint, None), |(path, query)| (path, Some(query)))
+}
+
+fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> String {
+    match split_endpoint_and_query(endpoint).1 {
+        Some(query) if !query.is_empty() => format!("/chat/completions?{query}"),
+        _ => "/chat/completions".to_string(),
+    }
+}
+
+fn append_query_to_url(url: &str, query: Option<&str>) -> String {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return url.to_string();
+    };
+
+    if url.ends_with('?') || url.ends_with('&') {
+        format!("{url}{query}")
+    } else if url.contains('?') {
+        format!("{url}&{query}")
+    } else {
+        format!("{url}?{query}")
+    }
+}
+
+fn reject_proxy_placeholder_for_managed_account_upstream(
+    request: &reqwest::RequestBuilder,
+) -> Result<(), ProxyError> {
+    let Some(cloned_request) = request.try_clone() else {
+        return Ok(());
+    };
+    let built_request = cloned_request.build().map_err(|error| {
+        ProxyError::RequestFailed(format!("build upstream request failed: {error}"))
+    })?;
+
+    if !is_managed_account_upstream_url(built_request.url())
+        || !headers_contain_proxy_placeholder(built_request.headers())
+    {
+        return Ok(());
+    }
+
+    Err(ProxyError::AuthError(
+        "Managed account proxy auth was not resolved; PROXY_MANAGED must not be sent upstream"
+            .to_string(),
+    ))
+}
+
+fn is_managed_account_upstream_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+
+    host == "githubcopilot.com"
+        || host.ends_with(".githubcopilot.com")
+        || (host == "chatgpt.com" && url.path().starts_with("/backend-api/codex"))
+}
+
+fn headers_contain_proxy_placeholder(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.values().any(|value| {
+        value
+            .to_str()
+            .map(|value| value.contains(PROXY_AUTH_PLACEHOLDER))
+            .unwrap_or(false)
+    })
+}
+
+fn is_streaming_request(endpoint: &str, body: &Value, headers: &HeaderMap) -> bool {
+    if body
+        .get("stream")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    if endpoint.contains("streamGenerateContent") || endpoint.contains("alt=sse") {
+        return true;
+    }
+
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .map(|accept| accept.contains("text/event-stream"))
+        .unwrap_or(false)
 }
 
 fn is_bedrock_provider(provider: &Provider) -> bool {

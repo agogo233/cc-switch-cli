@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "5.6.1"
+version = "5.7.0"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
 authors = ["Jason Young", "saladday"]
 license = "MIT"
@@ -79,6 +79,7 @@ sha2 = "0.10"
 minisign-verify = "0.2.4"
 semver = "1.0"
 flate2 = "1.0"
+brotli = "7"
 tar = "0.4"
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 zip = "2.2"

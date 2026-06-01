@@ -8,7 +8,7 @@ use bytes::Bytes;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-use crate::app_config::AppType;
+use crate::{app_config::AppType, provider::Provider};
 
 use super::{
     error::ProxyError,
@@ -17,8 +17,10 @@ use super::{
     metrics::estimate_tokens_from_value,
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
-        build_anthropic_stream_response, build_buffered_json_response,
-        build_buffered_passthrough_response, build_json_response, build_passthrough_response,
+        build_anthropic_stream_response, build_buffered_codex_chat_response,
+        build_buffered_json_response, build_buffered_passthrough_response,
+        build_codex_chat_error_response, build_codex_chat_response,
+        build_codex_chat_stream_response, build_json_response, build_passthrough_response,
         is_sse_response, PreparedResponse,
     },
     response_handler::{proxy_error_response, ResponseHandler, SuccessSyncInfo},
@@ -46,6 +48,7 @@ pub async fn handle_messages(
 
 pub async fn handle_chat_completions(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -54,13 +57,14 @@ pub async fn handle_chat_completions(
         headers,
         body,
         AppType::Codex,
-        "/chat/completions".to_string(),
+        endpoint_with_query(&uri, "/chat/completions"),
     )
     .await
 }
 
 pub async fn handle_responses(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -69,13 +73,14 @@ pub async fn handle_responses(
         headers,
         body,
         AppType::Codex,
-        "/responses".to_string(),
+        endpoint_with_query(&uri, "/responses"),
     )
     .await
 }
 
 pub async fn handle_responses_compact(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -84,9 +89,16 @@ pub async fn handle_responses_compact(
         headers,
         body,
         AppType::Codex,
-        "/responses/compact".to_string(),
+        endpoint_with_query(&uri, "/responses/compact"),
     )
     .await
+}
+
+fn endpoint_with_query(uri: &Uri, endpoint: &str) -> String {
+    match uri.query() {
+        Some(query) => format!("{endpoint}?{query}"),
+        None => endpoint.to_string(),
+    }
 }
 
 pub async fn handle_gemini(
@@ -436,7 +448,8 @@ async fn handle_passthrough_request(
     let forwarder = match RequestForwarder::new(context.provider_router.clone()) {
         Ok(forwarder) => forwarder
             .with_optimizer_config(context.optimizer_config.clone())
-            .with_session(context.session_id.clone(), context.session_client_provided),
+            .with_session(context.session_id.clone(), context.session_client_provided)
+            .with_codex_chat_history(context.state.codex_chat_history.clone()),
         Err(error) => {
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
@@ -462,7 +475,7 @@ async fn handle_passthrough_request(
         let first_byte_timeout = context.streaming_first_byte_timeout();
         let request_started_at = Instant::now();
         let forward_result = match forwarder
-            .forward_response(
+            .forward_response_detailed(
                 &context.app_type,
                 &endpoint,
                 body,
@@ -474,7 +487,33 @@ async fn handle_passthrough_request(
             .await
         {
             Ok(response) => response,
-            Err(error) => {
+            Err(failure) => {
+                let super::forwarder::ForwardFailure { provider, error } = failure;
+                if matches!(context.app_type, AppType::Codex) {
+                    let provider = provider.or_else(|| context.primary_provider().cloned());
+                    if let Some(provider) = provider.as_ref() {
+                        let request_log = RequestLogContext::from_handler(
+                            &context,
+                            provider.clone(),
+                            true,
+                            if super::providers::should_convert_codex_responses_to_chat(
+                                provider, &endpoint,
+                            ) {
+                                UsageLogPolicy::Transformed
+                            } else {
+                                UsageLogPolicy::Passthrough
+                            },
+                        );
+                        log_error_request(&context.state, &request_log, &error).await;
+                    }
+                    context.state.record_request_error(&error).await;
+                    return build_codex_proxy_error_response(
+                        &context,
+                        provider.as_ref(),
+                        &endpoint,
+                        &error,
+                    );
+                }
                 context.state.record_request_error(&error).await;
                 return proxy_error_response(error);
             }
@@ -482,12 +521,34 @@ async fn handle_passthrough_request(
 
         let response = forward_result.response;
         let status = response.status();
+        let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
+            &forward_result.provider,
+            &endpoint,
+        );
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         });
         let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if converts_codex_chat && status.is_success() =>
+            {
+                build_codex_chat_stream_response(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    context.state.codex_chat_history.clone(),
+                )
+            }
+            super::forwarder::StreamingResponse::Live(response) if converts_codex_chat => {
+                build_codex_chat_error_response(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.state.codex_chat_history.clone(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Live(response) => {
                 build_passthrough_response(
                     response,
@@ -496,16 +557,88 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
+                build_buffered_codex_chat_response(
+                    status,
+                    &response.headers,
+                    response.body,
+                    context.state.codex_chat_history.clone(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Buffered(response) => {
                 build_buffered_passthrough_response(status, &response.headers, response.body)
             }
         };
+        let request_log = converts_codex_chat.then(|| {
+            RequestLogContext::from_handler(
+                &context,
+                forward_result.provider.clone(),
+                true,
+                UsageLogPolicy::Transformed,
+            )
+        });
         return ResponseHandler::finish_streaming(
             &context.state,
             response_result,
             status,
             success_sync,
-            None,
+            request_log,
+        )
+        .await;
+    }
+
+    if matches!(context.app_type, AppType::Codex) {
+        let streaming_first_byte_timeout = context.streaming_first_byte_timeout();
+        let non_streaming_timeout = context.non_streaming_timeout();
+        let request_started_at = Instant::now();
+        let forward_result = match forwarder
+            .forward_response_detailed(
+                &context.app_type,
+                &endpoint,
+                body,
+                &headers,
+                context.providers().to_vec(),
+                options,
+                RectifierConfig::default(),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(failure) => {
+                let super::forwarder::ForwardFailure { provider, error } = failure;
+                let provider = provider.or_else(|| context.primary_provider().cloned());
+                if let Some(provider) = provider.as_ref() {
+                    let request_log = RequestLogContext::from_handler(
+                        &context,
+                        provider.clone(),
+                        false,
+                        if super::providers::should_convert_codex_responses_to_chat(
+                            provider, &endpoint,
+                        ) {
+                            UsageLogPolicy::Transformed
+                        } else {
+                            UsageLogPolicy::Passthrough
+                        },
+                    );
+                    log_error_request(&context.state, &request_log, &error).await;
+                }
+                context.state.record_request_error(&error).await;
+                return build_codex_proxy_error_response(
+                    &context,
+                    provider.as_ref(),
+                    &endpoint,
+                    &error,
+                );
+            }
+        };
+        return finish_codex_live_aware_response(
+            &context,
+            &endpoint,
+            forward_result,
+            request_started_at,
+            streaming_first_byte_timeout,
+            non_streaming_timeout,
         )
         .await;
     }
@@ -530,19 +663,379 @@ async fn handle_passthrough_request(
     };
 
     let response = forward_result.response;
+    let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
+        &forward_result.provider,
+        &endpoint,
+    );
     let success_sync = response.status.is_success().then(|| SuccessSyncInfo {
         app_type: context.app_type.clone(),
         provider: forward_result.provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
     });
+    let status = response.status;
+    let request_log = converts_codex_chat.then(|| {
+        RequestLogContext::from_handler(
+            &context,
+            forward_result.provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        )
+    });
+    let response_result = if converts_codex_chat {
+        build_buffered_codex_chat_response(
+            response.status,
+            &response.headers,
+            response.body,
+            context.state.codex_chat_history.clone(),
+        )
+        .await
+    } else {
+        build_buffered_passthrough_response(response.status, &response.headers, response.body)
+    };
     ResponseHandler::finish_buffered(
         &context.state,
-        build_buffered_passthrough_response(response.status, &response.headers, response.body),
-        response.status,
+        response_result,
+        status,
         success_sync,
-        None,
+        request_log,
     )
     .await
+}
+
+fn build_codex_proxy_error_response(
+    context: &HandlerContext,
+    provider: Option<&Provider>,
+    endpoint: &str,
+    error: &ProxyError,
+) -> Response {
+    let body = codex_proxy_error_json(
+        provider
+            .map(|provider| provider.name.as_str())
+            .unwrap_or("unknown"),
+        &context.request_model,
+        endpoint,
+        error,
+    );
+    let body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return proxy_error_response(ProxyError::Internal(format!(
+                "serialize Codex proxy error failed: {error}"
+            )));
+        }
+    };
+
+    Response::builder()
+        .status(error.status_code())
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|error| {
+            proxy_error_response(ProxyError::Internal(format!(
+                "build Codex proxy error response failed: {error}"
+            )))
+        })
+}
+
+fn codex_proxy_error_json(
+    provider_name: &str,
+    request_model: &str,
+    endpoint: &str,
+    error: &ProxyError,
+) -> Value {
+    let (mut body, upstream_status) = match error {
+        ProxyError::UpstreamError { status, body } => {
+            let parsed_body = body
+                .as_deref()
+                .map(|body| serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body)));
+            (
+                super::providers::transform_codex_chat::chat_error_to_response_error(
+                    parsed_body.as_ref(),
+                ),
+                Some(*status),
+            )
+        }
+        _ => (
+            json!({
+                "error": {
+                    "message": codex_proxy_error_cause(error),
+                    "type": "proxy_error",
+                    "code": codex_proxy_error_code(error),
+                    "param": Value::Null,
+                }
+            }),
+            None,
+        ),
+    };
+
+    let Some(error_obj) = body.get_mut("error").and_then(Value::as_object_mut) else {
+        return body;
+    };
+
+    let cause = error_obj
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| codex_proxy_error_cause(error));
+    let status_fragment = upstream_status
+        .map(|status| format!("; upstream_status: HTTP {status}"))
+        .unwrap_or_default();
+    let message = format!(
+        "CC Switch local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{status_fragment}; cause: {cause}"
+    );
+
+    error_obj.insert(
+        "message".to_string(),
+        Value::String(compact_codex_proxy_error_message(&message, 1800)),
+    );
+
+    if error_obj
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        error_obj.insert("type".to_string(), Value::String("proxy_error".to_string()));
+    }
+
+    if error_obj.get("code").map(Value::is_null).unwrap_or(true) {
+        error_obj.insert(
+            "code".to_string(),
+            Value::String(codex_proxy_error_code(error).to_string()),
+        );
+    }
+
+    if !error_obj.contains_key("param") {
+        error_obj.insert("param".to_string(), Value::Null);
+    }
+
+    error_obj.insert(
+        "provider".to_string(),
+        Value::String(provider_name.to_string()),
+    );
+    error_obj.insert(
+        "model".to_string(),
+        Value::String(request_model.to_string()),
+    );
+    error_obj.insert("endpoint".to_string(), Value::String(endpoint.to_string()));
+    if let Some(status) = upstream_status {
+        error_obj.insert(
+            "upstream_status".to_string(),
+            Value::Number(serde_json::Number::from(status)),
+        );
+    }
+
+    body
+}
+
+fn codex_proxy_error_cause(error: &ProxyError) -> String {
+    match error {
+        ProxyError::ConfigError(message)
+        | ProxyError::AuthError(message)
+        | ProxyError::RequestFailed(message)
+        | ProxyError::TransformError(message)
+        | ProxyError::ForwardFailed(message)
+        | ProxyError::BindFailed(message)
+        | ProxyError::StopFailed(message)
+        | ProxyError::ProviderUnhealthy(message)
+        | ProxyError::DatabaseError(message)
+        | ProxyError::InvalidRequest(message)
+        | ProxyError::Timeout(message)
+        | ProxyError::Internal(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
+    match error {
+        ProxyError::ForwardFailed(_) => "cc_switch_forward_failed",
+        ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "cc_switch_timeout",
+        ProxyError::NoAvailableProvider => "cc_switch_no_available_provider",
+        ProxyError::AllProvidersCircuitOpen => "cc_switch_all_providers_circuit_open",
+        ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",
+        ProxyError::MaxRetriesExceeded => "cc_switch_max_retries_exceeded",
+        ProxyError::ProviderUnhealthy(_) => "cc_switch_provider_unhealthy",
+        ProxyError::ConfigError(_) => "cc_switch_config_error",
+        ProxyError::TransformError(_) => "cc_switch_transform_error",
+        ProxyError::InvalidRequest(_) => "cc_switch_invalid_request",
+        ProxyError::AuthError(_) => "cc_switch_auth_error",
+        ProxyError::UpstreamError { .. } => "cc_switch_upstream_error",
+        ProxyError::DatabaseError(_) => "cc_switch_database_error",
+        ProxyError::Internal(_) => "cc_switch_internal_error",
+        ProxyError::RequestFailed(_) => "cc_switch_request_failed",
+        ProxyError::AlreadyRunning
+        | ProxyError::NotRunning
+        | ProxyError::BindFailed(_)
+        | ProxyError::StopTimeout
+        | ProxyError::StopFailed(_) => "cc_switch_proxy_error",
+    }
+}
+
+fn compact_codex_proxy_error_message(message: &str, max_chars: usize) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let truncated = normalized
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    format!("{truncated}...(truncated)")
+}
+
+async fn finish_codex_live_aware_response(
+    context: &HandlerContext,
+    endpoint: &str,
+    forward_result: super::forwarder::ForwardedResponse<super::forwarder::StreamingResponse>,
+    request_started_at: Instant,
+    streaming_first_byte_timeout: Option<Duration>,
+    non_streaming_timeout: Option<Duration>,
+) -> Response {
+    let provider = forward_result.provider;
+    let response = forward_result.response;
+    let status = response.status();
+    let success_sync = status.is_success().then(|| SuccessSyncInfo {
+        app_type: context.app_type.clone(),
+        provider: provider.clone(),
+        current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+    });
+
+    if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
+        return match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if status.is_success() && is_sse_response(&response) =>
+            {
+                let request_log = Some(RequestLogContext::from_handler(
+                    context,
+                    provider.clone(),
+                    true,
+                    UsageLogPolicy::Transformed,
+                ));
+                let response_result = build_codex_chat_stream_response(
+                    response,
+                    remaining_timeout(streaming_first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    context.state.codex_chat_history.clone(),
+                );
+                ResponseHandler::finish_streaming(
+                    &context.state,
+                    response_result,
+                    status,
+                    success_sync,
+                    request_log,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Live(response) => {
+                let request_log = Some(RequestLogContext::from_handler(
+                    context,
+                    provider.clone(),
+                    false,
+                    UsageLogPolicy::Transformed,
+                ));
+                let timeout = remaining_timeout(non_streaming_timeout, request_started_at);
+                let response_result = if status.is_success() {
+                    build_codex_chat_response(
+                        response,
+                        timeout,
+                        context.state.codex_chat_history.clone(),
+                    )
+                    .await
+                } else {
+                    build_codex_chat_error_response(
+                        response,
+                        timeout,
+                        context.state.codex_chat_history.clone(),
+                    )
+                    .await
+                };
+                ResponseHandler::finish_buffered(
+                    &context.state,
+                    response_result,
+                    status,
+                    success_sync,
+                    request_log,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Buffered(response) => {
+                let request_log = Some(RequestLogContext::from_handler(
+                    context,
+                    provider.clone(),
+                    false,
+                    UsageLogPolicy::Transformed,
+                ));
+                let response_result = build_buffered_codex_chat_response(
+                    response.status,
+                    &response.headers,
+                    response.body,
+                    context.state.codex_chat_history.clone(),
+                )
+                .await;
+                ResponseHandler::finish_buffered(
+                    &context.state,
+                    response_result,
+                    status,
+                    success_sync,
+                    request_log,
+                )
+                .await
+            }
+        };
+    }
+
+    match response {
+        super::forwarder::StreamingResponse::Live(response) => {
+            let first_byte_timeout = if is_sse_response(&response) {
+                streaming_first_byte_timeout
+            } else {
+                non_streaming_timeout
+            };
+            let response_result = build_passthrough_response(
+                response,
+                remaining_timeout(first_byte_timeout, request_started_at),
+                context.streaming_idle_timeout(),
+            )
+            .await;
+            if response_result
+                .as_ref()
+                .is_ok_and(|prepared| prepared.stream_completion.is_some())
+            {
+                ResponseHandler::finish_streaming(
+                    &context.state,
+                    response_result,
+                    status,
+                    success_sync,
+                    None,
+                )
+                .await
+            } else {
+                ResponseHandler::finish_buffered(
+                    &context.state,
+                    response_result,
+                    status,
+                    success_sync,
+                    None,
+                )
+                .await
+            }
+        }
+        super::forwarder::StreamingResponse::Buffered(response) => {
+            let response_result =
+                build_buffered_passthrough_response(status, &response.headers, response.body);
+            ResponseHandler::finish_buffered(
+                &context.state,
+                response_result,
+                status,
+                success_sync,
+                None,
+            )
+            .await
+        }
+    }
 }
 
 fn request_is_streaming(app_type: &AppType, endpoint: &str, body: &Value) -> bool {
@@ -565,12 +1058,331 @@ fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<D
 #[cfg(test)]
 mod tests {
     use super::{
-        build_buffered_claude_transform_response, responses_sse_to_response_value,
+        build_buffered_claude_transform_response, endpoint_with_query, handle_responses,
+        handle_responses_compact, responses_sse_to_response_value,
         should_use_claude_transform_streaming,
     };
-    use crate::proxy::error::ProxyError;
+    use crate::{
+        app_config::AppType,
+        database::Database,
+        provider::Provider,
+        proxy::{
+            error::ProxyError,
+            provider_router::ProviderRouter,
+            providers::codex_chat_history::CodexChatHistoryStore,
+            server::ProxyServerState,
+            types::{ProxyConfig, ProxyStatus},
+        },
+    };
+    use axum::{
+        body::{to_bytes, Body},
+        extract::State,
+        http::{HeaderMap, StatusCode, Uri},
+        response::Response,
+        routing::any,
+        Json, Router,
+    };
     use bytes::Bytes;
-    use serde_json::Value;
+    use futures::StreamExt;
+    use serde_json::{json, Value};
+    use std::{collections::HashMap, env, sync::Arc, time::Duration};
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    struct TempHome {
+        #[allow(dead_code)]
+        dir: TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_config_dir: Option<String>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("create temp home");
+            let original_home = env::var("HOME").ok();
+            let original_userprofile = env::var("USERPROFILE").ok();
+            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
+
+            env::set_var("HOME", dir.path());
+            env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
+            crate::settings::reload_test_settings();
+
+            Self {
+                dir,
+                original_home,
+                original_userprofile,
+                original_config_dir,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+
+            match &self.original_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_config_dir {
+                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    fn codex_test_state(db: Arc<Database>) -> ProxyServerState {
+        ProxyServerState {
+            db: db.clone(),
+            config: Arc::new(RwLock::new(ProxyConfig::default())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db)),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+        }
+    }
+
+    async fn handle_hanging_chat_sse_upstream() -> Response {
+        let stream = async_stream::stream! {
+            yield Ok::<_, std::io::Error>(Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl_live\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            ));
+            std::future::pending::<()>().await;
+        };
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(stream))
+            .expect("build hanging chat SSE response")
+    }
+
+    async fn spawn_hanging_chat_sse_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/*path", any(handle_hanging_chat_sse_upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging SSE upstream listener");
+        let address = listener.local_addr().expect("upstream listener address");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{address}"), handle)
+    }
+
+    async fn closed_base_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed upstream listener");
+        let address = listener.local_addr().expect("closed upstream address");
+        drop(listener);
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn codex_endpoint_with_query_preserves_responses_query() {
+        let uri: Uri = "/v1/responses?foo=bar&api-version=2025-01-01"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            endpoint_with_query(&uri, "/responses"),
+            "/responses?foo=bar&api-version=2025-01-01"
+        );
+    }
+
+    #[test]
+    fn codex_endpoint_with_query_preserves_responses_compact_query() {
+        let uri: Uri = "/v1/responses/compact?foo=bar".parse().unwrap();
+
+        assert_eq!(
+            endpoint_with_query(&uri, "/responses/compact"),
+            "/responses/compact?foo=bar"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_settings)]
+    async fn codex_non_stream_chat_sse_fallback_streams_without_waiting_for_eof() {
+        let _home = TempHome::new();
+        let (upstream_base_url, upstream_handle) = spawn_hanging_chat_sse_upstream().await;
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let provider = Provider::with_id(
+            "codex-chat".to_string(),
+            "Codex Chat".to_string(),
+            json!({
+                "api_format": "chat",
+                "apiKey": "test-key",
+                "base_url": upstream_base_url,
+                "model": "deepseek-chat"
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save Codex chat provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("set current Codex provider");
+        let state = codex_test_state(db);
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            handle_responses(
+                State(state),
+                Uri::from_static("/v1/responses"),
+                HeaderMap::new(),
+                Json(json!({
+                    "model": "gpt-5.4",
+                    "input": "hello"
+                })),
+            ),
+        )
+        .await
+        .expect("handler should return before upstream SSE completes");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        let mut stream = response.into_body().into_data_stream();
+        let mut output = String::new();
+        for _ in 0..8 {
+            let chunk = tokio::time::timeout(Duration::from_millis(500), stream.next())
+                .await
+                .expect("converted SSE should yield before upstream EOF")
+                .expect("stream should yield a chunk")
+                .expect("stream chunk should be ok");
+            output.push_str(&String::from_utf8(chunk.to_vec()).expect("SSE should be UTF-8"));
+
+            if output.contains("event: response.output_text.delta") {
+                break;
+            }
+        }
+
+        assert!(output.contains("event: response.created"));
+        assert!(output.contains("event: response.output_text.delta"));
+        assert!(output.contains("\"delta\":\"Hel\""));
+
+        upstream_handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_settings)]
+    async fn codex_forward_failure_uses_responses_error_shape() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let provider = Provider::with_id(
+            "codex-broken".to_string(),
+            "Broken Codex".to_string(),
+            json!({
+                "api_format": "responses",
+                "apiKey": "test-key",
+                "base_url": closed_base_url().await
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save broken Codex provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("set current Codex provider");
+        let state = codex_test_state(db);
+
+        let response = handle_responses(
+            State(state),
+            Uri::from_static("/v1/responses?beta=true"),
+            HeaderMap::new(),
+            Json(json!({
+                "model": "gpt-5.4",
+                "input": "hello"
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response body");
+        let body: Value = serde_json::from_slice(&body).expect("parse error response json");
+        let error = &body["error"];
+        let message = error["message"].as_str().expect("error message");
+
+        assert!(message.contains("CC Switch local proxy failed"));
+        assert!(message.contains("Broken Codex"));
+        assert!(message.contains("gpt-5.4"));
+        assert!(message.contains("/responses?beta=true"));
+        assert_eq!(error["type"], "proxy_error");
+        assert_eq!(error["code"], "cc_switch_forward_failed");
+        assert!(error["param"].is_null());
+        assert_eq!(error["provider"], "Broken Codex");
+        assert_eq!(error["model"], "gpt-5.4");
+        assert_eq!(error["endpoint"], "/responses?beta=true");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_settings)]
+    async fn streaming_codex_forward_failure_uses_responses_error_shape() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let provider = Provider::with_id(
+            "codex-broken".to_string(),
+            "Broken Codex".to_string(),
+            json!({
+                "api_format": "responses",
+                "apiKey": "test-key",
+                "base_url": closed_base_url().await
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save broken Codex provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("set current Codex provider");
+        let state = codex_test_state(db);
+
+        let response = handle_responses_compact(
+            State(state),
+            Uri::from_static("/v1/responses/compact?beta=true"),
+            HeaderMap::new(),
+            Json(json!({
+                "model": "gpt-5.4",
+                "input": "hello",
+                "stream": true
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response body");
+        let body: Value = serde_json::from_slice(&body).expect("parse error response json");
+        let error = &body["error"];
+        let message = error["message"].as_str().expect("error message");
+
+        assert!(message.contains("CC Switch local proxy failed"));
+        assert!(message.contains("Broken Codex"));
+        assert!(message.contains("gpt-5.4"));
+        assert!(message.contains("/responses/compact?beta=true"));
+        assert_eq!(error["type"], "proxy_error");
+        assert_eq!(error["code"], "cc_switch_forward_failed");
+        assert!(error["param"].is_null());
+        assert_eq!(error["provider"], "Broken Codex");
+        assert_eq!(error["model"], "gpt-5.4");
+        assert_eq!(error["endpoint"], "/responses/compact?beta=true");
+    }
 
     #[test]
     fn codex_oauth_buffered_transform_aggregates_sse_before_json_parse() {

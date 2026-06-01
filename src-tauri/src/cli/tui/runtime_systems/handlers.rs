@@ -700,6 +700,7 @@ pub(crate) fn handle_proxy_msg(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn apply_webdav_jianguoyun_quick_setup<FSave, FCheck>(
     username: &str,
     password: &str,
@@ -751,6 +752,15 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
                         app.push_toast(
                             texts::tui_toast_already_latest(&info.current_version),
                             ToastKind::Success,
+                        );
+                    } else if info.is_homebrew_managed {
+                        app.overlay = Overlay::None;
+                        app.push_toast(
+                            texts::tui_toast_update_homebrew_required(
+                                &info.current_version,
+                                &info.target_tag,
+                            ),
+                            ToastKind::Info,
                         );
                     } else if info.is_downgrade {
                         app.overlay = Overlay::None;

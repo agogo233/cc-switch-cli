@@ -11,7 +11,9 @@ use crate::{app_config::AppType, provider::Provider};
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
+    providers::codex_chat_history::CodexChatHistoryStore,
     providers::get_adapter,
+    response::decode_buffered_response_body,
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
@@ -27,6 +29,7 @@ pub struct RequestForwarder {
     optimizer_config: OptimizerConfig,
     session_id: String,
     session_client_provided: bool,
+    codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +113,7 @@ impl RequestForwarder {
             optimizer_config: OptimizerConfig::default(),
             session_id: String::new(),
             session_client_provided: false,
+            codex_chat_history: None,
         })
     }
 
@@ -124,6 +128,12 @@ impl RequestForwarder {
         self
     }
 
+    pub fn with_codex_chat_history(mut self, history: Arc<CodexChatHistoryStore>) -> Self {
+        self.codex_chat_history = Some(history);
+        self
+    }
+
+    #[cfg(test)]
     pub async fn forward_response(
         &self,
         app_type: &AppType,
@@ -813,7 +823,7 @@ impl RequestForwarder {
                 } {
                     Ok(Ok(response)) => {
                         let status = response.status();
-                        let response_headers = response.headers().clone();
+                        let mut response_headers = response.headers().clone();
                         let response_body = match options.request_timeout {
                             Some(request_timeout) => {
                                 let remaining_timeout =
@@ -843,6 +853,8 @@ impl RequestForwarder {
                                 ))
                             })?,
                         };
+                        let response_body =
+                            decode_buffered_response_body(&mut response_headers, response_body);
 
                         let buffered_response = BufferedResponse {
                             status,
@@ -975,7 +987,7 @@ async fn read_streaming_error_response(
     request_timeout: Option<Duration>,
 ) -> Result<BufferedResponse, ProxyError> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let mut headers = response.headers().clone();
     let body = match request_timeout {
         Some(request_timeout) => {
             let remaining_timeout = request_timeout.saturating_sub(started_at.elapsed());
@@ -993,6 +1005,7 @@ async fn read_streaming_error_response(
             .await
             .map_err(|error| map_request_send_error(error, None))?,
     };
+    let body = decode_buffered_response_body(&mut headers, body);
 
     Ok(BufferedResponse {
         status,

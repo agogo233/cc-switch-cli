@@ -49,16 +49,12 @@ impl ProviderService {
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
 
-        let mut settings_to_store = Self::normalize_settings_config_for_storage(
+        let settings_to_store = Self::normalize_settings_config_for_storage(
             &AppType::Codex,
             &provider,
             Value::Object(raw_settings),
             common_snippet.as_deref(),
         )?;
-        Self::restore_codex_model_provider_for_storage_best_effort(
-            &provider,
-            &mut settings_to_store,
-        );
 
         {
             let mut guard = state.config.write().map_err(AppError::from)?;
@@ -166,6 +162,7 @@ impl ProviderService {
         Ok(doc.to_string())
     }
 
+    #[allow(dead_code)]
     pub(super) fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         for (key, src_item) in src.iter() {
             match (dst.get_mut(key), src_item.as_table()) {
@@ -186,6 +183,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn strip_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         let mut keys_to_remove = Vec::new();
 
@@ -214,6 +212,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     fn toml_items_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
         match (left.as_value(), right.as_value()) {
             (Some(left_value), Some(right_value)) => {
@@ -223,6 +222,7 @@ impl ProviderService {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn strip_common_codex_config_from_provider(
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
@@ -384,11 +384,6 @@ impl ProviderService {
             }
             snapshot_provider.settings_config = Value::Object(raw_settings);
         };
-        Self::restore_codex_model_provider_for_storage_best_effort(
-            &current_provider,
-            &mut snapshot_provider.settings_config,
-        );
-
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
                 *current = snapshot_provider;
@@ -432,15 +427,10 @@ impl ProviderService {
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-        let auth_to_write = if Self::is_codex_official_provider(provider)
-            && auth.as_object().is_some_and(|auth| auth.is_empty())
-        {
-            None
-        } else {
-            Some(auth)
-        };
-        crate::codex_config::write_codex_live_atomic_optional_auth_with_stable_provider(
-            auth_to_write,
+        crate::codex_config::write_codex_provider_live_with_catalog(
+            &provider.settings_config,
+            Self::codex_live_write_category(provider),
+            auth,
             Some(cfg_text),
         )?;
 
