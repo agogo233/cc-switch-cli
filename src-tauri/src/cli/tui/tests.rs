@@ -56,21 +56,21 @@ impl Drop for EnvGuard {
 }
 
 #[test]
-fn mcp_import_uses_info_toast_kind() {
-    let mut app = App::new(Some(AppType::OpenCode));
+fn mcp_import_uses_supported_apps_import_and_info_toast_kind() {
+    let mut app = App::new(Some(AppType::OpenClaw));
     let mut data = UiData::default();
 
-    import_mcp_for_current_app_with(
+    import_mcp_from_supported_apps_with(
         &mut app,
         &mut data,
-        |_app_type| Ok(0),
+        || Ok(2),
         |_app_type| Ok(UiData::default()),
     )
     .expect("mcp import should work");
 
     let toast = app.toast.as_ref().expect("mcp import should show toast");
     assert_eq!(toast.kind, ToastKind::Info);
-    assert_eq!(toast.message, texts::tui_toast_mcp_imported(0));
+    assert_eq!(toast.message, texts::tui_toast_mcp_imported(2));
 }
 
 #[test]
@@ -99,6 +99,7 @@ fn opening_skills_import_picker_selects_all_by_default() {
             name: "Hello Skill".to_string(),
             description: Some("A local skill".to_string()),
             found_in: vec!["claude".to_string()],
+            path: "/tmp/hello-skill".to_string(),
         }])
     })
     .expect("import picker should open");

@@ -404,6 +404,7 @@ mod tests {
             name: "Hello Skill".to_string(),
             description: None,
             found_in: vec!["claude".to_string()],
+            path: format!("/tmp/{directory}"),
         }
     }
 
@@ -862,6 +863,46 @@ mod tests {
             &app.overlay,
             Overlay::SkillsImportPicker { selected, .. } if selected.is_empty()
         ));
+    }
+
+    #[test]
+    fn skills_import_picker_enter_builds_explicit_apps_from_found_in() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::SkillsImportPicker {
+            skills: vec![crate::services::skill::UnmanagedSkill {
+                directory: "hello-skill".to_string(),
+                name: "Hello Skill".to_string(),
+                description: None,
+                found_in: vec![
+                    AppType::Claude.as_str().to_string(),
+                    AppType::OpenCode.as_str().to_string(),
+                    AppType::OpenClaw.as_str().to_string(),
+                ],
+                path: "/tmp/hello-skill".to_string(),
+            }],
+            selected_idx: 0,
+            selected: std::iter::once("hello-skill".to_string()).collect(),
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        let Action::SkillsImportFromApps { imports } = action else {
+            panic!("expected skills import action");
+        };
+
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].directory, "hello-skill");
+        assert!(imports[0].apps.claude);
+        assert!(imports[0].apps.opencode);
+        assert!(
+            imports[0].apps.is_empty() == false,
+            "supported app targets should be preserved"
+        );
+        assert!(
+            !imports[0].apps.is_enabled_for(&AppType::OpenClaw),
+            "OpenClaw source should not become a target app"
+        );
     }
 
     #[test]

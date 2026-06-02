@@ -30,7 +30,7 @@ pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;
 pub use provider::ProviderService;
 pub use proxy::ProxyService;
-pub use skill::SkillService;
+pub use skill::{ImportSkillSelection, SkillService};
 pub use speedtest::{EndpointLatency, SpeedtestService};
 pub use stream_check::{HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService};
 pub use subscription::{CredentialStatus, ExtraUsage, QuotaTier, SubscriptionQuota};

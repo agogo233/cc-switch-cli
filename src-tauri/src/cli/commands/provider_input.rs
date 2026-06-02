@@ -9,7 +9,7 @@ use crate::provider::{Provider, ProviderMeta};
 use crate::services::ProviderService;
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +157,370 @@ mod tests {
             Some(true)
         );
     }
+
+    #[test]
+    fn build_hermes_settings_config_writes_upstream_snake_case_shape() {
+        let cfg = build_hermes_settings_config(
+            None,
+            "anthropic_messages",
+            " https://openrouter.ai/api/v1/// ",
+            " sk-hermes ",
+            json!([
+                {
+                    "id": "anthropic/claude-opus-4-7",
+                    "name": "Claude Opus 4.7",
+                    "context_length": 1000000
+                }
+            ]),
+            "0.5",
+        )
+        .expect("build Hermes settings");
+
+        assert_eq!(cfg["api_mode"], "anthropic_messages");
+        assert_eq!(cfg["base_url"], "https://openrouter.ai/api/v1");
+        assert_eq!(cfg["api_key"], "sk-hermes");
+        assert_eq!(cfg["rate_limit_delay"], 0.5);
+        assert_eq!(cfg["models"][0]["id"], "anthropic/claude-opus-4-7");
+    }
+
+    #[test]
+    fn build_hermes_settings_config_removes_legacy_aliases_and_preserves_unknown_fields() {
+        let cfg = build_hermes_settings_config(
+            Some(&json!({
+                "api": "openai-completions",
+                "apiMode": "bedrock_converse",
+                "baseUrl": "https://legacy.example/v1",
+                "baseURL": "https://legacy-upper.example/v1",
+                "endpoint": "https://legacy-endpoint.example/v1",
+                "apiKey": "sk-legacy",
+                "auth_token": "sk-auth-token",
+                "key_env": "HERMES_API_KEY",
+                "models": [
+                    { "id": "legacy-model" }
+                ]
+            })),
+            "",
+            "",
+            "",
+            json!([]),
+            "",
+        )
+        .expect("build Hermes settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(
+            obj.get("api_mode"),
+            Some(&json!(crate::hermes_config::HERMES_DEFAULT_API_MODE))
+        );
+        assert_eq!(obj.get("auth_token"), Some(&json!("sk-auth-token")));
+        assert_eq!(obj.get("key_env"), Some(&json!("HERMES_API_KEY")));
+        assert!(obj.get("base_url").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("models").is_none());
+        assert!(obj.get("rate_limit_delay").is_none());
+        for legacy_key in ["api", "apiMode", "baseUrl", "baseURL", "endpoint", "apiKey"] {
+            assert!(
+                !obj.contains_key(legacy_key),
+                "Hermes save should drop legacy alias {legacy_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_hermes_settings_config_omits_invalid_delay_and_rejects_non_array_models() {
+        let cfg = build_hermes_settings_config(None, "codex_responses", "", "", json!([]), "-1")
+            .expect("build Hermes settings");
+        assert_eq!(cfg["api_mode"], "codex_responses");
+        assert!(cfg.get("rate_limit_delay").is_none());
+
+        let err = build_hermes_settings_config(
+            None,
+            "chat_completions",
+            "",
+            "",
+            json!({"id": "model"}),
+            "",
+        )
+        .expect_err("non-array models should fail");
+        assert!(err.to_string().contains("models"));
+    }
+
+    #[test]
+    fn hermes_edit_defaults_read_legacy_aliases() {
+        let defaults = HermesPromptDefaults::from_settings(Some(&json!({
+            "apiMode": "bedrock_converse",
+            "baseUrl": "https://legacy.example/v1",
+            "apiKey": "sk-legacy",
+            "auth_token": "sk-auth-token",
+            "models": [
+                { "id": "legacy-model", "name": "Legacy Model" }
+            ],
+            "rate_limit_delay": 1.25
+        })));
+
+        assert_eq!(defaults.api_mode, "bedrock_converse");
+        assert_eq!(defaults.base_url, "https://legacy.example/v1");
+        assert_eq!(defaults.api_key, "sk-legacy");
+        assert!(defaults.models_json.contains("legacy-model"));
+        assert_eq!(defaults.rate_limit_delay, "1.25");
+    }
+
+    #[test]
+    fn build_opencode_settings_config_writes_tui_shape() {
+        let cfg = build_opencode_settings_config(
+            None,
+            "",
+            " sk-oc ",
+            " https://api.example.com/v1 ",
+            "gpt-4.1-mini",
+            "GPT 4.1 Mini",
+            "128000",
+            "8192",
+            None,
+        )
+        .expect("build OpenCode settings");
+
+        assert_eq!(cfg["npm"], crate::opencode_config::OPENCODE_DEFAULT_NPM);
+        assert_eq!(cfg["options"]["apiKey"], "sk-oc");
+        assert_eq!(cfg["options"]["baseURL"], "https://api.example.com/v1");
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["name"], "GPT 4.1 Mini");
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["limit"]["context"], 128000);
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["limit"]["output"], 8192);
+
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(cfg)
+            .expect("OpenCode schema should accept generated settings");
+    }
+
+    #[test]
+    fn build_opencode_settings_config_omits_blank_options_and_models() {
+        let cfg =
+            build_opencode_settings_config(None, "", "", "", "", "", "not-a-number", "-1", None)
+                .expect("build OpenCode settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(
+            obj.get("npm"),
+            Some(&json!(crate::opencode_config::OPENCODE_DEFAULT_NPM))
+        );
+        assert!(obj.get("options").is_none());
+        assert!(obj.get("models").is_none());
+    }
+
+    #[test]
+    fn build_opencode_settings_config_preserves_unknown_fields_and_removes_renamed_original() {
+        let cfg = build_opencode_settings_config(
+            Some(&json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "apiKey": "sk-old",
+                    "baseURL": "https://old.example/v1",
+                    "headers": {
+                        "X-Test": "1"
+                    },
+                    "setCacheKey": true
+                },
+                "models": {
+                    "primary": {
+                        "name": "Primary",
+                        "limit": {
+                            "context": 128000,
+                            "output": 8192
+                        },
+                        "options": {
+                            "reasoningEffort": "medium"
+                        },
+                        "providerHint": "reasoning"
+                    },
+                    "fallback": {
+                        "name": "Fallback",
+                        "options": {
+                            "fallback": true
+                        }
+                    }
+                },
+                "topExtra": 1
+            })),
+            "@ai-sdk/anthropic",
+            "",
+            "",
+            "renamed",
+            "Renamed",
+            "256000",
+            "",
+            Some("primary"),
+        )
+        .expect("build OpenCode settings");
+
+        assert_eq!(cfg["npm"], "@ai-sdk/anthropic");
+        assert_eq!(cfg["topExtra"], 1);
+        assert!(cfg["options"].get("apiKey").is_none());
+        assert!(cfg["options"].get("baseURL").is_none());
+        assert_eq!(cfg["options"]["headers"]["X-Test"], "1");
+        assert_eq!(cfg["options"]["setCacheKey"], true);
+        assert!(cfg["models"].get("primary").is_none());
+        assert_eq!(cfg["models"]["fallback"]["options"]["fallback"], true);
+        assert_eq!(cfg["models"]["renamed"]["name"], "Renamed");
+        assert_eq!(cfg["models"]["renamed"]["limit"]["context"], 256000);
+        assert!(cfg["models"]["renamed"]["limit"].get("output").is_none());
+    }
+
+    #[test]
+    fn opencode_edit_defaults_match_tui_model_selection() {
+        let defaults = OpenCodePromptDefaults::from_settings(Some(&json!({
+            "npm": "@ai-sdk/anthropic",
+            "options": {
+                "apiKey": "sk-existing",
+                "baseURL": "https://api.existing.example/v1"
+            },
+            "models": {
+                "beta-model": {
+                    "name": "Beta Model",
+                    "limit": {
+                        "context": 64000
+                    }
+                },
+                "alpha-model": {
+                    "name": "Alpha Model",
+                    "options": {
+                        "reasoningEffort": "medium"
+                    },
+                    "limit": {
+                        "context": 128000,
+                        "output": 8192
+                    }
+                }
+            }
+        })));
+
+        assert_eq!(defaults.npm, "@ai-sdk/anthropic");
+        assert_eq!(defaults.api_key, "sk-existing");
+        assert_eq!(defaults.base_url, "https://api.existing.example/v1");
+        assert_eq!(defaults.model_id, "alpha-model");
+        assert_eq!(defaults.model_name, "Alpha Model");
+        assert_eq!(defaults.model_context_limit, "128000");
+        assert_eq!(defaults.model_output_limit, "8192");
+        assert_eq!(defaults.original_model_id.as_deref(), Some("alpha-model"));
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_writes_canonical_shape() {
+        let cfg = build_openclaw_settings_config(
+            None,
+            "",
+            " sk-openclaw ",
+            " https://api.openclaw.example/v1 ",
+            true,
+            json!([
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000
+                }
+            ]),
+        )
+        .expect("build OpenClaw settings");
+
+        assert_eq!(
+            cfg["api"],
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+        );
+        assert_eq!(cfg["apiKey"], "sk-openclaw");
+        assert_eq!(cfg["baseUrl"], "https://api.openclaw.example/v1");
+        assert_eq!(
+            cfg["headers"]["User-Agent"],
+            crate::openclaw_config::OPENCLAW_DEFAULT_USER_AGENT
+        );
+        assert_eq!(cfg["models"][0]["id"], "primary-model");
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_removes_legacy_aliases_and_preserves_extra_headers() {
+        let cfg = build_openclaw_settings_config(
+            Some(&json!({
+                "api_key": "legacy-key",
+                "base_url": "https://legacy.example/v1",
+                "npm": "@legacy/package",
+                "options": {
+                    "apiKey": "legacy-options-key"
+                },
+                "headers": {
+                    "User-Agent": "Existing UA",
+                    "X-Test": "1"
+                },
+                "authHeader": true,
+                "models": [
+                    {
+                        "id": "old-model"
+                    }
+                ]
+            })),
+            "anthropic-messages",
+            "",
+            "",
+            false,
+            json!([
+                {
+                    "id": "new-model",
+                    "name": "New Model",
+                    "context_window": 128000
+                }
+            ]),
+        )
+        .expect("build OpenClaw settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(obj.get("api"), Some(&json!("anthropic-messages")));
+        assert_eq!(obj.get("authHeader"), Some(&json!(true)));
+        assert_eq!(cfg["headers"]["X-Test"], "1");
+        assert!(cfg["headers"].get("User-Agent").is_none());
+        assert!(obj.get("apiKey").is_none());
+        assert!(obj.get("baseUrl").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("base_url").is_none());
+        assert!(obj.get("npm").is_none());
+        assert!(obj.get("options").is_none());
+        assert_eq!(cfg["models"][0]["id"], "new-model");
+        assert!(
+            cfg["models"][0].get("context_window").is_none(),
+            "CLI should remove legacy OpenClaw model aliases before saving"
+        );
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_rejects_non_array_or_empty_models() {
+        let non_array_err =
+            build_openclaw_settings_config(None, "", "", "", false, json!({"id": "model"}))
+                .expect_err("non-array models should fail");
+        assert!(non_array_err.to_string().contains("models"));
+
+        let empty_err = build_openclaw_settings_config(None, "", "", "", false, json!([]))
+            .expect_err("empty models should fail");
+        assert!(empty_err.to_string().contains("models"));
+    }
+
+    #[test]
+    fn openclaw_edit_defaults_read_canonical_settings() {
+        let defaults = OpenClawPromptDefaults::from_settings(Some(&json!({
+            "api": "openai-responses",
+            "apiKey": "sk-existing",
+            "baseUrl": "https://api.existing.example/v1",
+            "headers": {
+                "User-Agent": "Existing UA"
+            },
+            "models": [
+                {
+                    "id": "existing-model",
+                    "contextWindow": 200000
+                }
+            ]
+        })));
+
+        assert_eq!(defaults.api, "openai-responses");
+        assert_eq!(defaults.api_key, "sk-existing");
+        assert_eq!(defaults.base_url, "https://api.existing.example/v1");
+        assert!(defaults.user_agent_enabled);
+        assert!(defaults.models_json.contains("existing-model"));
+    }
 }
 
 pub fn prompt_settings_config_for_add(
@@ -168,9 +532,9 @@ pub fn prompt_settings_config_for_add(
         (AppType::Codex, ProviderAddMode::Official) => prompt_codex_official_config(None),
         (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
         (AppType::Gemini, _) => prompt_gemini_config(None),
-        (AppType::OpenCode, _) => Ok(json!({})),
-        (AppType::Hermes, _) => Ok(json!({})),
-        (AppType::OpenClaw, _) => Ok(json!({})),
+        (AppType::OpenCode, _) => prompt_opencode_config(None),
+        (AppType::Hermes, _) => prompt_hermes_config(None),
+        (AppType::OpenClaw, _) => prompt_openclaw_config(None),
     }
 }
 
@@ -237,6 +601,870 @@ fn build_codex_official_settings_config(current: Option<&Value>) -> Result<Value
         "auth": auth,
         "config": cleaned_config
     }))
+}
+
+struct OpenCodePromptDefaults {
+    npm: String,
+    api_key: String,
+    base_url: String,
+    model_id: String,
+    model_name: String,
+    model_context_limit: String,
+    model_output_limit: String,
+    original_model_id: Option<String>,
+}
+
+impl OpenCodePromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let npm = settings
+            .and_then(|obj| obj.get("npm"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(crate::opencode_config::OPENCODE_DEFAULT_NPM)
+            .to_string();
+
+        let options = settings
+            .and_then(|obj| obj.get("options"))
+            .and_then(Value::as_object);
+        let api_key = options
+            .and_then(|obj| obj.get("apiKey"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = options
+            .and_then(|obj| obj.get("baseURL"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        let mut model_id = String::new();
+        let mut model_name = String::new();
+        let mut model_context_limit = String::new();
+        let mut model_output_limit = String::new();
+        let mut original_model_id = None;
+        if let Some(models) = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_object)
+        {
+            if let Some((selected_id, model_value)) = opencode_selected_model_from_models(models) {
+                model_id = selected_id.clone();
+                model_name = model_value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(selected_id)
+                    .to_string();
+                if let Some(limit) = model_value.get("limit").and_then(Value::as_object) {
+                    if let Some(context) = limit.get("context").and_then(Value::as_u64) {
+                        model_context_limit = context.to_string();
+                    }
+                    if let Some(output) = limit.get("output").and_then(Value::as_u64) {
+                        model_output_limit = output.to_string();
+                    }
+                }
+                original_model_id = Some(selected_id.clone());
+            }
+        }
+
+        Self {
+            npm,
+            api_key,
+            base_url,
+            model_id,
+            model_name,
+            model_context_limit,
+            model_output_limit,
+            original_model_id,
+        }
+    }
+}
+
+fn prompt_opencode_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::tui_label_app_opencode().bright_cyan().bold());
+
+    let defaults = OpenCodePromptDefaults::from_settings(current);
+
+    let npm = Text::new(texts::tui_label_provider_package())
+        .with_initial_value(&defaults.npm)
+        .with_help_message(opencode_npm_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::base_url_label())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(opencode_base_url_help())
+            .prompt()
+    } else {
+        Text::new(texts::base_url_label())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(opencode_base_url_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_id = if defaults.model_id.is_empty() {
+        Text::new(texts::tui_label_opencode_model_id())
+            .with_placeholder("gpt-4.1-mini")
+            .with_help_message(opencode_model_id_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_opencode_model_id())
+            .with_initial_value(&defaults.model_id)
+            .with_help_message(opencode_model_id_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_name = if defaults.model_name.is_empty() {
+        Text::new(texts::tui_label_opencode_model_name())
+            .with_placeholder("GPT 4.1 Mini")
+            .with_help_message(opencode_model_name_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_opencode_model_name())
+            .with_initial_value(&defaults.model_name)
+            .with_help_message(opencode_model_name_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_context_limit = if defaults.model_context_limit.is_empty() {
+        Text::new(texts::tui_label_context_limit())
+            .with_placeholder("128000")
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_context_limit())
+            .with_initial_value(&defaults.model_context_limit)
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_output_limit = if defaults.model_output_limit.is_empty() {
+        Text::new(texts::tui_label_output_limit())
+            .with_placeholder("8192")
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_output_limit())
+            .with_initial_value(&defaults.model_output_limit)
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    build_opencode_settings_config(
+        current,
+        &npm,
+        &api_key,
+        &base_url,
+        &model_id,
+        &model_name,
+        &model_context_limit,
+        &model_output_limit,
+        defaults.original_model_id.as_deref(),
+    )
+}
+
+fn build_opencode_settings_config(
+    current: Option<&Value>,
+    npm: &str,
+    api_key: &str,
+    base_url: &str,
+    model_id: &str,
+    model_name: &str,
+    model_context_limit: &str,
+    model_output_limit: &str,
+    original_model_id: Option<&str>,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let npm = npm.trim();
+    settings_obj.insert(
+        "npm".to_string(),
+        json!(if npm.is_empty() {
+            crate::opencode_config::OPENCODE_DEFAULT_NPM
+        } else {
+            npm
+        }),
+    );
+
+    let options_value = settings_obj
+        .entry("options".to_string())
+        .or_insert_with(|| json!({}));
+    if !options_value.is_object() {
+        *options_value = json!({});
+    }
+    let options_obj = options_value
+        .as_object_mut()
+        .expect("options must be a JSON object");
+    set_or_remove_trimmed(options_obj, "apiKey", api_key);
+    set_or_remove_trimmed(options_obj, "baseURL", base_url);
+    if options_obj.is_empty() {
+        settings_obj.remove("options");
+    }
+
+    let mut models_value = settings_obj
+        .remove("models")
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    if !models_value.is_object() {
+        models_value = Value::Object(Map::new());
+    }
+    let models_obj = models_value
+        .as_object_mut()
+        .expect("models must be a JSON object");
+
+    let current_model_id = opencode_primary_model_id(model_id, model_name);
+    if let Some(original_id) = original_model_id {
+        if current_model_id.as_deref() != Some(original_id) {
+            models_obj.remove(original_id);
+        }
+    }
+
+    if let Some(model_id) = current_model_id {
+        let mut model_obj = match models_obj.remove(&model_id) {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        let model_name = model_name.trim();
+        model_obj.insert(
+            "name".to_string(),
+            json!(if model_name.is_empty() {
+                model_id.as_str()
+            } else {
+                model_name
+            }),
+        );
+
+        let limit_value = model_obj
+            .entry("limit".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !limit_value.is_object() {
+            *limit_value = Value::Object(Map::new());
+        }
+        let limit_obj = limit_value
+            .as_object_mut()
+            .expect("limit must be a JSON object");
+        set_or_remove_u64(limit_obj, "context", model_context_limit);
+        set_or_remove_u64(limit_obj, "output", model_output_limit);
+        if limit_obj.is_empty() {
+            model_obj.remove("limit");
+        }
+
+        models_obj.insert(model_id, Value::Object(model_obj));
+    }
+
+    if !models_obj.is_empty() {
+        settings_obj.insert("models".to_string(), models_value);
+    }
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn opencode_primary_model_id(model_id: &str, model_name: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if !model_id.is_empty() {
+        return Some(model_id.to_string());
+    }
+
+    let model_name = model_name.trim();
+    if !model_name.is_empty() {
+        return Some(model_name.to_string());
+    }
+
+    None
+}
+
+fn opencode_selected_model_from_models<'a>(
+    models: &'a Map<String, Value>,
+) -> Option<(&'a String, &'a Value)> {
+    models.iter().max_by(|(id_a, model_a), (id_b, model_b)| {
+        opencode_model_rank(model_a)
+            .cmp(&opencode_model_rank(model_b))
+            .then_with(|| id_b.cmp(id_a))
+    })
+}
+
+fn opencode_model_rank(model: &Value) -> usize {
+    let mut rank = 0;
+    if model
+        .get("limit")
+        .and_then(Value::as_object)
+        .is_some_and(|obj| !obj.is_empty())
+    {
+        rank += 1;
+    }
+    if model
+        .get("options")
+        .and_then(Value::as_object)
+        .is_some_and(|obj| !obj.is_empty())
+    {
+        rank += 1;
+    }
+    rank
+}
+
+fn opencode_npm_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "AI SDK provider npm 包；留空使用 OpenAI-compatible 默认值。"
+    } else {
+        "AI SDK provider npm package; leave empty for the OpenAI-compatible default."
+    }
+}
+
+fn opencode_base_url_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "OpenCode provider options.baseURL；留空则不写入。"
+    } else {
+        "OpenCode provider options.baseURL; leave empty to omit it."
+    }
+}
+
+fn opencode_model_id_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "models 对象中的主模型键；留空时使用模型名称。"
+    } else {
+        "Primary model key inside models; the model name is used when this is empty."
+    }
+}
+
+fn opencode_model_name_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "OpenCode 模型显示名称；留空时使用模型 ID。"
+    } else {
+        "OpenCode model display name; the model id is used when this is empty."
+    }
+}
+
+fn opencode_limit_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "正整数；留空或无效值会移除此限制。"
+    } else {
+        "Positive integer; empty or invalid values remove this limit."
+    }
+}
+
+struct HermesPromptDefaults {
+    api_mode: String,
+    api_key: String,
+    base_url: String,
+    models_json: String,
+    rate_limit_delay: String,
+}
+
+impl HermesPromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let api_mode = settings
+            .and_then(|obj| obj.get("api_mode").or_else(|| obj.get("apiMode")))
+            .and_then(Value::as_str)
+            .map(normalize_hermes_api_mode)
+            .unwrap_or_else(|| crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string());
+        let api_key = settings
+            .and_then(|obj| {
+                obj.get("api_key")
+                    .or_else(|| obj.get("apiKey"))
+                    .or_else(|| obj.get("auth_token"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = settings
+            .and_then(|obj| {
+                obj.get("base_url")
+                    .or_else(|| obj.get("baseUrl"))
+                    .or_else(|| obj.get("baseURL"))
+                    .or_else(|| obj.get("endpoint"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let models_json = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_array)
+            .map(|models| Value::Array(models.clone()))
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| "[]".to_string());
+        let rate_limit_delay = settings
+            .and_then(|obj| obj.get("rate_limit_delay"))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+
+        Self {
+            api_mode,
+            api_key,
+            base_url,
+            models_json,
+            rate_limit_delay,
+        }
+    }
+}
+
+fn prompt_hermes_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::tui_label_app_hermes().bright_cyan().bold());
+
+    let defaults = HermesPromptDefaults::from_settings(current);
+    let api_modes = crate::hermes_config::HERMES_API_MODES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let api_mode_index = api_modes
+        .iter()
+        .position(|candidate| candidate == &defaults.api_mode)
+        .unwrap_or(0);
+
+    let api_mode = Select::new(texts::tui_label_hermes_api_mode(), api_modes)
+        .with_starting_cursor(api_mode_index)
+        .with_help_message(hermes_api_mode_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::tui_label_hermes_base_url())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(texts::tui_hermes_base_url_scheme())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_base_url())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(texts::tui_hermes_base_url_scheme())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let models_json = if defaults.models_json == "[]" {
+        Text::new(texts::tui_label_hermes_models())
+            .with_placeholder(r#"[{"id":"gpt-4.1","name":"GPT 4.1"}]"#)
+            .with_help_message(hermes_models_json_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_models())
+            .with_initial_value(&defaults.models_json)
+            .with_help_message(hermes_models_json_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let models_value = parse_hermes_models_json(&models_json)?;
+
+    let rate_limit_delay = if defaults.rate_limit_delay.is_empty() {
+        Text::new(texts::tui_label_hermes_rate_limit_delay())
+            .with_placeholder("0.5")
+            .with_help_message(texts::tui_hint_hermes_rate_limit_delay())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_rate_limit_delay())
+            .with_initial_value(&defaults.rate_limit_delay)
+            .with_help_message(texts::tui_hint_hermes_rate_limit_delay())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    build_hermes_settings_config(
+        current,
+        &api_mode,
+        &base_url,
+        &api_key,
+        models_value,
+        &rate_limit_delay,
+    )
+}
+
+fn build_hermes_settings_config(
+    current: Option<&Value>,
+    api_mode: &str,
+    base_url: &str,
+    api_key: &str,
+    models_value: Value,
+    rate_limit_delay: &str,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+        settings_obj.remove(legacy_key);
+    }
+
+    settings_obj.insert(
+        "api_mode".to_string(),
+        json!(normalize_hermes_api_mode(api_mode)),
+    );
+
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    set_or_remove_trimmed(&mut settings_obj, "base_url", &base_url);
+    set_or_remove_trimmed(&mut settings_obj, "api_key", api_key);
+
+    let models_value = normalize_hermes_models_value(models_value)?;
+    if models_value.as_array().is_some_and(Vec::is_empty) {
+        settings_obj.remove("models");
+    } else {
+        settings_obj.insert("models".to_string(), models_value);
+    }
+
+    set_or_remove_f64(&mut settings_obj, "rate_limit_delay", rate_limit_delay);
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn normalize_hermes_api_mode(api_mode: &str) -> String {
+    let api_mode = api_mode.trim();
+    if crate::hermes_config::HERMES_API_MODES
+        .iter()
+        .any(|candidate| *candidate == api_mode)
+    {
+        api_mode.to_string()
+    } else {
+        crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string()
+    }
+}
+
+fn parse_hermes_models_json(raw: &str) -> Result<Value, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(json!([]));
+    }
+    let value = serde_json::from_str::<Value>(trimmed)
+        .map_err(|err| AppError::InvalidInput(texts::tui_toast_invalid_json(&err.to_string())))?;
+    normalize_hermes_models_value(value)
+}
+
+fn normalize_hermes_models_value(value: Value) -> Result<Value, AppError> {
+    if value.is_array() {
+        Ok(value)
+    } else {
+        Err(AppError::localized(
+            "provider.hermes.models.invalid",
+            "Hermes 模型列表必须是 JSON 数组",
+            "Hermes models must be a JSON array",
+        ))
+    }
+}
+
+fn hermes_api_mode_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "供应商 API 协议。请选择与端点匹配的格式。"
+    } else {
+        "Provider API protocol. Choose the format that matches your endpoint."
+    }
+}
+
+fn hermes_models_json_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "JSON 数组；留空或 [] 表示不写入模型。"
+    } else {
+        "JSON array; leave empty or [] to omit models."
+    }
+}
+
+struct OpenClawPromptDefaults {
+    api: String,
+    api_key: String,
+    base_url: String,
+    user_agent_enabled: bool,
+    models_json: String,
+}
+
+impl OpenClawPromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let api = settings
+            .and_then(|obj| obj.get("api"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL)
+            .to_string();
+        let api_key = settings
+            .and_then(|obj| obj.get("apiKey"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = settings
+            .and_then(|obj| obj.get("baseUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let user_agent_enabled = settings
+            .and_then(|obj| obj.get("headers"))
+            .and_then(Value::as_object)
+            .is_some_and(|headers| headers.contains_key("User-Agent"));
+        let models_json = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_array)
+            .map(|models| Value::Array(models.clone()))
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| "[]".to_string());
+
+        Self {
+            api,
+            api_key,
+            base_url,
+            user_agent_enabled,
+            models_json,
+        }
+    }
+}
+
+fn prompt_openclaw_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::config_openclaw_header().bright_cyan().bold());
+
+    let defaults = OpenClawPromptDefaults::from_settings(current);
+    let mut api_protocols = crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    if !api_protocols
+        .iter()
+        .any(|candidate| candidate == &defaults.api)
+    {
+        api_protocols.insert(0, defaults.api.clone());
+    }
+    let api_index = api_protocols
+        .iter()
+        .position(|candidate| candidate == &defaults.api)
+        .unwrap_or(0);
+
+    let api = Select::new(texts::openclaw_api_protocol_label(), api_protocols)
+        .with_starting_cursor(api_index)
+        .with_help_message(texts::openclaw_api_protocol_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::base_url_label())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(texts::openclaw_base_url_help())
+            .prompt()
+    } else {
+        Text::new(texts::base_url_label())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(texts::openclaw_base_url_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let user_agent_enabled = Confirm::new(texts::openclaw_user_agent_prompt())
+        .with_default(defaults.user_agent_enabled)
+        .with_help_message(texts::openclaw_user_agent_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let models_json = if defaults.models_json == "[]" {
+        Text::new(texts::openclaw_models_json_label())
+            .with_placeholder(r#"[{"id":"gpt-4.1","name":"GPT 4.1"}]"#)
+            .with_help_message(texts::openclaw_models_json_help())
+            .prompt()
+    } else {
+        Text::new(texts::openclaw_models_json_label())
+            .with_initial_value(&defaults.models_json)
+            .with_help_message(texts::openclaw_models_json_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let models_value = parse_openclaw_models_json(&models_json)?;
+
+    build_openclaw_settings_config(
+        current,
+        &api,
+        &api_key,
+        &base_url,
+        user_agent_enabled,
+        models_value,
+    )
+}
+
+fn build_openclaw_settings_config(
+    current: Option<&Value>,
+    api: &str,
+    api_key: &str,
+    base_url: &str,
+    user_agent_enabled: bool,
+    models_value: Value,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for legacy_key in ["npm", "options", "api_key", "base_url"] {
+        settings_obj.remove(legacy_key);
+    }
+
+    set_or_remove_trimmed(&mut settings_obj, "apiKey", api_key);
+    set_or_remove_trimmed(&mut settings_obj, "baseUrl", base_url);
+
+    let api = api.trim();
+    settings_obj.insert(
+        "api".to_string(),
+        json!(if api.is_empty() {
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+        } else {
+            api
+        }),
+    );
+
+    let mut headers_obj = match settings_obj.remove("headers") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    if user_agent_enabled {
+        headers_obj
+            .entry("User-Agent".to_string())
+            .or_insert_with(|| json!(crate::openclaw_config::OPENCLAW_DEFAULT_USER_AGENT));
+    } else {
+        headers_obj.remove("User-Agent");
+    }
+    if !headers_obj.is_empty() {
+        settings_obj.insert("headers".to_string(), Value::Object(headers_obj));
+    }
+
+    let models_value = normalize_openclaw_models_value(models_value)?;
+    settings_obj.insert("models".to_string(), models_value);
+
+    serde_json::from_value::<crate::provider::OpenClawProviderConfig>(Value::Object(
+        settings_obj.clone(),
+    ))
+    .map_err(|err| {
+        AppError::localized(
+            "provider.openclaw.settings.invalid",
+            format!("OpenClaw 配置格式无效: {err}"),
+            format!("OpenClaw provider schema is invalid: {err}"),
+        )
+    })?;
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn parse_openclaw_models_json(raw: &str) -> Result<Value, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(openclaw_models_required_error());
+    }
+    let value = serde_json::from_str::<Value>(trimmed)
+        .map_err(|err| AppError::InvalidInput(texts::tui_toast_invalid_json(&err.to_string())))?;
+    normalize_openclaw_models_value(value)
+}
+
+fn normalize_openclaw_models_value(value: Value) -> Result<Value, AppError> {
+    let Some(models) = value.as_array() else {
+        return Err(openclaw_models_required_error());
+    };
+    if models.is_empty() {
+        return Err(openclaw_models_required_error());
+    }
+
+    let normalized_models = models
+        .iter()
+        .cloned()
+        .map(remove_openclaw_model_legacy_aliases)
+        .collect::<Vec<_>>();
+    let normalized_value = Value::Array(normalized_models);
+
+    serde_json::from_value::<Vec<crate::provider::OpenClawModelEntry>>(normalized_value.clone())
+        .map_err(|err| {
+            AppError::InvalidInput(texts::openclaw_models_invalid_schema_error(
+                &err.to_string(),
+            ))
+        })?;
+
+    Ok(normalized_value)
+}
+
+fn remove_openclaw_model_legacy_aliases(model: Value) -> Value {
+    let Value::Object(mut model_obj) = model else {
+        return model;
+    };
+    model_obj.remove("context_window");
+    Value::Object(model_obj)
+}
+
+fn openclaw_models_required_error() -> AppError {
+    AppError::localized(
+        "provider.openclaw.models.missing",
+        "OpenClaw 模型列表必须是非空 JSON 数组",
+        "OpenClaw models must be a non-empty JSON array",
+    )
+}
+
+fn set_or_remove_trimmed(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else {
+        settings_obj.insert(key.to_string(), json!(trimmed));
+    }
+}
+
+fn set_or_remove_u64(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<u64>() {
+        settings_obj.insert(key.to_string(), json!(value));
+    } else {
+        settings_obj.remove(key);
+    }
+}
+
+fn set_or_remove_f64(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<f64>() {
+        if value.is_finite() && value >= 0.0 {
+            settings_obj.insert(key.to_string(), json!(value));
+        } else {
+            settings_obj.remove(key);
+        }
+    } else {
+        settings_obj.remove(key);
+    }
 }
 
 /// 可选字段集合
@@ -405,9 +1633,9 @@ pub fn prompt_settings_config(
             }
         }
         AppType::Gemini => prompt_gemini_config(current),
-        AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
-        AppType::Hermes => Ok(current.cloned().unwrap_or_else(|| json!({}))),
-        AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::OpenCode => prompt_opencode_config(current),
+        AppType::Hermes => prompt_hermes_config(current),
+        AppType::OpenClaw => prompt_openclaw_config(current),
     }
 }
 
@@ -853,6 +2081,23 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
     println!("\n{}", texts::core_config_label().bright_cyan());
     match app_type {
         AppType::Claude => {
+            let is_official = provider
+                .category
+                .as_deref()
+                .is_some_and(|category| category.eq_ignore_ascii_case("official"));
+            let is_codex_oauth = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                == Some("codex_oauth");
+            if !is_official && !is_codex_oauth {
+                let api_format = crate::proxy::providers::get_claude_api_format(provider);
+                println!(
+                    "  {}: {}",
+                    texts::tui_label_claude_api_format(),
+                    texts::tui_claude_api_format_value(api_format)
+                );
+            }
             if let Some(env) = provider.settings_config.get("env") {
                 if let Some(api_key) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
                     println!(
