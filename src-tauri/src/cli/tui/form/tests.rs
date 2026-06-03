@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::commands::provider_input::{build_provider_template_seed, ProviderAddTemplate};
 use crate::provider::Provider;
 use serde_json::json;
 
@@ -24,6 +25,46 @@ fn cubence_template_index(app_type: AppType) -> usize {
 
 fn dds_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* DDS")
+}
+
+fn normalize_template_provider_json(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("inFailoverQueue");
+        if let Some(meta) = obj.get_mut("meta").and_then(|value| value.as_object_mut()) {
+            if meta.get("commonConfigEnabled") == Some(&json!(false)) {
+                meta.remove("commonConfigEnabled");
+            }
+            if meta.is_empty() {
+                obj.remove("meta");
+            }
+        }
+    }
+    value
+}
+
+fn assert_cli_template_matches_tui_serializer(
+    app_type: AppType,
+    template: ProviderAddTemplate,
+    label: &str,
+) {
+    let mut form = ProviderAddFormState::new(app_type.clone());
+    let existing_ids = Vec::<String>::new();
+    form.apply_template(
+        template_index_by_label(app_type.clone(), label),
+        &existing_ids,
+    );
+
+    let cli_value = serde_json::to_value(
+        build_provider_template_seed(&app_type, template, &existing_ids)
+            .expect("CLI template seed should build"),
+    )
+    .expect("CLI provider should serialize");
+    let tui_value = form.to_provider_json_value();
+
+    assert_eq!(
+        normalize_template_provider_json(cli_value),
+        normalize_template_provider_json(tui_value)
+    );
 }
 
 #[test]
@@ -100,6 +141,55 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         !openclaw_labels.contains(&"* PackyCode"),
         "OpenClaw should expose only explicitly supported sponsor presets"
     );
+}
+
+#[test]
+fn cli_provider_templates_match_tui_serializer_output() {
+    for (app_type, template, label) in [
+        (
+            AppType::Claude,
+            ProviderAddTemplate::ClaudeOfficial,
+            "Claude Official",
+        ),
+        (AppType::Claude, ProviderAddTemplate::CodexOauth, "Codex"),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::OpenaiOfficial,
+            "OpenAI Official",
+        ),
+        (
+            AppType::Gemini,
+            ProviderAddTemplate::GoogleOauth,
+            "Google OAuth",
+        ),
+        (
+            AppType::Claude,
+            ProviderAddTemplate::Packycode,
+            "* PackyCode",
+        ),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::Aicodemirror,
+            "* AICodeMirror",
+        ),
+        (AppType::Gemini, ProviderAddTemplate::Cubence, "* Cubence"),
+        (AppType::Claude, ProviderAddTemplate::Dds, "* DDS"),
+        (
+            AppType::OpenCode,
+            ProviderAddTemplate::Aicodemirror,
+            "* AICodeMirror",
+        ),
+        (AppType::OpenCode, ProviderAddTemplate::Cubence, "* Cubence"),
+        (AppType::Hermes, ProviderAddTemplate::Cubence, "* Cubence"),
+        (
+            AppType::OpenClaw,
+            ProviderAddTemplate::Aicodemirror,
+            "* AICodeMirror",
+        ),
+        (AppType::OpenClaw, ProviderAddTemplate::Cubence, "* Cubence"),
+    ] {
+        assert_cli_template_matches_tui_serializer(app_type, template, label);
+    }
 }
 
 #[test]
@@ -2558,6 +2648,15 @@ fn provider_add_form_openclaw_exposes_minimal_dedicated_fields() {
 }
 
 #[test]
+fn provider_add_form_openclaw_generates_upstream_provider_key() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.name.set("OpenClaw Provider");
+
+    assert!(form.ensure_generated_id(&[]));
+    assert_eq!(form.id.value, "openclaw-provider");
+}
+
+#[test]
 fn provider_edit_form_openclaw_keeps_provider_key_visible_but_locked() {
     let provider = Provider::with_id(
         "openclaw-provider".to_string(),
@@ -3310,9 +3409,9 @@ fn provider_edit_form_roundtrip_preserves_upstream_meta_auth_and_type_fields() {
             .and_then(|value| value.as_str()),
         Some("acc-1")
     );
-    assert_eq!(
-        meta.get("apiKeyField").and_then(|value| value.as_str()),
-        Some("ANTHROPIC_AUTH_TOKEN")
+    assert!(
+        meta.get("apiKeyField").is_none(),
+        "upstream omits apiKeyField when the default ANTHROPIC_AUTH_TOKEN field is selected"
     );
     assert_eq!(
         meta.get("providerType").and_then(|value| value.as_str()),
@@ -3321,6 +3420,74 @@ fn provider_edit_form_roundtrip_preserves_upstream_meta_auth_and_type_fields() {
     assert_eq!(
         meta.get("githubAccountId").and_then(|value| value.as_str()),
         Some("gh-123")
+    );
+}
+
+#[test]
+fn provider_edit_form_roundtrip_preserves_claude_api_key_field_shape() {
+    let provider_value = json!({
+        "id": "provider-1",
+        "name": "Provider One",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_API_KEY": "sk-api-key",
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "EXTRA_ENV": "keep"
+            }
+        },
+        "meta": {
+            "apiKeyField": "ANTHROPIC_API_KEY",
+            "endpointAutoSelect": true
+        }
+    });
+    let provider: Provider = serde_json::from_value(provider_value).expect("provider json valid");
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_api_key.value, "sk-api-key");
+    form.claude_api_key.set("sk-updated");
+    let roundtrip = form.to_provider_json_value();
+
+    assert_eq!(
+        roundtrip["settingsConfig"]["env"]["ANTHROPIC_API_KEY"],
+        "sk-updated"
+    );
+    assert!(
+        roundtrip["settingsConfig"]["env"]
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .is_none(),
+        "saving an API_KEY provider should not recreate the default auth-token field"
+    );
+    assert_eq!(roundtrip["settingsConfig"]["env"]["EXTRA_ENV"], "keep");
+    assert_eq!(roundtrip["meta"]["apiKeyField"], "ANTHROPIC_API_KEY");
+    assert_eq!(roundtrip["meta"]["endpointAutoSelect"], true);
+}
+
+#[test]
+fn provider_edit_form_infers_claude_api_key_field_from_env_when_meta_missing() {
+    let provider_value = json!({
+        "id": "provider-1",
+        "name": "Provider One",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_API_KEY": "sk-api-key"
+            }
+        }
+    });
+    let provider: Provider = serde_json::from_value(provider_value).expect("provider json valid");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let roundtrip = form.to_provider_json_value();
+
+    assert_eq!(form.claude_api_key.value, "sk-api-key");
+    assert_eq!(
+        roundtrip["settingsConfig"]["env"]["ANTHROPIC_API_KEY"],
+        "sk-api-key"
+    );
+    assert_eq!(
+        roundtrip["meta"]["apiKeyField"], "ANTHROPIC_API_KEY",
+        "upstream saves non-default Claude auth field in provider meta"
     );
 }
 

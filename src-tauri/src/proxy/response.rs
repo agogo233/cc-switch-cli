@@ -20,7 +20,7 @@ use super::{
         codex_chat_history::{record_responses_sse_stream, CodexChatHistoryStore},
         gemini_shadow::GeminiShadowStore,
         streaming::create_anthropic_sse_stream,
-        streaming_codex_chat::create_responses_sse_stream_from_chat,
+        streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::create_anthropic_sse_stream_from_responses,
         transform_codex_chat,
@@ -249,14 +249,16 @@ pub async fn build_codex_chat_error_response(
     build_buffered_codex_chat_response(status, &headers, body, history).await
 }
 
-pub async fn build_codex_chat_response(
+pub async fn build_codex_chat_response_with_context(
     response: reqwest::Response,
     timeout: Option<Duration>,
     history: Arc<CodexChatHistoryStore>,
+    tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<PreparedResponse, ProxyError> {
     let status = response.status();
     let (headers, body) = read_decoded_buffered_response(response, timeout).await?;
-    build_buffered_codex_chat_response(status, &headers, body, history).await
+    build_buffered_codex_chat_response_with_context(status, &headers, body, history, tool_context)
+        .await
 }
 
 pub fn build_buffered_passthrough_response(
@@ -349,11 +351,12 @@ pub fn build_anthropic_stream_response(
         })
 }
 
-pub fn build_codex_chat_stream_response(
+pub fn build_codex_chat_stream_response_with_context(
     response: reqwest::Response,
     first_byte_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     history: Arc<CodexChatHistoryStore>,
+    tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<PreparedResponse, ProxyError> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -367,7 +370,8 @@ pub fn build_codex_chat_stream_response(
         idle_timeout,
         Some(stream_completion.clone()),
     );
-    let responses_stream = create_responses_sse_stream_from_chat(timed_stream);
+    let responses_stream =
+        create_responses_sse_stream_from_chat_with_context(timed_stream, tool_context);
     let recorded_stream = record_responses_sse_stream(responses_stream, history);
 
     builder
@@ -384,6 +388,23 @@ pub async fn build_buffered_codex_chat_response(
     body: Bytes,
     history: Arc<CodexChatHistoryStore>,
 ) -> Result<PreparedResponse, ProxyError> {
+    build_buffered_codex_chat_response_with_context(
+        status,
+        headers,
+        body,
+        history,
+        transform_codex_chat::CodexToolContext::default(),
+    )
+    .await
+}
+
+pub async fn build_buffered_codex_chat_response_with_context(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+    history: Arc<CodexChatHistoryStore>,
+    tool_context: transform_codex_chat::CodexToolContext,
+) -> Result<PreparedResponse, ProxyError> {
     let upstream_error_summary = if !status.is_success() {
         summarize_upstream_body_bytes(&body)
     } else {
@@ -394,13 +415,16 @@ pub async fn build_buffered_codex_chat_response(
         let upstream_body: Value = serde_json::from_slice(&body).map_err(|error| {
             ProxyError::RequestFailed(format!("parse upstream chat json failed: {error}"))
         })?;
-        let responses_body = transform_codex_chat::chat_completion_to_response(upstream_body)
-            .map_err(|error| {
-                ProxyError::RequestFailed(format!(
-                    "transform upstream chat json failed: {}",
-                    proxy_error_message(error)
-                ))
-            })?;
+        let responses_body = transform_codex_chat::chat_completion_to_response_with_context(
+            upstream_body,
+            &tool_context,
+        )
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!(
+                "transform upstream chat json failed: {}",
+                proxy_error_message(error)
+            ))
+        })?;
         history.record_response(&responses_body).await;
         responses_body
     } else {

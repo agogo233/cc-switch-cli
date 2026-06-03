@@ -1,4 +1,5 @@
 use crate::app_config::{AppType, McpApps};
+use crate::provider::ClaudeApiKeyField;
 use serde_json::Value;
 
 use super::app::EditorState;
@@ -303,6 +304,7 @@ pub struct ProviderAddFormState {
     claude_model_config_touched: bool,
 
     pub claude_api_key: TextInput,
+    pub claude_api_key_field: ClaudeApiKeyField,
     pub claude_base_url: TextInput,
     pub claude_api_format: ClaudeApiFormat,
     pub claude_model: TextInput,

@@ -8430,6 +8430,26 @@ pub mod texts {
         }
     }
 
+    pub fn claude_auth_field_label() -> &'static str {
+        if is_chinese() {
+            "认证字段："
+        } else {
+            "Auth Field:"
+        }
+    }
+
+    pub fn claude_auth_field_auth_token() -> &'static str {
+        if is_chinese() {
+            "ANTHROPIC_AUTH_TOKEN（默认）"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN (Default)"
+        }
+    }
+
+    pub fn claude_auth_field_api_key() -> &'static str {
+        "ANTHROPIC_API_KEY"
+    }
+
     pub fn base_url_label() -> &'static str {
         if is_chinese() {
             "Base URL："
@@ -9423,6 +9443,14 @@ pub mod texts {
             "供应商 ID 不能被修改"
         } else {
             "Provider ID cannot be changed"
+        }
+    }
+
+    pub fn provider_id_empty_error() -> &'static str {
+        if is_chinese() {
+            "供应商 ID 不能为空"
+        } else {
+            "Provider ID cannot be empty"
         }
     }
 

@@ -3,6 +3,58 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
+pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeApiKeyField {
+    AuthToken,
+    ApiKey,
+}
+
+impl ClaudeApiKeyField {
+    pub fn as_env_key(self) -> &'static str {
+        match self {
+            Self::AuthToken => CLAUDE_AUTH_TOKEN_ENV_KEY,
+            Self::ApiKey => CLAUDE_API_KEY_ENV_KEY,
+        }
+    }
+
+    pub fn alternate_env_key(self) -> &'static str {
+        match self {
+            Self::AuthToken => CLAUDE_API_KEY_ENV_KEY,
+            Self::ApiKey => CLAUDE_AUTH_TOKEN_ENV_KEY,
+        }
+    }
+
+    pub fn from_raw(value: &str) -> Option<Self> {
+        match value {
+            CLAUDE_AUTH_TOKEN_ENV_KEY => Some(Self::AuthToken),
+            CLAUDE_API_KEY_ENV_KEY => Some(Self::ApiKey),
+            _ => None,
+        }
+    }
+
+    pub fn from_meta_and_settings(meta: Option<&ProviderMeta>, settings_config: &Value) -> Self {
+        if let Some(field) = meta
+            .and_then(|meta| meta.api_key_field.as_deref())
+            .and_then(Self::from_raw)
+        {
+            return field;
+        }
+
+        if settings_config
+            .get("env")
+            .and_then(Value::as_object)
+            .is_some_and(|env| env.contains_key(CLAUDE_API_KEY_ENV_KEY))
+        {
+            return Self::ApiKey;
+        }
+
+        Self::AuthToken
+    }
+}
+
 // SSOT 模式：不再写供应商副本文件
 
 /// 供应商结构体
@@ -70,10 +122,29 @@ impl Provider {
         self.provider_type() == Some("codex_oauth")
     }
 
+    pub fn is_github_copilot(&self) -> bool {
+        self.provider_type() == Some("github_copilot")
+            || self.claude_base_url_contains("githubcopilot.com")
+    }
+
+    pub fn uses_managed_account_auth(&self) -> bool {
+        self.is_github_copilot()
+            || self.is_codex_oauth()
+            || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
+    }
+
     fn provider_type(&self) -> Option<&str> {
         self.meta
             .as_ref()
             .and_then(|meta| meta.provider_type.as_deref())
+    }
+
+    fn claude_base_url_contains(&self, needle: &str) -> bool {
+        self.settings_config
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str)
+            .map(|base_url| base_url.contains(needle))
+            .unwrap_or(false)
     }
 
     pub fn codex_fast_mode_enabled(&self) -> bool {
@@ -469,7 +540,7 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use super::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -543,6 +614,53 @@ mod tests {
             provider_config_meta.managed_account_id_for("github_copilot"),
             Some("legacy-account".to_string())
         );
+    }
+
+    #[test]
+    fn provider_managed_account_auth_detection_uses_type_or_known_endpoint() {
+        let mut copilot = Provider::with_id(
+            "copilot".to_string(),
+            "Copilot".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+                }
+            }),
+            None,
+        );
+        assert!(copilot.is_github_copilot());
+        assert!(copilot.uses_managed_account_auth());
+
+        let mut codex = Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            serde_json::json!({ "env": {} }),
+            None,
+        );
+        codex.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        assert!(codex.is_codex_oauth());
+        assert!(codex.uses_managed_account_auth());
+
+        let codex_endpoint = Provider::with_id(
+            "codex-endpoint".to_string(),
+            "Codex Endpoint".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex"
+                }
+            }),
+            None,
+        );
+        assert!(codex_endpoint.uses_managed_account_auth());
+
+        copilot.meta = Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        });
+        assert!(copilot.is_github_copilot());
     }
 }
 

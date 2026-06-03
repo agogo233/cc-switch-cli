@@ -12,6 +12,7 @@ const DEFAULT_USAGE_LANGUAGE: &str = "javascript";
 const DEFAULT_USAGE_TIMEOUT: u64 = 10;
 const DEFAULT_USAGE_AUTO_QUERY_INTERVAL: u64 = 5;
 const MAX_USAGE_AUTO_QUERY_INTERVAL: u64 = 1440;
+const CODEX_OAUTH_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_USAGE_GENERAL_PRESET: &str = r#"({
   request: {
     url: "{{baseUrl}}/user/balance",
@@ -248,11 +249,13 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
                 .to_string()
         });
 
-    if let Some(code) = &command.code {
-        script.code = code.clone();
-    } else if let Some(template) = explicit_template {
-        script.code = default_code_for_template(template).to_string();
-    }
+    apply_template_code(
+        &mut script,
+        explicit_template,
+        command.code.as_deref(),
+        &app_type,
+        &provider,
+    );
     if let Some(timeout) = command.timeout {
         script.timeout = Some(timeout);
     } else if script.timeout.is_none() {
@@ -390,6 +393,51 @@ fn default_code_for_template(template: UsageQueryTemplate) -> &'static str {
     }
 }
 
+fn default_code_for_template_for_provider(
+    template: UsageQueryTemplate,
+    app_type: &AppType,
+    provider: &Provider,
+) -> String {
+    match template {
+        UsageQueryTemplate::Custom => custom_usage_code_for_provider(app_type, provider),
+        _ => default_code_for_template(template).to_string(),
+    }
+}
+
+fn custom_usage_code_for_provider(app_type: &AppType, provider: &Provider) -> String {
+    format!(
+        "{}{}",
+        usage_query_custom_variable_comment(app_type, provider),
+        DEFAULT_USAGE_CUSTOM_PRESET
+    )
+}
+
+fn usage_query_custom_variable_comment(app_type: &AppType, provider: &Provider) -> String {
+    let (base_url, api_key) = usage_query_comment_credentials(app_type, provider);
+    format!(
+        "// 支持的变量\n// {{{{baseUrl}}}}\n// =\n// {}\n// {{{{apiKey}}}}\n// =\n// {}\n\n",
+        base_url, api_key,
+    )
+}
+
+fn usage_query_comment_value(value: &str) -> String {
+    value.trim().replace(['\r', '\n'], " ").trim().to_string()
+}
+
+fn apply_template_code(
+    script: &mut UsageScript,
+    explicit_template: Option<UsageQueryTemplate>,
+    command_code: Option<&str>,
+    app_type: &AppType,
+    provider: &Provider,
+) {
+    if let Some(code) = command_code {
+        script.code = code.to_string();
+    } else if let Some(template) = explicit_template {
+        script.code = default_code_for_template_for_provider(template, app_type, provider);
+    }
+}
+
 fn normalize_usage_interval(value: u64) -> u64 {
     value.min(MAX_USAGE_AUTO_QUERY_INTERVAL)
 }
@@ -511,7 +559,21 @@ fn provider_base_url(provider: &Provider) -> Option<String> {
         .or_else(|| {
             provider
                 .settings_config
-                .get("baseUrl")
+                .get("env")
+                .and_then(|value| value.get("GOOGLE_GEMINI_BASE_URL"))
+                .or_else(|| {
+                    provider
+                        .settings_config
+                        .get("env")
+                        .and_then(|value| value.get("GEMINI_BASE_URL"))
+                })
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("base_url")
+                .or_else(|| provider.settings_config.get("baseUrl"))
                 .or_else(|| provider.settings_config.get("baseURL"))
                 .or_else(|| provider.settings_config.get("endpoint"))
                 .and_then(|value| value.as_str())
@@ -525,6 +587,88 @@ fn provider_base_url(provider: &Provider) -> Option<String> {
         })
         .map(|value| value.to_string())
         .or_else(|| provider_codex_base_url(provider))
+}
+
+fn usage_query_comment_credentials(app_type: &AppType, provider: &Provider) -> (String, String) {
+    let (base_url, api_key) = provider_comment_credentials(app_type, provider);
+    let base_url = base_url.unwrap_or_default();
+    (
+        usage_query_comment_value(&base_url),
+        usage_query_comment_value(api_key.unwrap_or_default()),
+    )
+}
+
+fn provider_comment_credentials<'a>(
+    app_type: &AppType,
+    provider: &'a Provider,
+) -> (Option<String>, Option<&'a str>) {
+    let settings = &provider.settings_config;
+    match app_type {
+        AppType::Claude if provider.is_codex_oauth() => {
+            (Some(CODEX_OAUTH_BASE_URL.to_string()), None)
+        }
+        AppType::Claude => {
+            let env = settings.get("env");
+            (
+                env.and_then(|value| value.get("ANTHROPIC_BASE_URL"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                env.and_then(|value| value.get("ANTHROPIC_AUTH_TOKEN"))
+                    .and_then(|value| value.as_str()),
+            )
+        }
+        AppType::Codex => (
+            provider_codex_model_provider_base_url(provider),
+            settings
+                .get("auth")
+                .and_then(|value| value.get("OPENAI_API_KEY"))
+                .and_then(|value| value.as_str()),
+        ),
+        AppType::Gemini => {
+            let env = settings.get("env");
+            (
+                env.and_then(|value| value.get("GOOGLE_GEMINI_BASE_URL"))
+                    .or_else(|| env.and_then(|value| value.get("GEMINI_BASE_URL")))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                env.and_then(|value| value.get("GEMINI_API_KEY"))
+                    .and_then(|value| value.as_str()),
+            )
+        }
+        AppType::OpenCode => {
+            let options = settings.get("options");
+            (
+                options
+                    .and_then(|value| value.get("baseURL"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                options
+                    .and_then(|value| value.get("apiKey"))
+                    .and_then(|value| value.as_str()),
+            )
+        }
+        AppType::Hermes => (
+            settings
+                .get("base_url")
+                .or_else(|| settings.get("baseUrl"))
+                .or_else(|| settings.get("baseURL"))
+                .or_else(|| settings.get("endpoint"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            settings
+                .get("api_key")
+                .or_else(|| settings.get("apiKey"))
+                .or_else(|| settings.get("auth_token"))
+                .and_then(|value| value.as_str()),
+        ),
+        AppType::OpenClaw => (
+            settings
+                .get("baseUrl")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            settings.get("apiKey").and_then(|value| value.as_str()),
+        ),
+    }
 }
 
 fn provider_codex_base_url(provider: &Provider) -> Option<String> {
@@ -550,6 +694,25 @@ fn provider_codex_base_url(provider: &Provider) -> Option<String> {
                 .and_then(|value| value.as_str())
                 .map(|value| value.to_string())
         })
+}
+
+fn provider_codex_model_provider_base_url(provider: &Provider) -> Option<String> {
+    let config_toml = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())?;
+    let table = toml::from_str::<toml::Table>(config_toml).ok()?;
+    let provider_key = table
+        .get("model_provider")
+        .and_then(|value| value.as_str())?;
+    table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .and_then(|providers| providers.get(provider_key))
+        .and_then(|value| value.as_table())
+        .and_then(|provider_table| provider_table.get("base_url"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
 }
 
 #[cfg(test)]
@@ -742,6 +905,219 @@ mod tests {
         assert!(default_code_for_template(UsageQueryTemplate::Newapi).contains("{{accessToken}}"));
         assert!(default_code_for_template(UsageQueryTemplate::Custom).contains("remaining: 0"));
         assert_eq!(default_code_for_template(UsageQueryTemplate::Balance), "");
+    }
+
+    #[test]
+    fn provider_usage_query_custom_template_defaults_include_provider_variables() {
+        let provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": " sk-demo\nsecret ",
+                    "ANTHROPIC_BASE_URL": " https://usage.example.com/v1 "
+                }
+            }),
+            None,
+        );
+        let mut script = default_usage_script();
+
+        apply_template_code(
+            &mut script,
+            Some(UsageQueryTemplate::Custom),
+            None,
+            &AppType::Claude,
+            &provider,
+        );
+
+        assert!(script.code.starts_with(
+            "// 支持的变量\n// {{baseUrl}}\n// =\n// https://usage.example.com/v1\n// {{apiKey}}\n// =\n// sk-demo secret\n\n"
+        ));
+        assert!(script.code.contains(DEFAULT_USAGE_CUSTOM_PRESET));
+    }
+
+    #[test]
+    fn provider_usage_query_custom_template_uses_tui_provider_credentials_by_app() {
+        let cases = vec![
+            (
+                AppType::Claude,
+                Provider::with_id(
+                    "claude".to_string(),
+                    "Claude".to_string(),
+                    serde_json::json!({
+                        "baseUrl": "https://wrong.example/v1",
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://claude.example/v1",
+                            "ANTHROPIC_AUTH_TOKEN": "sk-claude"
+                        }
+                    }),
+                    None,
+                ),
+                "https://claude.example/v1",
+                "sk-claude",
+            ),
+            (
+                AppType::Codex,
+                Provider::with_id(
+                    "codex".to_string(),
+                    "Codex".to_string(),
+                    serde_json::json!({
+                        "config": "base_url = \"https://wrong.example/v1\"\nmodel_provider = \"real\"\n\n[model_providers.real]\nbase_url = \"https://codex.example/v1\"\n",
+                        "auth": {
+                            "OPENAI_API_KEY": "sk-codex"
+                        }
+                    }),
+                    None,
+                ),
+                "https://codex.example/v1",
+                "sk-codex",
+            ),
+            (
+                AppType::Gemini,
+                Provider::with_id(
+                    "gemini".to_string(),
+                    "Gemini".to_string(),
+                    serde_json::json!({
+                        "baseUrl": "https://wrong.example/v1",
+                        "env": {
+                            "GOOGLE_GEMINI_BASE_URL": "https://gemini.example/v1",
+                            "GEMINI_API_KEY": "sk-gemini"
+                        }
+                    }),
+                    None,
+                ),
+                "https://gemini.example/v1",
+                "sk-gemini",
+            ),
+            (
+                AppType::OpenCode,
+                Provider::with_id(
+                    "opencode".to_string(),
+                    "OpenCode".to_string(),
+                    serde_json::json!({
+                        "baseUrl": "https://wrong.example/v1",
+                        "apiKey": "wrong-key",
+                        "options": {
+                            "baseURL": "https://opencode.example/v1",
+                            "apiKey": "sk-opencode"
+                        }
+                    }),
+                    None,
+                ),
+                "https://opencode.example/v1",
+                "sk-opencode",
+            ),
+            (
+                AppType::Hermes,
+                Provider::with_id(
+                    "hermes".to_string(),
+                    "Hermes".to_string(),
+                    serde_json::json!({
+                        "endpoint": "https://wrong.example/v1",
+                        "base_url": "https://hermes.example/v1",
+                        "api_key": "sk-hermes"
+                    }),
+                    None,
+                ),
+                "https://hermes.example/v1",
+                "sk-hermes",
+            ),
+            (
+                AppType::OpenClaw,
+                Provider::with_id(
+                    "openclaw".to_string(),
+                    "OpenClaw".to_string(),
+                    serde_json::json!({
+                        "base_url": "https://wrong.example/v1",
+                        "baseUrl": "https://openclaw.example/v1",
+                        "apiKey": "sk-openclaw"
+                    }),
+                    None,
+                ),
+                "https://openclaw.example/v1",
+                "sk-openclaw",
+            ),
+        ];
+
+        for (app_type, provider, expected_base_url, expected_api_key) in cases {
+            let mut script = default_usage_script();
+
+            apply_template_code(
+                &mut script,
+                Some(UsageQueryTemplate::Custom),
+                None,
+                &app_type,
+                &provider,
+            );
+
+            let expected_prefix = format!(
+                "// 支持的变量\n// {{{{baseUrl}}}}\n// =\n// {expected_base_url}\n// {{{{apiKey}}}}\n// =\n// {expected_api_key}\n\n"
+            );
+            assert!(
+                script.code.starts_with(&expected_prefix),
+                "{} custom variable comment did not match TUI-loaded credentials:\n{}",
+                app_type.as_str(),
+                script.code
+            );
+        }
+    }
+
+    #[test]
+    fn provider_usage_query_custom_template_uses_codex_oauth_provider_variables() {
+        let mut provider = Provider::with_id(
+            "codex-oauth".to_string(),
+            "Codex OAuth".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://wrong.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-wrong"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..ProviderMeta::default()
+        });
+        let mut script = default_usage_script();
+
+        apply_template_code(
+            &mut script,
+            Some(UsageQueryTemplate::Custom),
+            None,
+            &AppType::Claude,
+            &provider,
+        );
+
+        assert!(script.code.starts_with(
+            "// 支持的变量\n// {{baseUrl}}\n// =\n// https://chatgpt.com/backend-api/codex\n// {{apiKey}}\n// =\n// \n\n"
+        ));
+    }
+
+    #[test]
+    fn provider_usage_query_custom_template_explicit_code_is_not_rewritten() {
+        let provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo",
+                    "ANTHROPIC_BASE_URL": "https://usage.example.com/v1"
+                }
+            }),
+            None,
+        );
+        let mut script = default_usage_script();
+
+        apply_template_code(
+            &mut script,
+            Some(UsageQueryTemplate::Custom),
+            Some("return { remaining: 42 };"),
+            &AppType::Claude,
+            &provider,
+        );
+
+        assert_eq!(script.code, "return { remaining: 42 };");
     }
 
     #[test]

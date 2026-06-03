@@ -7,6 +7,7 @@ pub mod codex_chat_history;
 pub mod codex_oauth_auth;
 #[allow(dead_code)]
 pub mod copilot_auth;
+pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
@@ -28,6 +29,7 @@ pub use auth::{AuthInfo, AuthStrategy};
 #[allow(unused_imports)]
 pub use claude::{
     claude_api_format_needs_transform, get_claude_api_format,
+    normalize_anthropic_tool_thinking_history_for_provider,
     transform_claude_request_for_api_format, transform_claude_request_for_api_format_with_shadow,
     transform_gemini_response_for_provider, ClaudeAdapter,
 };

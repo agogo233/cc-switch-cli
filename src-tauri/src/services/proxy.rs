@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -33,14 +33,28 @@ const PROXY_RUNTIME_SESSION_KEY: &str = "proxy_runtime_session";
 const PROXY_RUNTIME_KIND_ENV_KEY: &str = "CC_SWITCH_PROXY_RUNTIME_KIND";
 const PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY: &str = "CC_SWITCH_PROXY_SESSION_TOKEN";
 
-const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 6] = [
+const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 9] = [
     "ANTHROPIC_MODEL",
     "ANTHROPIC_REASONING_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
     "ANTHROPIC_SMALL_FAST_MODEL",
 ];
+
+const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
+const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
+const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeTakeoverAuthPolicy {
+    PreserveExistingOrAuthToken,
+    ManagedAccount,
+}
 
 #[derive(Clone)]
 pub struct ProxyService {
@@ -203,6 +217,219 @@ impl ProxyService {
         });
         registry.insert(runtime_key.to_string(), Arc::downgrade(&runtime));
         runtime
+    }
+
+    #[cfg(test)]
+    fn apply_claude_takeover_fields(config: &mut Value, proxy_url: &str) {
+        Self::apply_claude_takeover_fields_with_policy(
+            config,
+            proxy_url,
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
+        );
+    }
+
+    fn apply_claude_takeover_fields_for_provider(
+        config: &mut Value,
+        proxy_url: &str,
+        provider: &Provider,
+    ) {
+        let uses_managed_account = provider.uses_managed_account_auth();
+        let auth_policy = if uses_managed_account {
+            ClaudeTakeoverAuthPolicy::ManagedAccount
+        } else {
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
+        };
+        let takeover_model_fields = if uses_managed_account {
+            Self::build_claude_takeover_model_fields(&provider.settings_config)
+        } else {
+            Self::build_claude_takeover_model_fields(config)
+        };
+
+        Self::apply_claude_takeover_fields_with_policy_and_models(
+            config,
+            proxy_url,
+            auth_policy,
+            takeover_model_fields,
+        );
+    }
+
+    fn apply_claude_takeover_fields_with_policy(
+        config: &mut Value,
+        proxy_url: &str,
+        auth_policy: ClaudeTakeoverAuthPolicy,
+    ) {
+        let takeover_model_fields = Self::build_claude_takeover_model_fields(config);
+
+        Self::apply_claude_takeover_fields_with_policy_and_models(
+            config,
+            proxy_url,
+            auth_policy,
+            takeover_model_fields,
+        );
+    }
+
+    fn apply_claude_takeover_fields_with_policy_and_models(
+        config: &mut Value,
+        proxy_url: &str,
+        auth_policy: ClaudeTakeoverAuthPolicy,
+        takeover_model_fields: Vec<(&'static str, String)>,
+    ) {
+        if !config.is_object() {
+            *config = json!({});
+        }
+
+        let root = config
+            .as_object_mut()
+            .expect("Claude config should be normalized to an object");
+        let env = root.entry("env".to_string()).or_insert_with(|| json!({}));
+        if !env.is_object() {
+            *env = json!({});
+        }
+
+        let env = env
+            .as_object_mut()
+            .expect("Claude env should be normalized to an object");
+        env.insert("ANTHROPIC_BASE_URL".to_string(), json!(proxy_url));
+
+        for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
+            env.remove(key);
+        }
+
+        for (key, value) in takeover_model_fields {
+            env.insert(key.to_string(), Value::String(value));
+        }
+
+        let token_keys = [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+        ];
+
+        match auth_policy {
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken => {
+                let mut replaced_any = false;
+                for key in token_keys {
+                    if env.contains_key(key) {
+                        env.insert(key.to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
+                        replaced_any = true;
+                    }
+                }
+
+                if !replaced_any {
+                    env.insert(
+                        "ANTHROPIC_AUTH_TOKEN".to_string(),
+                        json!(PROXY_TOKEN_PLACEHOLDER),
+                    );
+                }
+            }
+            ClaudeTakeoverAuthPolicy::ManagedAccount => {
+                for key in token_keys {
+                    env.remove(key);
+                }
+                env.insert(
+                    "ANTHROPIC_API_KEY".to_string(),
+                    json!(PROXY_TOKEN_PLACEHOLDER),
+                );
+            }
+        }
+    }
+
+    fn build_claude_takeover_model_fields(config: &Value) -> Vec<(&'static str, String)> {
+        let Some(env) = config.get("env").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+
+        let default_model = Self::claude_env_string(env, "ANTHROPIC_MODEL");
+        let small_fast_model = Self::claude_env_string(env, "ANTHROPIC_SMALL_FAST_MODEL");
+        let haiku_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .or(small_fast_model)
+            .or(default_model);
+        let sonnet_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .or(default_model)
+            .or(small_fast_model);
+        let opus_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .or(default_model)
+            .or(small_fast_model);
+
+        let mut fields = Vec::with_capacity(6);
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            CLAUDE_TAKEOVER_HAIKU_MODEL,
+            false,
+            haiku_model,
+        );
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            CLAUDE_TAKEOVER_SONNET_MODEL,
+            true,
+            sonnet_model,
+        );
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            CLAUDE_TAKEOVER_OPUS_MODEL,
+            true,
+            opus_model,
+        );
+        fields
+    }
+
+    fn push_claude_takeover_role_fields(
+        fields: &mut Vec<(&'static str, String)>,
+        env: &Map<String, Value>,
+        model_key: &'static str,
+        name_key: &'static str,
+        takeover_model: &'static str,
+        supports_one_m: bool,
+        upstream_model: Option<&str>,
+    ) {
+        let Some(upstream_model) = upstream_model else {
+            return;
+        };
+
+        let mut client_model = takeover_model.to_string();
+        if supports_one_m && Self::has_claude_one_m_marker(upstream_model) {
+            client_model.push_str(CLAUDE_ONE_M_MARKER_FOR_CLIENT);
+        }
+        fields.push((model_key, client_model));
+
+        let display_name = Self::claude_env_string(env, name_key)
+            .map(str::to_string)
+            .unwrap_or_else(|| Self::strip_claude_one_m_marker(upstream_model));
+        if !display_name.is_empty() {
+            fields.push((name_key, display_name));
+        }
+    }
+
+    fn claude_env_string<'a>(env: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+        env.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn has_claude_one_m_marker(model: &str) -> bool {
+        model.trim_end().to_ascii_lowercase().ends_with("[1m]")
+    }
+
+    fn strip_claude_one_m_marker(model: &str) -> String {
+        let trimmed = model.trim();
+        if Self::has_claude_one_m_marker(trimmed) {
+            trimmed[..trimmed.len().saturating_sub(4)]
+                .trim_end()
+                .to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
@@ -1378,6 +1605,11 @@ impl ProxyService {
         if should_sync_backup {
             self.update_live_backup_from_provider(app_type, &provider)
                 .await?;
+
+            if matches!(app_type_enum, AppType::Claude) {
+                self.sync_claude_live_from_provider_while_proxy_active(&provider)
+                    .await?;
+            }
         }
 
         if let Some(server) = self.runtime.server.read().await.as_ref() {
@@ -1389,6 +1621,24 @@ impl ProxyService {
         Ok(HotSwitchOutcome {
             logical_target_changed,
         })
+    }
+
+    pub async fn sync_claude_live_from_provider_while_proxy_active(
+        &self,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let mut effective_provider = provider.clone();
+        effective_provider.settings_config =
+            self.build_live_snapshot_from_provider(&AppType::Claude, provider)?;
+        let mut effective_settings = effective_provider.settings_config.clone();
+        let (proxy_url, _) = self.build_proxy_urls_for_app(&AppType::Claude).await?;
+
+        Self::apply_claude_takeover_fields_for_provider(
+            &mut effective_settings,
+            &proxy_url,
+            &effective_provider,
+        );
+        self.write_claude_live(&effective_settings)
     }
 
     pub async fn switch_proxy_target(
@@ -1634,7 +1884,13 @@ impl ProxyService {
 
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls_for_app(app_type).await?;
         let mut taken_over = live;
-        self.rewrite_live_for_proxy(app_type, &mut taken_over, &proxy_url, &proxy_codex_base_url)?;
+        self.rewrite_live_for_proxy(
+            app_type,
+            &mut taken_over,
+            &proxy_url,
+            &proxy_codex_base_url,
+            provider_for_write.as_ref(),
+        )?;
         if matches!(app_type, AppType::Codex) {
             self.write_codex_live_for_provider(&taken_over, provider_for_write.as_ref())?;
         } else {
@@ -1903,6 +2159,10 @@ impl ProxyService {
             return Ok(());
         };
 
+        if matches!(app_type, AppType::Claude) && provider.uses_managed_account_auth() {
+            return Ok(());
+        }
+
         let Some(root) = (match &mut provider.settings_config {
             Value::Object(root) => Some(root),
             Value::Null => {
@@ -2009,7 +2269,7 @@ impl ProxyService {
         fallback_provider_id: Option<&str>,
     ) -> Result<(Value, bool, Option<Provider>), String> {
         if let Ok(live) = self.read_live_config_for_app(app_type) {
-            let provider = if matches!(app_type, AppType::Codex) {
+            let provider = if matches!(app_type, AppType::Claude | AppType::Codex) {
                 self.current_provider_for_app(app_type).ok().flatten()
             } else {
                 None
@@ -2093,47 +2353,24 @@ impl ProxyService {
         live: &mut Value,
         proxy_url: &str,
         proxy_codex_base_url: &str,
+        provider_for_write: Option<&Provider>,
     ) -> Result<(), String> {
         match app_type {
             AppType::Claude => {
-                if !live.is_object() {
-                    *live = json!({});
-                }
-
-                let root = live
-                    .as_object_mut()
-                    .ok_or_else(|| "claude live config root must be an object".to_string())?;
-                if !root.get("env").is_some_and(Value::is_object) {
-                    root.insert("env".to_string(), json!({}));
-                }
-
-                let env = root
-                    .get_mut("env")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(|| "claude env must be an object".to_string())?;
-                env.insert("ANTHROPIC_BASE_URL".to_string(), json!(proxy_url));
-                for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
-                    env.remove(key);
-                }
-
-                let token_keys = [
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "OPENROUTER_API_KEY",
-                    "OPENAI_API_KEY",
-                ];
-                let mut replaced_any = false;
-                for key in token_keys {
-                    if env.contains_key(key) {
-                        env.insert(key.to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
-                        replaced_any = true;
-                    }
-                }
-
-                if !replaced_any {
-                    env.insert(
-                        "ANTHROPIC_AUTH_TOKEN".to_string(),
-                        json!(PROXY_TOKEN_PLACEHOLDER),
+                if let Some(provider) = provider_for_write {
+                    let mut effective_provider = provider.clone();
+                    effective_provider.settings_config =
+                        self.build_live_snapshot_from_provider(app_type, provider)?;
+                    Self::apply_claude_takeover_fields_for_provider(
+                        live,
+                        proxy_url,
+                        &effective_provider,
+                    );
+                } else {
+                    Self::apply_claude_takeover_fields_with_policy(
+                        live,
+                        proxy_url,
+                        ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                     );
                 }
             }
@@ -2977,6 +3214,149 @@ mod tests {
             .expect("save failover provider");
         db.add_to_failover_queue(app_type, &provider.id)
             .expect("queue failover provider");
+    }
+
+    fn env_object(config: &Value) -> &Map<String, Value> {
+        config
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("env should exist")
+    }
+
+    fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
+        assert_eq!(env.get(key).and_then(Value::as_str), expected, "{key}");
+    }
+
+    #[test]
+    fn managed_account_claude_takeover_uses_api_key_placeholder() {
+        let mut provider = Provider::with_id(
+            "copilot".to_string(),
+            "GitHub Copilot".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com",
+                    "ANTHROPIC_MODEL": "claude-haiku-4.5"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "OPENROUTER_API_KEY": "stale-openrouter-key",
+                "OPENAI_API_KEY": "stale-openai-key"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "OPENROUTER_API_KEY", None);
+        assert_env_str(env, "OPENAI_API_KEY", None);
+    }
+
+    #[test]
+    fn managed_account_claude_takeover_sources_models_from_provider() {
+        let mut provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_MODEL": "gpt-5.4",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4-pro[1M]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4-ultra [1m]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT 5.4 Ultra"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_MODEL": "stale-model",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "stale-haiku",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Stale Haiku",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-sonnet",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Stale Opus"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_MODEL", None);
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            Some("claude-haiku-4-5"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            Some("gpt-5.4-mini"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            Some("claude-sonnet-4-6[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            Some("gpt-5.4-pro"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            Some("claude-opus-4-8[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            Some("GPT 5.4 Ultra"),
+        );
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+    }
+
+    #[test]
+    fn normal_claude_takeover_without_token_keeps_auth_token_fallback() {
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_MODEL": "claude-haiku-4.5"
+            }
+        });
+
+        ProxyService::apply_claude_takeover_fields(&mut live_config, "http://127.0.0.1:15721");
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
     }
 
     #[cfg(unix)]
@@ -3863,6 +4243,83 @@ mod tests {
             !env.contains_key("ANTHROPIC_API_KEY"),
             "sync should not introduce ANTHROPIC_API_KEY when the provider only used ANTHROPIC_AUTH_TOKEN"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enabling_claude_takeover_does_not_sync_live_token_to_managed_account_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+        let service = ProxyService::new(db.clone());
+
+        let mut provider = Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider)
+            .expect("save managed provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+        service.stop().await.expect("stop proxy runtime");
+
+        let updated = db
+            .get_provider_by_id("codex-provider", "claude")
+            .expect("read claude provider")
+            .expect("claude provider exists");
+        let provider_env = env_object(&updated.settings_config);
+        assert_env_str(provider_env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(provider_env, "ANTHROPIC_API_KEY", None);
+
+        let live = service.read_claude_live().expect("read live config");
+        let live_env = env_object(&live);
+        assert_env_str(
+            live_env,
+            "ANTHROPIC_BASE_URL",
+            Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
+        );
+        assert_env_str(live_env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(live_env, "ANTHROPIC_AUTH_TOKEN", None);
     }
 
     #[tokio::test]
@@ -5910,6 +6367,140 @@ requires_openai_auth = true
             .expect("backup exists");
         let expected = serde_json::to_string(&provider_b.settings_config).expect("serialize");
         assert_eq!(backup.original_config, expected);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_provider_refreshes_claude_live_for_managed_account_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "a-key",
+                    "ANTHROPIC_BASE_URL": "https://api.a.example",
+                    "ANTHROPIC_MODEL": "stale-provider-model"
+                },
+                "permissions": { "allow": ["Bash"] }
+            }),
+            None,
+        );
+        let mut provider_b = Provider::with_id(
+            "b".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token-should-not-be-written",
+                    "ANTHROPIC_API_KEY": "provider-api-key-should-not-be-written",
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4-pro[1M]",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "GPT 5.4 Pro",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4-ultra [1m]"
+                },
+                "permissions": { "allow": ["Read"] }
+            }),
+            None,
+        );
+        provider_b.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider_a)
+            .expect("save provider a");
+        db.save_provider("claude", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("claude", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+            .expect("set settings current provider");
+        db.save_live_backup(
+            "claude",
+            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{preferred_port}"),
+                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
+                    "ANTHROPIC_MODEL": "stale-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet"
+                },
+                "permissions": { "allow": ["Bash"] }
+            }))
+            .expect("seed taken-over live file");
+
+        service
+            .hot_switch_provider("claude", "b")
+            .await
+            .expect("hot switch provider");
+
+        let live = service.read_claude_live().expect("read live config");
+        assert_eq!(
+            live.get("permissions"),
+            provider_b.settings_config.get("permissions"),
+            "provider-derived live settings should be refreshed"
+        );
+        let env = env_object(&live);
+        assert_env_str(
+            env,
+            "ANTHROPIC_BASE_URL",
+            Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
+        );
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "OPENROUTER_API_KEY", None);
+        assert_env_str(env, "OPENAI_API_KEY", None);
+        assert_env_str(env, "ANTHROPIC_MODEL", None);
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            Some("claude-haiku-4-5"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            Some("gpt-5.4-mini"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            Some("claude-sonnet-4-6[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            Some("GPT 5.4 Pro"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            Some("claude-opus-4-8[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            Some("gpt-5.4-ultra"),
+        );
     }
 
     #[tokio::test]

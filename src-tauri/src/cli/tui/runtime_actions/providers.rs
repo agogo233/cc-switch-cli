@@ -1378,7 +1378,8 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn hermes_switch_adds_and_enables_provider_then_remove_keeps_it_visible_for_re_add() {
+    fn hermes_remove_from_config_rejects_current_provider_and_keeps_non_current_visible_for_re_add()
+    {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
         let hermes_dir = temp_home.path().join(".hermes");
@@ -1403,6 +1404,19 @@ mod tests {
                     "base_url": "https://hermes.example.com/v1",
                     "api_key": "sk-demo",
                     "models": [{"id": "main", "name": "Main"}]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Hermes Secondary".to_string(),
+                json!({
+                    "base_url": "https://secondary.example.com/v1",
+                    "api_key": "sk-secondary",
+                    "models": [{"id": "secondary", "name": "Secondary"}]
                 }),
                 None,
             ),
@@ -1459,17 +1473,40 @@ mod tests {
             .iter()
             .any(|row| row.id == "p1" && row.is_in_config && row.is_current));
 
-        remove_from_config(&mut ctx, "p1".to_string()).expect("remove hermes provider from config");
+        let err = remove_from_config(&mut ctx, "p1".to_string())
+            .expect_err("current Hermes provider should not be removable from live config");
+        assert!(matches!(
+            err,
+            AppError::Localized {
+                key: "provider.remove_from_config.hermes_current",
+                ..
+            }
+        ));
+        assert!(crate::hermes_config::get_providers()
+            .expect("read hermes providers after failed remove")
+            .contains_key("p1"));
+
+        crate::hermes_config::set_provider(
+            "p2",
+            json!({
+                "base_url": "https://secondary.example.com/v1",
+                "api_key": "sk-secondary",
+                "models": [{"id": "secondary", "name": "Secondary"}]
+            }),
+        )
+        .expect("add secondary hermes provider to live config");
+        remove_from_config(&mut ctx, "p2".to_string())
+            .expect("remove non-current hermes provider from config");
 
         assert!(!crate::hermes_config::get_providers()
             .expect("read hermes providers after remove")
-            .contains_key("p1"));
+            .contains_key("p2"));
         let removed_row = ctx
             .data
             .providers
             .rows
             .iter()
-            .find(|row| row.id == "p1")
+            .find(|row| row.id == "p2")
             .expect("removed provider should remain visible");
         assert!(!removed_row.is_in_config);
         assert!(removed_row.is_saved);
