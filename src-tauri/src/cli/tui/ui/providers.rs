@@ -35,6 +35,65 @@ fn additive_status_label(app_type: &AppType, row: &ProviderRow) -> &'static str 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderProxyBadge {
+    NeedsProxy,
+    NoProxySupport,
+}
+
+impl ProviderProxyBadge {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NeedsProxy => texts::tui_provider_needs_proxy_label(),
+            Self::NoProxySupport => texts::tui_provider_no_proxy_support_label(),
+        }
+    }
+}
+
+fn provider_category_is(row: &ProviderRow, category: &str) -> bool {
+    row.provider
+        .category
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case(category))
+}
+
+fn provider_proxy_badge(app_type: &AppType, row: &ProviderRow) -> Option<ProviderProxyBadge> {
+    match app_type {
+        AppType::Claude if provider_category_is(row, "official") => {
+            Some(ProviderProxyBadge::NoProxySupport)
+        }
+        AppType::Claude => {
+            let api_format = crate::proxy::providers::get_claude_api_format(&row.provider);
+            crate::proxy::providers::claude_api_format_needs_transform(api_format)
+                .then_some(ProviderProxyBadge::NeedsProxy)
+        }
+        AppType::Codex if provider_category_is(row, "official") => {
+            Some(ProviderProxyBadge::NoProxySupport)
+        }
+        AppType::Codex => {
+            crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
+                .then_some(ProviderProxyBadge::NeedsProxy)
+        }
+        _ => None,
+    }
+}
+
+fn provider_proxy_badge_style(badge: ProviderProxyBadge, theme: &super::theme::Theme) -> Style {
+    if theme.no_color {
+        return match badge {
+            ProviderProxyBadge::NeedsProxy => Style::default().add_modifier(Modifier::BOLD),
+            ProviderProxyBadge::NoProxySupport => Style::default(),
+        };
+    }
+
+    match badge {
+        ProviderProxyBadge::NeedsProxy => Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+        ProviderProxyBadge::NoProxySupport => Style::default().fg(theme.comment),
+    }
+}
+
 fn provider_switch_key_label(app_type: &AppType) -> &'static str {
     if app_type.is_additive_mode() {
         texts::tui_key_add_remove()
@@ -83,6 +142,13 @@ fn provider_name_with_quota_line(
     theme: &super::theme::Theme,
 ) -> Line<'static> {
     let mut spans = vec![Span::raw(data::provider_display_name(&app.app_type, row))];
+    if let Some(badge) = provider_proxy_badge(&app.app_type, row) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("[{}]", badge.label()),
+            provider_proxy_badge_style(badge, theme),
+        ));
+    }
     if show_quota {
         if let Some(quota) = quota_compact_line(data.quota.state_for(&row.id), theme, true) {
             spans.push(Span::styled("  (", Style::default().fg(theme.comment)));
@@ -143,6 +209,28 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
     );
 }
 
+/// Shown for a cold-switched app whose real data hasn't arrived yet. Distinct
+/// from the empty state so a freshly switched-to app reads as "loading", never
+/// as "no providers / import config".
+fn render_provider_loading_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let content_lines = vec![Line::styled(
+        texts::tui_provider_loading(),
+        Style::default().fg(theme.comment),
+    )];
+    let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
+    let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
+    for _ in 0..top_padding {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(content_lines);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 pub(super) fn render_providers(
     frame: &mut Frame<'_>,
     app: &App,
@@ -173,8 +261,12 @@ pub(super) fn render_providers(
     if app.focus == Focus::Content {
         let mut keys = Vec::new();
         if data.providers.rows.is_empty() {
-            keys.push(("Enter", texts::tui_key_import_current_config()));
-            keys.push(("a", texts::tui_key_add_provider()));
+            // While the cold-switched app is still loading, don't offer
+            // import/add — the list isn't really empty, just not here yet.
+            if !data.providers.loading {
+                keys.push(("Enter", texts::tui_key_import_current_config()));
+                keys.push(("a", texts::tui_key_add_provider()));
+            }
         } else if visible.is_empty() {
             keys.push(("a", texts::tui_key_add()));
         } else {
@@ -211,7 +303,11 @@ pub(super) fn render_providers(
     }
 
     if data.providers.rows.is_empty() {
-        render_provider_empty_state(frame, chunks[1], theme);
+        if data.providers.loading {
+            render_provider_loading_state(frame, chunks[1], theme);
+        } else {
+            render_provider_empty_state(frame, chunks[1], theme);
+        }
         return;
     }
 
@@ -343,8 +439,20 @@ pub(super) fn render_provider_detail(
             Span::raw(": "),
             Span::raw(data::provider_display_name(&app.app_type, row)),
         ]),
-        Line::raw(""),
     ];
+
+    if let Some(badge) = provider_proxy_badge(&app.app_type, row) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                texts::tui_label_provider_proxy(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::styled(badge.label(), provider_proxy_badge_style(badge, theme)),
+        ]));
+    }
+
+    lines.push(Line::raw(""));
 
     if let Some(url) = row.api_url.as_deref() {
         lines.push(Line::from(vec![
@@ -625,6 +733,101 @@ mod tests {
             }),
         );
         data
+    }
+
+    fn claude_openai_chat_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Claude);
+        data.providers.rows[0].provider = Provider::with_id(
+            "p1".to_string(),
+            "OpenAI Format Provider".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+            None,
+        );
+        data.providers.rows[0].provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        data
+    }
+
+    fn codex_chat_wire_api_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Codex);
+        data.providers.rows[0].provider = Provider::with_id(
+            "p1".to_string(),
+            "Chat Wire Provider".to_string(),
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"model\"\n\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = true\n"
+            }),
+            None,
+        );
+        data
+    }
+
+    #[test]
+    fn claude_provider_list_marks_openai_format_as_needing_proxy() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = claude_openai_chat_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("OpenAI Format Provider"), "{all}");
+        assert!(all.contains("[Needs Proxy]"), "{all}");
+        assert!(!all.contains("No Proxy Support"), "{all}");
+    }
+
+    #[test]
+    fn claude_provider_detail_marks_official_as_no_proxy_support() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "official".to_string(),
+        };
+        app.focus = Focus::Content;
+        let data = current_official_claude_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Proxy: No Proxy Support"), "{all}");
+    }
+
+    #[test]
+    fn codex_provider_list_marks_chat_wire_api_as_needing_proxy() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = codex_chat_wire_api_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Chat Wire Provider"), "{all}");
+        assert!(all.contains("[Needs Proxy]"), "{all}");
+    }
+
+    #[test]
+    fn provider_proxy_badge_uses_chinese_text() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::Chinese);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = claude_openai_chat_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+        let compact = all.replace(' ', "");
+
+        assert!(compact.contains("[需要代理]"), "{all}");
+        assert!(!all.contains("Needs Proxy"), "{all}");
     }
 
     #[test]

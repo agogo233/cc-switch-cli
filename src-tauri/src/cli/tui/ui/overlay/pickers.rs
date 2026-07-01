@@ -195,41 +195,43 @@ pub(super) fn render_claude_api_format_picker_overlay(
         width: chunks[1].width.saturating_sub(4),
         height: chunks[1].height.saturating_sub(2),
     };
-    let current = app
+    let (app_type, current) = app
         .form
         .as_ref()
         .and_then(|form| match form {
-            FormState::ProviderAdd(provider) => Some(provider.claude_api_format),
+            FormState::ProviderAdd(provider) => {
+                Some((provider.app_type.clone(), provider.claude_api_format))
+            }
             _ => None,
         })
-        .unwrap_or(crate::cli::tui::form::ClaudeApiFormat::Anthropic);
-
-    let items = crate::cli::tui::form::ClaudeApiFormat::ALL
-        .into_iter()
-        .map(|api_format| {
-            let marker = if api_format == current {
-                texts::tui_marker_active()
-            } else {
-                texts::tui_marker_inactive()
-            };
-            ListItem::new(Line::from(Span::raw(format!(
-                "{marker}  {}",
-                texts::tui_claude_api_format_value(api_format.as_str())
-            ))))
+        .unwrap_or_else(|| {
+            (
+                app.app_type.clone(),
+                crate::cli::tui::form::ClaudeApiFormat::Anthropic,
+            )
         });
+
+    let choices = crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type);
+    let items = choices.iter().copied().map(|api_format| {
+        let marker = if api_format == current {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        let label = if matches!(app_type, crate::app_config::AppType::Codex) {
+            texts::tui_codex_api_format_value(api_format.as_str())
+        } else {
+            texts::tui_claude_api_format_value(api_format.as_str())
+        };
+        ListItem::new(Line::from(Span::raw(format!("{marker}  {}", label))))
+    });
 
     let list = List::new(items)
         .highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
 
     let mut state = ListState::default();
-    state.select(Some(
-        selected.min(
-            crate::cli::tui::form::ClaudeApiFormat::ALL
-                .len()
-                .saturating_sub(1),
-        ),
-    ));
+    state.select(Some(selected.min(choices.len().saturating_sub(1))));
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
@@ -739,6 +741,10 @@ fn render_hermes_model_picker_input(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "model picker renderer receives transient search state"
+)]
 pub(super) fn render_model_fetch_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
@@ -1430,6 +1436,10 @@ pub(super) fn render_skills_sync_method_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "app picker renderer receives list state and display labels"
+)]
 fn render_apps_picker_overlay<A>(
     frame: &mut Frame<'_>,
     content_area: Rect,

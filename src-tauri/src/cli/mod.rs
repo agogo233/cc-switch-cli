@@ -48,6 +48,12 @@ pub enum Commands {
     #[command(subcommand)]
     Provider(commands::provider::ProviderCommand),
 
+    /// Switch to a provider (shortcut for `provider switch <id>`)
+    Use {
+        /// Provider ID to switch to
+        id: String,
+    },
+
     /// Manage MCP servers (list, add, edit, delete, sync)
     #[command(subcommand)]
     Mcp(commands::mcp::McpCommand),
@@ -98,6 +104,9 @@ pub enum Commands {
     #[command(subcommand)]
     Env(commands::env::EnvCommand),
 
+    /// Import a resource (provider/mcp/prompt/skill) from a ccswitch:// deep link URL
+    Deeplink(commands::deeplink::DeeplinkCommand),
+
     /// Update cc-switch binary to latest release
     Update(commands::update::UpdateCommand),
 
@@ -131,6 +140,7 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{Cli, Commands};
+    use crate::app_config::AppType;
     use crate::cli::commands::completions::{
         CompletionLifecycleCommand, CompletionsAction, ManagedShellSelection,
     };
@@ -156,6 +166,29 @@ mod tests {
     }
 
     #[test]
+    fn skills_market_command_parses() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "skills",
+            "market",
+            "python",
+            "--limit",
+            "10",
+            "--offset",
+            "20",
+        ]);
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills(super::commands::skills::SkillsCommand::Market {
+                query,
+                limit: 10,
+                offset: 20,
+            })) if query == "python"
+        ));
+    }
+
+    #[test]
     fn parses_proxy_serve_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "proxy", "serve", "--listen-port", "0"]);
 
@@ -167,6 +200,27 @@ mod tests {
                 assert_eq!(listen_port, Some(0));
             }
             _ => panic!("expected proxy serve command"),
+        }
+    }
+
+    #[test]
+    fn parses_use_shortcut_command() {
+        let cli = Cli::parse_from(["cc-switch", "use", "demo"]);
+
+        match cli.command {
+            Some(Commands::Use { id }) => assert_eq!(id, "demo"),
+            _ => panic!("expected use shortcut command"),
+        }
+    }
+
+    #[test]
+    fn parses_use_shortcut_with_app_global() {
+        let cli = Cli::parse_from(["cc-switch", "--app", "codex", "use", "demo"]);
+
+        assert_eq!(cli.app, Some(AppType::Codex));
+        match cli.command {
+            Some(Commands::Use { id }) => assert_eq!(id, "demo"),
+            _ => panic!("expected use shortcut command"),
         }
     }
 
@@ -262,6 +316,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_update_check_json_flags() {
+        let cli = Cli::parse_from(["cc-switch", "update", "--check", "--json"]);
+
+        match cli.command {
+            Some(Commands::Update(update)) => {
+                assert!(update.check);
+                assert!(update.json);
+                assert_eq!(update.version, None);
+            }
+            _ => panic!("expected update command"),
+        }
+    }
+
+    #[test]
+    fn update_check_conflicts_with_explicit_version() {
+        let err = match Cli::try_parse_from([
+            "cc-switch",
+            "update",
+            "--check",
+            "--version",
+            "v999.0.0",
+        ]) {
+            Ok(_) => panic!("update --check should reject --version"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn update_json_requires_check() {
+        let err = match Cli::try_parse_from(["cc-switch", "update", "--json"]) {
+            Ok(_) => panic!("update --json should require --check"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn parses_settings_visible_apps_enable_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "settings", "visible-apps", "enable", "gemini"]);
 
@@ -284,6 +378,46 @@ mod tests {
                 language: Some(super::commands::settings::LanguageArg::Zh),
             })) => {}
             _ => panic!("expected settings language command"),
+        }
+    }
+
+    #[test]
+    fn parses_settings_codex_history_enable_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-history",
+            "enable",
+            "--migrate-existing",
+        ]);
+
+        match cli.command {
+            Some(Commands::Settings(super::commands::settings::SettingsCommand::CodexHistory(
+                super::commands::settings::CodexHistoryCommand::Enable { migrate_existing },
+            ))) => {
+                assert!(migrate_existing);
+            }
+            _ => panic!("expected settings codex-history enable command"),
+        }
+    }
+
+    #[test]
+    fn parses_settings_codex_history_disable_restore_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-history",
+            "disable",
+            "--restore",
+        ]);
+
+        match cli.command {
+            Some(Commands::Settings(super::commands::settings::SettingsCommand::CodexHistory(
+                super::commands::settings::CodexHistoryCommand::Disable { restore },
+            ))) => {
+                assert!(restore);
+            }
+            _ => panic!("expected settings codex-history disable command"),
         }
     }
 
@@ -415,6 +549,31 @@ mod tests {
                 assert!(!all);
             }
             _ => panic!("expected sessions list command"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_sync_usage_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "sessions",
+            "sync-usage",
+            "--provider",
+            "codex",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Sessions(super::commands::sessions::SessionsCommand::SyncUsage {
+                provider,
+                all,
+                json,
+            })) => {
+                assert_eq!(provider, Some(super::AppType::Codex));
+                assert!(!all);
+                assert!(json);
+            }
+            _ => panic!("expected sessions sync-usage command"),
         }
     }
 
@@ -558,12 +717,33 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Claude {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start claude command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_claude_dry_run_option() {
+        let cli = Cli::parse_from(["cc-switch", "start", "claude", "demo", "--dry-run"]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Claude {
+                selector,
+                dry_run,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert!(dry_run);
+                assert!(native_args.is_empty());
+            }
+            _ => panic!("expected start claude dry-run command"),
         }
     }
 
@@ -582,9 +762,11 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Claude {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert_eq!(
                     native_args,
                     vec![OsString::from("--dangerously-skip-permissions")]
@@ -620,12 +802,45 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_codex_dry_run_with_native_args_after_double_dash() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "start",
+            "codex",
+            "demo",
+            "--dry-run",
+            "--",
+            "--model",
+            "gpt-5.4",
+        ]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Codex {
+                selector,
+                dry_run,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert!(dry_run);
+                assert_eq!(
+                    native_args,
+                    vec![OsString::from("--model"), OsString::from("gpt-5.4")]
+                );
+            }
+            _ => panic!("expected start codex dry-run command with native args"),
         }
     }
 
@@ -647,9 +862,11 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert_eq!(
                     native_args,
                     vec![
@@ -676,7 +893,9 @@ mod tests {
             .expect("claude subcommand should exist");
         let help = claude.render_long_help().to_string();
 
+        assert!(help.contains("--dry-run"));
         assert!(help.contains("Native Claude CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start claude demo --dry-run"));
         assert!(help.contains("cc-switch start claude demo -- --dangerously-skip-permissions"));
     }
 
@@ -692,7 +911,9 @@ mod tests {
             .expect("codex subcommand should exist");
         let help = codex.render_long_help().to_string();
 
+        assert!(help.contains("--dry-run"));
         assert!(help.contains("Native Codex CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start codex demo --dry-run"));
         assert!(help.contains("cc-switch start codex demo -- --model gpt-5.4"));
     }
 
@@ -786,11 +1007,80 @@ mod tests {
         match cli.command {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::FetchModels {
                 id,
+                base_url,
+                api_key,
+                auth,
             })) => {
-                assert_eq!(id, "demo");
+                assert_eq!(id.as_deref(), Some("demo"));
+                assert_eq!(base_url, None);
+                assert_eq!(api_key, None);
+                assert_eq!(auth, None);
             }
             _ => panic!("expected provider fetch-models command"),
         }
+    }
+
+    #[test]
+    fn parses_provider_fetch_models_one_off_options() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "--app",
+            "gemini",
+            "provider",
+            "fetch-models",
+            "--base-url",
+            "https://gemini.example.com",
+            "--api-key",
+            "sk-gemini",
+            "--auth",
+            "google-api-key",
+        ]);
+
+        assert_eq!(cli.app, Some(AppType::Gemini));
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::FetchModels {
+                id,
+                base_url,
+                api_key,
+                auth,
+            })) => {
+                assert_eq!(id, None);
+                assert_eq!(base_url.as_deref(), Some("https://gemini.example.com"));
+                assert_eq!(api_key.as_deref(), Some("sk-gemini"));
+                assert_eq!(
+                    auth,
+                    Some(super::commands::provider::ModelFetchAuthArg::GoogleApiKey)
+                );
+            }
+            _ => panic!("expected provider fetch-models command"),
+        }
+    }
+
+    #[test]
+    fn provider_fetch_models_requires_id_or_base_url() {
+        let err = match Cli::try_parse_from(["cc-switch", "provider", "fetch-models"]) {
+            Ok(_) => panic!("provider fetch-models should require id or --base-url"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn provider_fetch_models_rejects_saved_id_with_one_off_base_url() {
+        let err = match Cli::try_parse_from([
+            "cc-switch",
+            "provider",
+            "fetch-models",
+            "demo",
+            "--base-url",
+            "https://api.example.com",
+        ]) {
+            Ok(_) => panic!("saved provider id should conflict with --base-url"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -1119,6 +1409,65 @@ mod tests {
                 assert_eq!(rule, "Read");
             }
             _ => panic!("expected config openclaw tools allow add command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_openclaw_tools_allow_set_at_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "config",
+            "openclaw",
+            "tools",
+            "allow",
+            "set-at",
+            "2",
+            "Edit",
+        ]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::OpenClaw(
+                super::commands::config_openclaw::OpenClawCommand::Tools(
+                    super::commands::config_openclaw::OpenClawToolsCommand::Allow(
+                        super::commands::config_openclaw::OpenClawRuleListCommand::SetAt {
+                            index,
+                            rule,
+                        },
+                    ),
+                ),
+            ))) => {
+                assert_eq!(index, 2);
+                assert_eq!(rule, "Edit");
+            }
+            _ => panic!("expected config openclaw tools allow set-at command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_openclaw_agents_fallback_remove_at_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "config",
+            "openclaw",
+            "agents",
+            "fallback",
+            "remove-at",
+            "3",
+        ]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::OpenClaw(
+                super::commands::config_openclaw::OpenClawCommand::Agents(
+                    super::commands::config_openclaw::OpenClawAgentsCommand::Fallback(
+                        super::commands::config_openclaw::OpenClawFallbackCommand::RemoveAt {
+                            index,
+                        },
+                    ),
+                ),
+            ))) => {
+                assert_eq!(index, 3);
+            }
+            _ => panic!("expected config openclaw agents fallback remove-at command"),
         }
     }
 

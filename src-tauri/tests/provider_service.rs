@@ -251,7 +251,7 @@ command = "echo"
 }
 
 #[test]
-fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
+fn provider_service_switch_codex_overwrites_live_auth_when_preservation_off() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -273,7 +273,16 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&live_auth, Some(legacy_config))
+    let third_party_config = r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(third_party_config))
         .expect("seed existing Codex OAuth live config");
 
     let mut initial_config = MultiAppConfig::default();
@@ -301,15 +310,7 @@ requires_openai_auth = true
                 "AiHubMix".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "third-party-key"},
-                    "config": r#"model_provider = "aihubmix"
-model = "gpt-5.4"
-
-[model_providers.aihubmix]
-name = "AiHubMix"
-base_url = "https://aihubmix.example/v1"
-wire_api = "responses"
-requires_openai_auth = true
-"#
+                    "config": third_party_config
                 }),
                 None,
             ),
@@ -318,19 +319,37 @@ requires_openai_auth = true
 
     let state = state_from_config(initial_config);
 
+    // Upstream parity (clean-write, preservation OFF): switching to a
+    // third-party provider OVERWRITES auth.json with the provider's API key and
+    // overwrites config.toml. The live OAuth cache is intentionally replaced
+    // because preserve_codex_official_auth_on_switch is off.
     ProviderService::switch(&state, AppType::Codex, "third-party")
-        .expect("switch to third-party provider should succeed");
+        .expect("clean-write switch should succeed");
 
     let auth_value: serde_json::Value =
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
-        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+        auth_value
+            .get("OPENAI_API_KEY")
+            .and_then(|value| value.as_str()),
         Some("third-party-key"),
-        "default (preservation off) should overwrite auth.json with the third-party API key"
+        "clean switch should overwrite auth.json with the incoming provider key"
     );
+
+    let config_text =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        auth_value.pointer("/tokens/access_token").is_none(),
-        "default switch must clear the official ChatGPT OAuth token from live auth.json"
+        config_text.contains("aihubmix"),
+        "clean switch should overwrite config.toml with the third-party provider: {config_text}"
+    );
+
+    let guard = state.config.read().expect("read config after switch");
+    let manager = guard
+        .get_manager(&AppType::Codex)
+        .expect("codex manager after switch");
+    assert_eq!(
+        manager.current, "third-party",
+        "switch should update the current provider"
     );
 }
 
@@ -340,7 +359,7 @@ fn provider_service_switch_codex_preserves_provider_model_provider_after_history
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let legacy_auth = json!({ "OPENAI_API_KEY": "rightcode-key" });
+    let legacy_auth = json!({});
     let legacy_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
 
@@ -350,7 +369,11 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+    let live_config = r#"[mcp_servers.legacy]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(live_config))
         .expect("seed existing codex live config");
 
     let mut initial_config = MultiAppConfig::default();
@@ -440,7 +463,7 @@ fn provider_service_switch_codex_backfill_keeps_provider_specific_model_provider
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let legacy_auth = json!({ "OPENAI_API_KEY": "rightcode-key" });
+    let legacy_auth = json!({});
     let provider_a_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
 
@@ -450,7 +473,11 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(provider_a_config))
+    let live_config = r#"[mcp_servers.legacy]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(live_config))
         .expect("seed existing codex live config");
 
     let mut initial_config = MultiAppConfig::default();
@@ -522,8 +549,6 @@ requires_openai_auth = true
 
     ProviderService::switch(&state, AppType::Codex, "provider-b")
         .expect("switch to provider b should succeed");
-    ProviderService::switch(&state, AppType::Codex, "provider-c")
-        .expect("switch to provider c should succeed");
 
     let guard = state.config.read().expect("read config after switches");
     let provider_b_config = guard
@@ -563,11 +588,10 @@ fn provider_service_switch_codex_backfill_ignores_invalid_template_config() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
-    let live_config = r#"model_provider = "stable"
-
-[model_providers.stable]
-base_url = "https://stable.example/v1"
+    let live_auth = json!({});
+    let live_config = r#"[mcp_servers.local]
+type = "stdio"
+command = "echo"
 "#;
     write_codex_live_atomic(&live_auth, Some(live_config)).expect("seed codex live config");
 
@@ -620,13 +644,13 @@ fn update_current_codex_provider_preserves_managed_mcp_servers() {
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "updated-key" });
     let live_config = r#"disable_response_storage = true
 model_provider = "current"
 model = "gpt-5.2-codex"
 
 [model_providers.current]
-base_url = "https://api.before.example/v1"
+base_url = "https://api.after.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -695,13 +719,12 @@ fn add_current_codex_provider_preserves_managed_mcp_servers() {
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
-    let live_config = r#"disable_response_storage = true
-model_provider = "legacy"
+    let live_auth = json!({ "OPENAI_API_KEY": "fresh-key" });
+    let live_config = r#"model_provider = "new"
 model = "gpt-5.2-codex"
 
-[model_providers.legacy]
-base_url = "https://api.legacy.example/v1"
+[model_providers.new]
+base_url = "https://api.new.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -754,13 +777,13 @@ fn update_current_codex_provider_uses_db_current_even_if_config_current_drifted(
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "updated-key" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "current"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.current]
+base_url = "https://api.after.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -851,13 +874,13 @@ fn add_first_codex_provider_sets_db_current_and_rewrites_live_when_db_current_mi
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "fresh-key" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "new"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.new]
+base_url = "https://api.new.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -1469,7 +1492,118 @@ fn switch_gemini_merges_existing_settings_preserving_mcp_servers() {
 }
 
 #[test]
-fn provider_service_switch_claude_updates_live_and_state() {
+fn provider_service_switch_claude_overwrites_live_with_provider_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+    let legacy_live = json!({
+        "env": {
+            "LOCAL_ONLY": "keep-me"
+        },
+        "workspace": {
+            "path": "/tmp/workspace"
+        }
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+    )
+    .expect("seed claude live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "stale-key" }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Fresh Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "fresh-key" },
+                    "permissions": { "allow": ["Bash(cargo test:*)"] }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Claude, "new-provider")
+        .expect("switch provider should succeed");
+
+    // Upstream parity (clean-write): settings.json is OVERWRITTEN with the new
+    // provider's effective config. Local-only fields that are neither in the
+    // provider nor the common-config snippet are NOT preserved.
+    let live_after: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings");
+    assert_eq!(
+        live_after
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|key| key.as_str()),
+        Some("fresh-key"),
+        "live settings.json should include new provider auth"
+    );
+    assert!(
+        live_after
+            .get("env")
+            .and_then(|env| env.get("LOCAL_ONLY"))
+            .is_none(),
+        "clean overwrite should not retain local-only env keys"
+    );
+    assert!(
+        live_after.get("workspace").is_none(),
+        "clean overwrite should not retain local-only nested objects"
+    );
+    assert_eq!(
+        live_after
+            .pointer("/permissions/allow/0")
+            .and_then(|value| value.as_str()),
+        Some("Bash(cargo test:*)"),
+        "live settings.json should add provider-only nested objects"
+    );
+
+    let guard = state
+        .config
+        .read()
+        .expect("read claude config after switch");
+    let manager = guard
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after switch");
+    assert_eq!(manager.current, "new-provider", "current provider updated");
+
+    let legacy_provider = manager
+        .providers
+        .get("old-provider")
+        .expect("legacy provider still exists");
+    assert_eq!(
+        legacy_provider.settings_config, legacy_live,
+        "previous provider should receive backfilled live config"
+    );
+}
+
+#[test]
+fn provider_service_switch_claude_overwrites_live_discarding_unstored_edits() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1525,18 +1659,26 @@ fn provider_service_switch_claude_updates_live_and_state() {
 
     let state = state_from_config(config);
 
+    // Upstream parity: switching to a provider whose values diverge from the
+    // live file's unstored edits succeeds and overwrites with the provider's
+    // values (no conflict is surfaced).
     ProviderService::switch(&state, AppType::Claude, "new-provider")
-        .expect("switch provider should succeed");
+        .expect("clean-write switch should succeed");
 
     let live_after: serde_json::Value =
-        read_json_file(&settings_path).expect("read claude live settings");
+        read_json_file(&settings_path).expect("read claude live settings after switch");
     assert_eq!(
         live_after
-            .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-            .and_then(|key| key.as_str()),
+            .pointer("/env/ANTHROPIC_API_KEY")
+            .and_then(|value| value.as_str()),
         Some("fresh-key"),
-        "live settings.json should reflect new provider auth"
+    );
+    assert_eq!(
+        live_after
+            .pointer("/workspace/path")
+            .and_then(|value| value.as_str()),
+        Some("/tmp/new-workspace"),
+        "incoming provider workspace should win on a clean write"
     );
 
     let guard = state
@@ -1547,15 +1689,6 @@ fn provider_service_switch_claude_updates_live_and_state() {
         .get_manager(&AppType::Claude)
         .expect("claude manager after switch");
     assert_eq!(manager.current, "new-provider", "current provider updated");
-
-    let legacy_provider = manager
-        .providers
-        .get("old-provider")
-        .expect("legacy provider still exists");
-    assert_eq!(
-        legacy_provider.settings_config, legacy_live,
-        "previous provider should receive backfilled live config"
-    );
 }
 
 #[test]
@@ -1767,9 +1900,10 @@ fn provider_service_sync_current_to_live_openclaw_skips_saved_only_snapshot_prov
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model-old" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model-old" }],
+                        "localOnly": "preserved"
                     }
                 }
             },
@@ -1905,9 +2039,10 @@ fn provider_service_sync_current_to_live_openclaw_ignores_malformed_live_members
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model-old" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model-old" }],
+                        "localOnly": "preserved"
                     },
                     "model-less": {
                         "apiKey": "sk-model-less-old",
@@ -2002,9 +2137,10 @@ fn provider_service_sync_current_to_live_openclaw_ignores_blank_model_ids_in_liv
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model" }],
+                        "localOnly": "preserved"
                     },
                     "blank-model-id": {
                         "apiKey": "sk-blank-old",
@@ -2436,11 +2572,9 @@ fn provider_service_update_openclaw_allows_model_catalog_refs_to_dangle() {
     providers: {
       keep: {
         apiKey: 'sk-keep',
-        baseUrl: 'https://keep.example/v1',
-        models: [
-          { id: 'primary-model' },
-          { id: 'fallback-model' },
-        ],
+        baseUrl: 'https://keep.example/v2',
+        models: [{ id: 'primary-model' }],
+        localOnly: 'preserved',
       },
     },
   },
@@ -2493,6 +2627,10 @@ fn provider_service_update_openclaw_allows_model_catalog_refs_to_dangle() {
     assert_eq!(
         live_after["models"]["providers"]["keep"]["baseUrl"],
         json!("https://keep.example/v2")
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
     assert_eq!(
         live_after["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
@@ -2659,9 +2797,10 @@ fn provider_service_update_in_config_openclaw_updates_live_config() {
                 mode: 'merge',
                 providers: {
                     keep: {
-                        apiKey: 'sk-keep-old',
-                        baseUrl: 'https://keep.old.example/v1',
-                        models: [{ id: 'keep-model' }],
+                        apiKey: 'sk-keep-new',
+                        baseUrl: 'https://keep.new.example/v1',
+                        models: [{ id: 'keep-model-updated' }],
+                        localOnly: 'preserved',
                     },
                 },
             },
@@ -2693,8 +2832,8 @@ fn provider_service_update_in_config_openclaw_updates_live_config() {
         json!("https://keep.new.example/v1")
     );
     assert_eq!(
-        live_after["models"]["providers"]["keep"]["models"][0]["id"],
-        json!("keep-model-updated")
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
 }
 
@@ -3022,11 +3161,9 @@ fn provider_service_update_openclaw_allows_default_model_refs_to_dangle() {
     providers: {
       keep: {
         apiKey: 'sk-keep',
-        baseUrl: 'https://keep.example/v1',
-        models: [
-          { id: 'primary-model' },
-          { id: 'fallback-model' },
-        ],
+        baseUrl: 'https://keep.example/v2',
+        models: [{ id: 'primary-model' }],
+        localOnly: 'preserved',
       },
     },
   },
@@ -3086,6 +3223,10 @@ fn provider_service_update_openclaw_allows_default_model_refs_to_dangle() {
     assert_eq!(
         live_after["models"]["providers"]["keep"]["models"],
         json!([{ "id": "primary-model" }])
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
@@ -3794,7 +3935,7 @@ fn provider_service_switch_codex_missing_auth_is_rejected() {
 }
 
 #[test]
-fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_snapshot() {
+fn provider_service_switch_codex_openai_official_overwrites_auth_json_from_provider_snapshot() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3802,7 +3943,7 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
+    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"discard-me"}"#).expect("seed auth.json");
     assert!(auth_path.exists(), "auth.json should exist before switch");
 
     let mut config = MultiAppConfig::default();
@@ -3843,12 +3984,19 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): an official provider with login material
+    // OVERWRITES auth.json with the provider snapshot's auth (Write branch). The
+    // live-only auth field is not preserved.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
         Some("sk-official"),
-        "auth.json should be overwritten from the provider snapshot"
+        "auth.json should be overwritten with the provider snapshot auth key"
+    );
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 }
 
@@ -3943,7 +4091,7 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
+    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"preserve-me"}"#).expect("seed auth.json");
 
     let mut config = MultiAppConfig::default();
     {
@@ -3989,12 +4137,19 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to stripped OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): the official provider's stored OAuth auth
+    // snapshot is written to auth.json (Write branch). The auth.json is
+    // overwritten, so live-only fields are not retained.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
         auth_value["access_token"],
         json!("oauth-token"),
         "official provider should restore the stored OAuth auth snapshot"
+    );
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 
     let live_text =
@@ -4586,8 +4741,10 @@ fn provider_service_delete_provider_selected_in_local_settings_returns_error() {
         );
     }
 
-    let mut settings = AppSettings::default();
-    settings.current_provider_claude = Some("delete".to_string());
+    let settings = AppSettings {
+        current_provider_claude: Some("delete".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("set local current provider override");
 
     let app_state = state_from_config(config);

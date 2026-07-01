@@ -275,6 +275,7 @@ impl RequestForwarder {
                 .then_some(self.session_id.as_str()),
             force_identity_encoding,
             claude_api_format.as_deref(),
+            codex_responses_to_chat,
             copilot_optimization.as_ref(),
         )
         .await
@@ -386,6 +387,10 @@ fn copilot_optimizer_session_id(body: &Value, headers: &HeaderMap) -> String {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "request construction needs provider, endpoint, headers, and format flags"
+)]
 async fn build_request(
     client: &reqwest::Client,
     adapter: &dyn ProviderAdapter,
@@ -400,30 +405,27 @@ async fn build_request(
     client_session_id: Option<&str>,
     force_identity_encoding: bool,
     claude_api_format: Option<&str>,
+    codex_responses_to_chat: bool,
     copilot_optimization: Option<&CopilotOptimization>,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
-    let url = if claude_api_format == Some("gemini_native") {
-        let is_full_url = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.is_full_url)
-            .unwrap_or(false);
-        super::super::gemini_url::resolve_gemini_native_url(base_url, endpoint, is_full_url)
-    } else if provider
+    let base_url_trimmed = base_url.trim_end_matches('/');
+    let is_full_url = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.is_full_url)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    let url = if claude_api_format == Some("gemini_native") {
+        super::super::gemini_url::resolve_gemini_native_url(base_url, endpoint, is_full_url)
+    } else if is_full_url
+        || (base_url_trimmed
+            .to_ascii_lowercase()
+            .ends_with("/chat/completions")
+            && endpoint_path.trim_matches('/') == "chat/completions")
     {
-        append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
-    } else if base_url
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-        .ends_with("/chat/completions")
-        && endpoint_path.trim_matches('/') == "chat/completions"
-    {
-        append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
+        append_query_to_url(base_url_trimmed, endpoint_query)
+    } else if codex_responses_to_chat {
+        append_endpoint_to_base_url(base_url, endpoint)
     } else {
         adapter.build_url(base_url, endpoint)
     };
@@ -713,6 +715,14 @@ fn append_query_to_url(url: &str, query: Option<&str>) -> String {
     } else {
         format!("{url}?{query}")
     }
+}
+
+fn append_endpoint_to_base_url(base_url: &str, endpoint: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    )
 }
 
 fn reject_proxy_placeholder_for_managed_account_upstream(

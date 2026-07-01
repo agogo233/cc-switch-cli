@@ -544,7 +544,7 @@ impl App {
                         })
                     } else {
                         let options = form.available_fallback_options(&model_options);
-                        (!options.is_empty()).then(|| (row, 0, options))
+                        (!options.is_empty()).then_some((row, 0, options))
                     }
                 }
                 OpenClawAgentsSection::Runtime => None,
@@ -799,6 +799,19 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::CodexUnifiedSessionHistory) => {
+                    let current = crate::settings::unify_codex_session_history();
+                    let next = !current;
+
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::codex_unified_session_history_confirm(next),
+                        action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory {
+                            enabled: next,
+                        },
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
@@ -876,7 +889,7 @@ impl App {
                 Some(LocalProxySettingsItem::ListenAddress) => {
                     if data.proxy.running {
                         self.push_toast(
-                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
                             ToastKind::Info,
                         );
                         return Action::None;
@@ -891,9 +904,9 @@ impl App {
                     Action::None
                 }
                 Some(LocalProxySettingsItem::ListenPort) => {
-                    if data.proxy.running {
+                    if data.proxy.has_active_worker_for(&self.app_type) {
                         self.push_toast(
-                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
                             ToastKind::Info,
                         );
                         return Action::None;
@@ -918,17 +931,65 @@ impl App {
         key: KeyEvent,
         _data: &UiData,
     ) -> Action {
+        let account_count = self.managed_auth_account_count();
         match key.code {
             KeyCode::Up => {
-                self.settings_managed_accounts_idx = 0;
+                self.settings_managed_accounts_idx =
+                    self.settings_managed_accounts_idx.saturating_sub(1);
                 Action::None
             }
             KeyCode::Down => {
-                self.settings_managed_accounts_idx = 0;
+                self.settings_managed_accounts_idx =
+                    (self.settings_managed_accounts_idx + 1).min(account_count.saturating_sub(1));
                 Action::None
             }
+            KeyCode::Char('a') => self.start_managed_account_login(),
+            KeyCode::Char('r') => Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            },
+            KeyCode::Char(' ') => self.switch_selected_managed_account(),
             KeyCode::Enter => self.activate_managed_account_row(),
             _ => Action::None,
+        }
+    }
+
+    fn managed_auth_account_count(&self) -> usize {
+        self.managed_auth_status
+            .as_ref()
+            .map(|status| status.accounts.len())
+            .unwrap_or(0)
+    }
+
+    fn selected_managed_account(&self) -> Option<&crate::services::ManagedAuthAccount> {
+        let status = self.managed_auth_status.as_ref()?;
+        status.accounts.get(
+            self.settings_managed_accounts_idx
+                .min(status.accounts.len().saturating_sub(1)),
+        )
+    }
+
+    fn start_managed_account_login(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
+    fn switch_selected_managed_account(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        let Some(account) = self.selected_managed_account() else {
+            return Action::None;
+        };
+
+        Action::ManagedAuthSetDefault {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: account.id.clone(),
         }
     }
 
@@ -937,18 +998,13 @@ impl App {
             return Action::None;
         }
 
-        let Some(status) = self.managed_auth_status.as_ref() else {
+        if self.managed_auth_status.is_none() {
             return Action::ManagedAuthRefresh {
                 auth_provider: "codex_oauth".to_string(),
             };
-        };
+        }
 
-        if let Some(account) = status
-            .accounts
-            .iter()
-            .find(|account| account.is_default)
-            .or_else(|| status.accounts.first())
-        {
+        if let Some(account) = self.selected_managed_account() {
             self.overlay = Overlay::ManagedAccountActionPicker {
                 auth_provider: "codex_oauth".to_string(),
                 account_id: account.id.clone(),
@@ -1067,13 +1123,19 @@ impl App {
                 ),
             ]);
         } else {
-            lines.push(
-                crate::t!(
-                    "Proxy configuration is unavailable.",
-                    "代理配置暂时不可用。"
-                )
-                .to_string(),
-            );
+            let current_app_has_active_worker = data.proxy.has_active_worker_for(&self.app_type);
+            let port_edit_hint =
+                texts::tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker)
+                    .to_string();
+            lines.extend([
+                format!(
+                    "{}: {}:{}",
+                    crate::t!("Listen", "监听"),
+                    data.proxy.configured_listen_address,
+                    data.proxy.configured_listen_port
+                ),
+                port_edit_hint,
+            ]);
         }
 
         lines.push(String::new());

@@ -122,6 +122,22 @@ impl Provider {
         self.provider_type() == Some("codex_oauth")
     }
 
+    pub fn is_codex_official(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official)
+            .unwrap_or(false)
+            || self
+                .category
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+            || self
+                .website_url
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
+            || self.name.trim().eq_ignore_ascii_case("OpenAI Official")
+    }
+
     pub fn is_github_copilot(&self) -> bool {
         self.provider_type() == Some("github_copilot")
             || self.claude_base_url_contains("githubcopilot.com")
@@ -449,10 +465,14 @@ pub struct OpenCodeProviderConfig {
     pub npm: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Value>,
     #[serde(default)]
     pub options: OpenCodeProviderOptions,
     #[serde(default)]
     pub models: HashMap<String, OpenCodeModel>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
 }
 
 impl Default for OpenCodeProviderConfig {
@@ -460,8 +480,10 @@ impl Default for OpenCodeProviderConfig {
         Self {
             npm: "@ai-sdk/openai-compatible".to_string(),
             name: None,
+            modalities: None,
             options: OpenCodeProviderOptions::default(),
             models: HashMap::new(),
+            extra: HashMap::new(),
         }
     }
 }
@@ -540,7 +562,7 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
+    use super::{AuthBinding, AuthBindingSource, OpenCodeProviderConfig, Provider, ProviderMeta};
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -573,6 +595,45 @@ mod tests {
         assert_eq!(meta.is_full_url, Some(true));
         let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
         assert_eq!(serialized["isFullUrl"], true);
+    }
+
+    #[test]
+    fn opencode_provider_config_without_modalities_or_extra_serializes_as_existing_shape() {
+        let serialized =
+            serde_json::to_string(&OpenCodeProviderConfig::default()).expect("serialize config");
+
+        assert_eq!(
+            serialized,
+            r#"{"npm":"@ai-sdk/openai-compatible","options":{},"models":{}}"#
+        );
+    }
+
+    #[test]
+    fn opencode_provider_config_preserves_modalities_and_unknown_provider_keys() {
+        let input = serde_json::json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": "https://vision.example.com/v1"
+            },
+            "models": {
+                "vision": { "name": "Vision" }
+            },
+            "modalities": {
+                "input": ["text", "image"],
+                "output": ["text"]
+            },
+            "customRouting": {
+                "tier": "vision"
+            }
+        });
+
+        let config: OpenCodeProviderConfig =
+            serde_json::from_value(input.clone()).expect("deserialize opencode config");
+        let serialized = serde_json::to_value(&config).expect("serialize opencode config");
+
+        assert_eq!(serialized["modalities"], input["modalities"]);
+        assert_eq!(serialized["customRouting"], input["customRouting"]);
+        assert!(serialized.get("extra").is_none());
     }
 
     #[test]
@@ -661,6 +722,35 @@ mod tests {
             ..Default::default()
         });
         assert!(copilot.is_github_copilot());
+    }
+
+    #[test]
+    fn provider_detects_codex_official_identity() {
+        let mut provider = Provider::with_id(
+            "openai".to_string(),
+            "Third Party".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        assert!(!provider.is_codex_official());
+
+        provider.meta = Some(ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
+        assert!(provider.is_codex_official());
+
+        provider.meta = None;
+        provider.category = Some("Official".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.category = None;
+        provider.website_url = Some("https://chatgpt.com/codex".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.website_url = None;
+        provider.name = "OpenAI Official".to_string();
+        assert!(provider.is_codex_official());
     }
 }
 

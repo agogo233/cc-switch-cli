@@ -137,6 +137,15 @@ pub enum OpenClawRuleListCommand {
     Add { rule: String },
     /// Remove a rule by exact value
     Remove { rule: String },
+    /// Set a rule by 1-based list index
+    #[command(name = "set-at")]
+    SetAt { index: usize, rule: String },
+    /// Insert a rule before a 1-based list index; use len+1 to append
+    #[command(name = "insert-at")]
+    InsertAt { index: usize, rule: String },
+    /// Remove one rule by 1-based list index
+    #[command(name = "remove-at")]
+    RemoveAt { index: usize },
     /// Clear all rules
     Clear,
 }
@@ -181,6 +190,15 @@ pub enum OpenClawFallbackCommand {
     Add { model: String },
     /// Remove a fallback model by exact value
     Remove { model: String },
+    /// Set a fallback model by 1-based list index
+    #[command(name = "set-at")]
+    SetAt { index: usize, model: String },
+    /// Insert a fallback model before a 1-based list index; use len+1 to append
+    #[command(name = "insert-at")]
+    InsertAt { index: usize, model: String },
+    /// Remove one fallback model by 1-based list index
+    #[command(name = "remove-at")]
+    RemoveAt { index: usize },
     /// Clear all fallback models
     Clear,
 }
@@ -234,6 +252,9 @@ pub enum OpenClawWorkspaceCommand {
         #[arg(long)]
         content: Option<String>,
     },
+    /// Open the OpenClaw workspace directory in the system file manager
+    #[command(name = "open-dir")]
+    OpenDir,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -270,6 +291,9 @@ pub enum OpenClawMemoryCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Open the OpenClaw daily memory directory in the system file manager
+    #[command(name = "open-dir")]
+    OpenDir,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -371,6 +395,7 @@ fn execute_workspace(cmd: OpenClawWorkspaceCommand) -> Result<(), AppError> {
         OpenClawWorkspaceCommand::Set { filename, content } => {
             set_workspace_file(&filename, content)
         }
+        OpenClawWorkspaceCommand::OpenDir => open_workspace_dir(),
     }
 }
 
@@ -381,6 +406,7 @@ fn execute_memory(cmd: OpenClawMemoryCommand) -> Result<(), AppError> {
         OpenClawMemoryCommand::Set { filename, content } => set_memory_file(&filename, content),
         OpenClawMemoryCommand::Search { query, json } => search_memory(&query, json),
         OpenClawMemoryCommand::Delete { filename, yes } => delete_memory(&filename, yes),
+        OpenClawMemoryCommand::OpenDir => open_memory_dir(),
     }
 }
 
@@ -605,6 +631,9 @@ fn execute_rule_list(kind: ToolsRuleKind, cmd: OpenClawRuleListCommand) -> Resul
         OpenClawRuleListCommand::List { json } => list_rules(kind, json),
         OpenClawRuleListCommand::Add { rule } => add_rule(kind, &rule),
         OpenClawRuleListCommand::Remove { rule } => remove_rule(kind, &rule),
+        OpenClawRuleListCommand::SetAt { index, rule } => set_rule_at(kind, index, &rule),
+        OpenClawRuleListCommand::InsertAt { index, rule } => insert_rule_at(kind, index, &rule),
+        OpenClawRuleListCommand::RemoveAt { index } => remove_rule_at(kind, index),
         OpenClawRuleListCommand::Clear => clear_rules(kind),
     }
 }
@@ -615,7 +644,7 @@ fn list_rules(kind: ToolsRuleKind, json: bool) -> Result<(), AppError> {
     if json {
         print_json(rules)?;
     } else {
-        print_string_list(rule_label(kind), rules);
+        print_indexed_string_list(rule_label(kind), rules);
     }
     Ok(())
 }
@@ -634,6 +663,45 @@ fn remove_rule(kind: ToolsRuleKind, rule: &str) -> Result<(), AppError> {
     let rule = non_empty("rule", rule)?;
     let mut tools = get_tools_config()?;
     rule_list_mut(&mut tools, kind).retain(|value| value != rule);
+    let tools = normalize_tools_config(&tools);
+    let outcome = set_tools_config(&tools)?;
+    print_write_outcome("OpenClaw tools config saved.", &outcome);
+    Ok(())
+}
+
+fn set_rule_at(kind: ToolsRuleKind, index: usize, rule: &str) -> Result<(), AppError> {
+    let rule = non_empty("rule", rule)?.to_string();
+    let mut tools = get_tools_config()?;
+    set_list_item_at(
+        rule_list_mut(&mut tools, kind),
+        index,
+        rule,
+        rule_label(kind),
+    )?;
+    let tools = normalize_tools_config(&tools);
+    let outcome = set_tools_config(&tools)?;
+    print_write_outcome("OpenClaw tools config saved.", &outcome);
+    Ok(())
+}
+
+fn insert_rule_at(kind: ToolsRuleKind, index: usize, rule: &str) -> Result<(), AppError> {
+    let rule = non_empty("rule", rule)?.to_string();
+    let mut tools = get_tools_config()?;
+    insert_list_item_at(
+        rule_list_mut(&mut tools, kind),
+        index,
+        rule,
+        rule_label(kind),
+    )?;
+    let tools = normalize_tools_config(&tools);
+    let outcome = set_tools_config(&tools)?;
+    print_write_outcome("OpenClaw tools config saved.", &outcome);
+    Ok(())
+}
+
+fn remove_rule_at(kind: ToolsRuleKind, index: usize) -> Result<(), AppError> {
+    let mut tools = get_tools_config()?;
+    remove_list_item_at(rule_list_mut(&mut tools, kind), index, rule_label(kind))?;
     let tools = normalize_tools_config(&tools);
     let outcome = set_tools_config(&tools)?;
     print_write_outcome("OpenClaw tools config saved.", &outcome);
@@ -734,6 +802,9 @@ fn execute_fallback(cmd: OpenClawFallbackCommand) -> Result<(), AppError> {
         OpenClawFallbackCommand::List { json } => list_fallbacks(json),
         OpenClawFallbackCommand::Add { model } => add_fallback(&model),
         OpenClawFallbackCommand::Remove { model } => remove_fallback(&model),
+        OpenClawFallbackCommand::SetAt { index, model } => set_fallback_at(index, &model),
+        OpenClawFallbackCommand::InsertAt { index, model } => insert_fallback_at(index, &model),
+        OpenClawFallbackCommand::RemoveAt { index } => remove_fallback_at(index),
         OpenClawFallbackCommand::Clear => clear_fallbacks(),
     }
 }
@@ -744,7 +815,7 @@ fn list_fallbacks(json: bool) -> Result<(), AppError> {
     if json {
         print_json(&form.fallbacks)?;
     } else {
-        print_string_list("Fallbacks", &form.fallbacks);
+        print_indexed_string_list("Fallbacks", &form.fallbacks);
     }
     Ok(())
 }
@@ -762,6 +833,29 @@ fn remove_fallback(model: &str) -> Result<(), AppError> {
     let defaults = get_agents_defaults()?;
     let mut form = OpenClawAgentsFormLike::from_snapshot(defaults.as_ref());
     form.fallbacks.retain(|value| value != model);
+    save_agents_form(form)
+}
+
+fn set_fallback_at(index: usize, model: &str) -> Result<(), AppError> {
+    let model = non_empty("model", model)?.to_string();
+    let defaults = get_agents_defaults()?;
+    let mut form = OpenClawAgentsFormLike::from_snapshot(defaults.as_ref());
+    set_list_item_at(&mut form.fallbacks, index, model, "Fallbacks")?;
+    save_agents_form(form)
+}
+
+fn insert_fallback_at(index: usize, model: &str) -> Result<(), AppError> {
+    let model = non_empty("model", model)?.to_string();
+    let defaults = get_agents_defaults()?;
+    let mut form = OpenClawAgentsFormLike::from_snapshot(defaults.as_ref());
+    insert_list_item_at(&mut form.fallbacks, index, model, "Fallbacks")?;
+    save_agents_form(form)
+}
+
+fn remove_fallback_at(index: usize) -> Result<(), AppError> {
+    let defaults = get_agents_defaults()?;
+    let mut form = OpenClawAgentsFormLike::from_snapshot(defaults.as_ref());
+    remove_list_item_at(&mut form.fallbacks, index, "Fallbacks")?;
     save_agents_form(form)
 }
 
@@ -889,6 +983,12 @@ fn set_workspace_file(filename: &str, content: Option<String>) -> Result<(), App
     Ok(())
 }
 
+fn open_workspace_dir() -> Result<(), AppError> {
+    workspace::open_workspace_directory((), String::new()).map_err(AppError::Message)?;
+    println!("{}", success("Opened OpenClaw workspace directory."));
+    Ok(())
+}
+
 fn list_memory(json: bool) -> Result<(), AppError> {
     let files = workspace::list_daily_memory_files().map_err(AppError::Message)?;
     if json {
@@ -973,6 +1073,12 @@ fn delete_memory(filename: &str, yes: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+fn open_memory_dir() -> Result<(), AppError> {
+    workspace::open_workspace_directory((), "memory".to_string()).map_err(AppError::Message)?;
+    println!("{}", success("Opened OpenClaw daily memory directory."));
+    Ok(())
+}
+
 fn read_json_arg<T: DeserializeOwned>(args: JsonInputArgs, missing: &str) -> Result<T, AppError> {
     let raw = match (args.json, args.file) {
         (Some(json), None) => json,
@@ -1016,6 +1122,65 @@ fn non_empty<'a>(label: &str, value: &'a str) -> Result<&'a str, AppError> {
     }
 }
 
+fn set_list_item_at(
+    values: &mut [String],
+    index: usize,
+    value: String,
+    label: &str,
+) -> Result<(), AppError> {
+    let offset = existing_list_offset(values.len(), index, label)?;
+    values[offset] = value;
+    Ok(())
+}
+
+fn insert_list_item_at(
+    values: &mut Vec<String>,
+    index: usize,
+    value: String,
+    label: &str,
+) -> Result<(), AppError> {
+    let offset = insert_list_offset(values.len(), index, label)?;
+    values.insert(offset, value);
+    Ok(())
+}
+
+fn remove_list_item_at(
+    values: &mut Vec<String>,
+    index: usize,
+    label: &str,
+) -> Result<(), AppError> {
+    let offset = existing_list_offset(values.len(), index, label)?;
+    values.remove(offset);
+    Ok(())
+}
+
+fn existing_list_offset(len: usize, index: usize, label: &str) -> Result<usize, AppError> {
+    if index == 0 || index > len {
+        return Err(list_index_error(label, index, len, false));
+    }
+    Ok(index - 1)
+}
+
+fn insert_list_offset(len: usize, index: usize, label: &str) -> Result<usize, AppError> {
+    if index == 0 || index > len + 1 {
+        return Err(list_index_error(label, index, len, true));
+    }
+    Ok(index - 1)
+}
+
+fn list_index_error(label: &str, index: usize, len: usize, insert: bool) -> AppError {
+    let max = if insert { len + 1 } else { len };
+    if max == 0 {
+        AppError::InvalidInput(format!(
+            "{label} index {index} is out of range; list is empty."
+        ))
+    } else {
+        AppError::InvalidInput(format!(
+            "{label} index {index} is out of range; expected 1..={max}."
+        ))
+    }
+}
+
 fn print_json<T: Serialize>(value: &T) -> Result<(), AppError> {
     println!(
         "{}",
@@ -1033,6 +1198,18 @@ fn print_string_list(label: &str, values: &[String]) {
     println!("{label}:");
     for value in values {
         println!("  - {value}");
+    }
+}
+
+fn print_indexed_string_list(label: &str, values: &[String]) {
+    if values.is_empty() {
+        println!("{label}: N/A");
+        return;
+    }
+
+    println!("{label}:");
+    for (index, value) in values.iter().enumerate() {
+        println!("  {}. {value}", index + 1);
     }
 }
 
@@ -1094,6 +1271,7 @@ mod tests {
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_disable_open: Option<OsString>,
         _home: TempDir,
     }
 
@@ -1104,9 +1282,11 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_disable_open = std::env::var_os("CC_SWITCH_TEST_DISABLE_OPEN");
             std::env::set_var("HOME", home.path());
             std::env::set_var("USERPROFILE", home.path());
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.path().join(".cc-switch"));
+            std::env::set_var("CC_SWITCH_TEST_DISABLE_OPEN", "1");
             set_test_home_override(Some(home.path()));
             crate::settings::reload_test_settings();
             Self {
@@ -1114,8 +1294,17 @@ mod tests {
                 old_home,
                 old_userprofile,
                 old_config_dir,
+                old_disable_open,
                 _home: home,
             }
+        }
+
+        fn workspace_dir(&self) -> std::path::PathBuf {
+            self._home.path().join(".openclaw").join("workspace")
+        }
+
+        fn memory_dir(&self) -> std::path::PathBuf {
+            self.workspace_dir().join("memory")
         }
     }
 
@@ -1132,6 +1321,10 @@ mod tests {
             match &self.old_config_dir {
                 Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
                 None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+            match &self.old_disable_open {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_DISABLE_OPEN", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_DISABLE_OPEN"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -1164,6 +1357,43 @@ mod tests {
         assert_eq!(tools.profile.as_deref(), Some("coding"));
         assert_eq!(tools.allow, vec!["Read"]);
         assert_eq!(tools.deny, vec!["Bash(rm*)"]);
+    }
+
+    #[test]
+    fn config_openclaw_tools_rule_position_commands_edit_one_row() {
+        let _env = EnvGuard::new();
+
+        set_tools(JsonInputArgs {
+            json: Some(r#"{"allow":[" Read ","Read","Write"],"deny":[" Bash(rm*) "]}"#.to_string()),
+            file: None,
+        })
+        .expect("seed tools");
+
+        remove_rule_at(ToolsRuleKind::Allow, 2).expect("remove one duplicate by index");
+        insert_rule_at(ToolsRuleKind::Allow, 2, " Edit ").expect("insert by index");
+        set_rule_at(ToolsRuleKind::Deny, 1, " Bash(ls*) ").expect("set deny by index");
+
+        let tools = get_tools_config().expect("load tools");
+        assert_eq!(tools.allow, vec!["Read", "Edit", "Write"]);
+        assert_eq!(tools.deny, vec!["Bash(ls*)"]);
+    }
+
+    #[test]
+    fn config_openclaw_list_position_commands_reject_out_of_range_indexes() {
+        let _env = EnvGuard::new();
+
+        set_tools(JsonInputArgs {
+            json: Some(r#"{"allow":["Read"]}"#.to_string()),
+            file: None,
+        })
+        .expect("seed tools");
+
+        let zero = remove_rule_at(ToolsRuleKind::Allow, 0).expect_err("index is 1-based");
+        assert!(zero.to_string().contains("expected 1..=1"));
+
+        let too_large = insert_rule_at(ToolsRuleKind::Allow, 3, "Write")
+            .expect_err("insert index only allows len+1");
+        assert!(too_large.to_string().contains("expected 1..=2"));
     }
 
     #[test]
@@ -1254,6 +1484,31 @@ mod tests {
     }
 
     #[test]
+    fn config_openclaw_agents_fallback_position_commands_edit_one_row() {
+        let _env = EnvGuard::new();
+
+        set_agents(JsonInputArgs {
+            json: Some(
+                r#"{"model":{"primary":"demo/primary","fallbacks":["demo/a","demo/a","demo/c"]}}"#
+                    .to_string(),
+            ),
+            file: None,
+        })
+        .expect("seed agents");
+
+        remove_fallback_at(2).expect("remove one duplicate by index");
+        insert_fallback_at(2, " demo/b ").expect("insert by index");
+        set_fallback_at(3, " demo/d ").expect("set by index");
+
+        let defaults = get_agents_defaults()
+            .expect("load agents defaults")
+            .expect("agents defaults should exist");
+        let model = defaults.model.expect("model defaults should exist");
+        assert_eq!(model.primary, "demo/primary");
+        assert_eq!(model.fallbacks, vec!["demo/a", "demo/b", "demo/d"]);
+    }
+
+    #[test]
     fn config_openclaw_workspace_rejects_unlisted_file() {
         let _env = EnvGuard::new();
 
@@ -1269,5 +1524,24 @@ mod tests {
         let err = show_memory_file("today.md").expect_err("reject invalid file");
 
         assert!(err.to_string().contains("Invalid daily memory filename"));
+    }
+
+    #[test]
+    fn config_openclaw_workspace_open_dir_creates_workspace_directory() {
+        let env = EnvGuard::new();
+
+        open_workspace_dir().expect("open workspace dir");
+
+        assert!(env.workspace_dir().is_dir());
+        assert!(!env.memory_dir().exists());
+    }
+
+    #[test]
+    fn config_openclaw_memory_open_dir_creates_daily_memory_directory() {
+        let env = EnvGuard::new();
+
+        open_memory_dir().expect("open memory dir");
+
+        assert!(env.memory_dir().is_dir());
     }
 }

@@ -1,23 +1,31 @@
 use super::*;
 
 #[cfg(test)]
+#[expect(
+    clippy::module_inception,
+    reason = "test module mirrors the file layout"
+)]
 mod tests {
     use super::types::{McpEnvEditorField, McpEnvEntryEditorState};
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use serde_json::json;
     use serial_test::serial;
-    use std::ffi::OsString;
     use std::path::Path;
     use tempfile::TempDir;
 
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
-    use crate::cli::tui::form::{McpEnvVarRow, McpTransport, ProviderAddFormState, TextInput};
+    use crate::cli::tui::form::{
+        CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpEnvVarRow,
+        McpTransport, ProviderAddFormState, TextInput, UsageQueryField, UsageQueryTemplate,
+    };
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
     };
-    use crate::cli::tui::runtime_systems::RequestTracker;
+    use crate::cli::tui::runtime_systems::{
+        handle_managed_auth_msg, ManagedAuthMsg, RequestTracker,
+    };
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
     use crate::error::AppError;
@@ -25,48 +33,7 @@ mod tests {
     use crate::provider::Provider;
     use crate::services::PromptService;
     use crate::settings::{get_settings, update_settings, AppSettings};
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
-
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
-
+    use crate::test_support::TestEnvGuard;
     struct SettingsGuard {
         previous: AppSettings,
     }
@@ -74,8 +41,10 @@ mod tests {
     impl SettingsGuard {
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
@@ -138,6 +107,17 @@ mod tests {
                     is_default: false,
                 },
             ],
+        }
+    }
+
+    fn managed_auth_device() -> crate::services::ManagedAuthDeviceCodeResponse {
+        crate::services::ManagedAuthDeviceCodeResponse {
+            provider: "codex_oauth".to_string(),
+            device_code: "device-1".to_string(),
+            user_code: "USER-1".to_string(),
+            verification_uri: "https://auth.example.test/device".to_string(),
+            expires_in: 900,
+            interval: 5,
         }
     }
 
@@ -364,6 +344,47 @@ mod tests {
         }
     }
 
+    fn select_provider_field(app: &mut App, field: ProviderAddField) {
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|candidate| *candidate == field)
+                .unwrap_or_else(|| panic!("{field:?} field should exist"));
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+    }
+
+    fn select_usage_query_field(app: &mut App, field: UsageQueryField) {
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.usage_query_editing = false;
+            let fields = form.usage_query_table_fields();
+            form.usage_query_field_idx = fields
+                .iter()
+                .position(|candidate| *candidate == field)
+                .unwrap_or_else(|| panic!("{field:?} usage query field should exist"));
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+    }
+
+    fn help_text(app: &App) -> String {
+        let Overlay::Help(help) = &app.overlay else {
+            panic!("expected Help overlay, got {:?}", app.overlay);
+        };
+        let content = &help.content;
+        format!(
+            "{}\n{}\n{}",
+            content.title,
+            content.eyebrow,
+            content.lines.join("\n")
+        )
+    }
+
     fn claude_provider_row(id: &str) -> ProviderRow {
         ProviderRow {
             id: id.to_string(),
@@ -541,6 +562,53 @@ mod tests {
             matches!(action, Action::SwitchRoute(Route::SkillsDiscover)),
             "f in Skills page should navigate to Discover"
         );
+    }
+
+    #[test]
+    fn skills_discover_tab_toggles_marketplace_source() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+        app.skills_discover_query = "python".to_string();
+
+        let action = app.on_key(key(KeyCode::Tab), &data());
+
+        assert_eq!(
+            app.skills_discover_source,
+            SkillsDiscoverSource::Marketplace
+        );
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn skills_discover_r_refreshes_current_source() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+        app.skills_discover_query = "python".to_string();
+        app.skills_discover_source = SkillsDiscoverSource::Marketplace;
+
+        let action = app.on_key(key(KeyCode::Char('r')), &data());
+
+        assert!(matches!(
+            action,
+            Action::SkillsDiscover {
+                query,
+                source: SkillsDiscoverSource::Marketplace,
+                force: true,
+            } if query == "python"
+        ));
+    }
+
+    #[test]
+    fn skills_discover_e_opens_repo_manager() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data());
+
+        assert!(matches!(action, Action::SwitchRoute(Route::SkillsRepos)));
     }
 
     #[test]
@@ -896,7 +964,7 @@ mod tests {
         assert!(imports[0].apps.claude);
         assert!(imports[0].apps.opencode);
         assert!(
-            imports[0].apps.is_empty() == false,
+            !imports[0].apps.is_empty(),
             "supported app targets should be preserved"
         );
         assert!(
@@ -933,7 +1001,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycles_left_right() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -956,9 +1024,42 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn app_cycles_with_chinese_brackets() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            hermes: false,
+            openclaw: true,
+        })
+        .expect("save visible apps");
+        let mut app = App::new(Some(AppType::Claude));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('】')), &data()),
+            Action::SetAppType(AppType::Codex)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('【')), &data()),
+            Action::SetAppType(AppType::OpenClaw)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('］')), &data()),
+            Action::SetAppType(AppType::Codex)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('［')), &data()),
+            Action::SetAppType(AppType::OpenClaw)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn app_cycles_through_opencode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -999,7 +1100,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_skips_hidden_apps_from_settings() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -1022,7 +1123,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_noops_when_only_one_app_is_visible() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: false,
             codex: true,
@@ -1049,7 +1150,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_backwards_skips_hidden_apps_and_wraps() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -1072,7 +1173,7 @@ mod tests {
     #[serial(home_settings)]
     fn hidden_current_app_wraps_to_first_visible_replacement() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -1256,9 +1357,9 @@ mod tests {
     #[test]
     fn filter_mode_updates_buffer_and_exits() {
         let mut app = App::new(Some(AppType::Claude));
-        assert_eq!(app.filter.active, false);
+        assert!(!app.filter.active);
         app.on_key(key(KeyCode::Char('/')), &data());
-        assert_eq!(app.filter.active, true);
+        assert!(app.filter.active);
         app.on_key(key(KeyCode::Char('a')), &data());
         app.on_key(key(KeyCode::Char('b')), &data());
         app.on_key(key(KeyCode::Char('j')), &data());
@@ -1267,7 +1368,7 @@ mod tests {
         app.on_key(key(KeyCode::Backspace), &data());
         assert_eq!(app.filter.input.value, "abj");
         app.on_key(key(KeyCode::Enter), &data());
-        assert_eq!(app.filter.active, false);
+        assert!(!app.filter.active);
     }
 
     #[test]
@@ -3932,7 +4033,7 @@ mod tests {
     #[serial]
     fn prompts_route_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -3965,7 +4066,7 @@ mod tests {
     #[serial]
     fn prompts_reload_data_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -4000,7 +4101,7 @@ mod tests {
     #[serial]
     fn prompts_switch_app_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Codex).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -4037,7 +4138,7 @@ mod tests {
     #[serial]
     fn legacy_config_migration_leaves_live_prompt_for_tui_import_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let mut legacy_config = crate::app_config::MultiAppConfig::default();
         legacy_config
             .get_manager_mut(&AppType::Claude)
@@ -4474,7 +4575,7 @@ mod tests {
     #[serial]
     fn provider_copy_confirm_save_persists_with_source_id_copy_semantics() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _home = EnvGuard::set_home(temp_home.path());
+        let _home = TestEnvGuard::isolated(temp_home.path());
 
         let state = crate::cli::tui::data::load_state().expect("load state");
         {
@@ -5238,7 +5339,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5274,7 +5375,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5316,7 +5417,7 @@ mod tests {
             "hello memory",
         )
         .expect("seed memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5356,7 +5457,7 @@ mod tests {
         std::fs::write(&target, "outside").expect("seed target file");
         std::os::unix::fs::symlink(&target, workspace_dir.join("AGENTS.md"))
             .expect("create workspace symlink");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5395,7 +5496,7 @@ mod tests {
             "existing content",
         )
         .expect("seed memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5432,7 +5533,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5481,7 +5582,7 @@ mod tests {
         std::fs::create_dir_all(&target).expect("create symlink target dir");
         std::os::unix::fs::symlink(&target, workspace_dir.join("memory"))
             .expect("create memory dir symlink");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5523,7 +5624,7 @@ mod tests {
             "old note",
         )
         .expect("seed old memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5582,7 +5683,7 @@ mod tests {
             "focus previous",
         )
         .expect("seed previous memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5638,7 +5739,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -6032,7 +6133,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -6095,7 +6196,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -6209,7 +6310,7 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
 
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(matches!(app.overlay, Overlay::Help(_)));
         assert!(app.openclaw_tools_form.is_none());
     }
 
@@ -7376,7 +7477,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8288,7 +8389,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8389,7 +8490,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8476,7 +8577,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8552,7 +8653,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8627,7 +8728,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8696,7 +8797,7 @@ mod tests {
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
 
         let set_openclaw_dir = |path: &Path| {
@@ -8829,7 +8930,7 @@ mod tests {
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
 
         let set_openclaw_dir = |path: &Path| {
@@ -8971,7 +9072,7 @@ mod tests {
 }"#,
         )
         .expect("write malformed openclaw config");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -9141,7 +9242,7 @@ mod tests {
 }"#,
         )
         .expect("write malformed openclaw config");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -9329,6 +9430,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_exposes_codex_unified_session_history_item() {
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory)),
+            "Settings should expose unified Codex session history"
+        );
+    }
+
+    #[test]
     fn settings_managed_accounts_item_opens_page_and_refreshes_when_status_missing() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Settings;
@@ -9348,7 +9459,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_managed_accounts_page_uses_single_chatgpt_entry() {
+    fn settings_managed_accounts_page_supports_multi_account_actions() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::SettingsManagedAccounts;
         app.focus = Focus::Content;
@@ -9370,11 +9481,26 @@ mod tests {
             Action::ManagedAuthStartLogin { auth_provider } if auth_provider == "codex_oauth"
         ));
 
+        let action = app.on_key(key(KeyCode::Char('a')), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthStartLogin { auth_provider } if auth_provider == "codex_oauth"
+        ));
+
         app.managed_auth_status = Some(managed_auth_status());
         app.settings_managed_accounts_idx = 0;
         let action = app.on_key(key(KeyCode::Down), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert_eq!(app.settings_managed_accounts_idx, 0);
+        assert_eq!(app.settings_managed_accounts_idx, 1);
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthSetDefault {
+                auth_provider,
+                account_id,
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
+        ));
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
@@ -9384,15 +9510,91 @@ mod tests {
                 auth_provider,
                 account_id,
                 selected: 0,
-            } if auth_provider == "codex_oauth" && account_id == "acc-default"
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
         ));
+    }
+
+    #[test]
+    fn managed_auth_login_uses_toast_and_esc_confirmation() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsManagedAccounts;
+        app.focus = Focus::Content;
+
+        handle_managed_auth_msg(
+            &mut app,
+            ManagedAuthMsg::LoginStarted {
+                auth_provider: "codex_oauth".to_string(),
+                result: Ok(managed_auth_device()),
+            },
+        );
+
+        let toast = app.toast.as_ref().expect("login toast");
+        assert!(toast.persistent);
+        assert!(toast.message.contains("USER-1"), "{}", toast.message);
+        assert!(
+            toast.message.contains("Press Esc to cancel"),
+            "{}",
+            toast.message
+        );
+        assert!(!toast.message.contains("Esc/c"), "{}", toast.message);
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ManagedAuthCancelLogin,
+                ..
+            })
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if !toast.persistent
+                    && toast.message == texts::tui_toast_managed_auth_login_cancelled()
+        ));
+
+        handle_managed_auth_msg(
+            &mut app,
+            ManagedAuthMsg::LoginPolled {
+                auth_provider: "codex_oauth".to_string(),
+                device_code: "device-1".to_string(),
+                result: Ok(Some(crate::services::ManagedAuthAccount {
+                    id: "acc-new".to_string(),
+                    provider: "codex_oauth".to_string(),
+                    login: "new@example.com".to_string(),
+                    avatar_url: None,
+                    authenticated_at: 3,
+                    is_default: true,
+                })),
+            },
+        );
+        assert!(app.managed_auth_status.is_none());
     }
 
     #[test]
     #[serial(home_settings)]
     fn settings_openclaw_config_dir_item_opens_text_input() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.openclaw_config_dir = Some(r"\\wsl$\Ubuntu\home\demo\.openclaw".to_string());
         crate::settings::update_settings(settings).expect("save openclaw override");
@@ -9455,9 +9657,34 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn settings_codex_unified_session_history_item_opens_confirm_overlay() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled: true },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn settings_visible_apps_item_opens_picker_overlay() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let expected = crate::settings::get_visible_apps();
 
         let mut app = App::new(Some(AppType::Claude));
@@ -9481,7 +9708,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_rejects_zero_selection_without_closing() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -9531,7 +9758,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_x_key_does_not_toggle_selection() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -9567,7 +9794,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_prompts_manual_switch_for_controlled_app_in_auto_mode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
@@ -9605,7 +9832,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_prompts_manual_switch_for_claude_codex_in_auto_mode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
@@ -9643,7 +9870,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_manual_switch_prompt_cancel_returns_to_picker_without_change() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let initial = crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -9762,6 +9989,7 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.running = true;
+        data.proxy.claude_takeover = true;
         data.proxy.configured_listen_address = "127.0.0.1".to_string();
         data.proxy.configured_listen_port = 15721;
 
@@ -9774,7 +10002,106 @@ mod tests {
                 message,
                 kind: ToastKind::Info,
                 ..
-            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+            }) if message == "The local proxy is running. Stop it before editing listen address."
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_editable_when_proxy_running_but_app_not_routed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenPort))
+            .expect("ListenPort missing");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = false;
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenPort,
+                ..
+            })
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            input: TextInput::new("15721".to_string()),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyListenPort { port } if port == 15721
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_blocked_when_active_worker_exists() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenPort))
+            .expect("ListenPort missing");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.active_worker_apps =
+            std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "This app is using the proxy. Stop this app's proxy route before editing listen port."
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_submit_blocked_when_active_worker_starts_before_confirm() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            input: TextInput::new("15721".to_string()),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.active_worker_apps =
+            std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "This app is using the proxy. Stop this app's proxy route before editing listen port."
         ));
     }
 
@@ -9869,6 +10196,7 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.running = true;
+        data.proxy.claude_takeover = true;
 
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
@@ -9879,7 +10207,7 @@ mod tests {
                 message,
                 kind: ToastKind::Info,
                 ..
-            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+            }) if message == "The local proxy is running. Stop it before editing listen address."
         ));
     }
 
@@ -10396,7 +10724,7 @@ mod tests {
     #[serial]
     fn prompt_save_runtime_updates_metadata_and_content() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         PromptService::upsert_prompt(
             &state,
@@ -10451,7 +10779,8 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_save_runtime_creates_prompt_from_one_page_form() {
-        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10491,7 +10820,7 @@ mod tests {
     #[serial]
     fn prompt_import_candidate_yes_opens_prefilled_add_form_without_saving() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10540,7 +10869,8 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_create_runtime_clears_filter_when_new_prompt_is_not_visible() {
-        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10576,7 +10906,7 @@ mod tests {
     #[serial]
     fn prompt_rename_runtime_clears_filter_when_renamed_prompt_is_not_visible() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         PromptService::upsert_prompt(
             &state,
@@ -12008,6 +12338,257 @@ mod tests {
     }
 
     #[test]
+    fn provider_codex_local_routing_field_enter_opens_page() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::CodexLocalRouting)
+                .expect("Codex local routing field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+
+        let page = match app.form.as_ref() {
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.page,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(
+            page,
+            super::super::form::ProviderFormPage::CodexLocalRouting
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_codex_local_routing_toggle_warns_when_proxy_not_enabled() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            form.codex_base_url.set("https://api.example.com/v1");
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::CodexLocalRouting)
+                .expect("Codex local routing field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProviderApiFormatProxyNotice,
+                ..
+            })
+        ));
+        let format = match app.form.as_ref() {
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+    }
+
+    #[test]
+    fn provider_codex_local_routing_toggle_does_not_warn_when_proxy_routes_current_app() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.codex_takeover = true;
+
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            form.codex_base_url.set("https://api.example.com/v1");
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::CodexLocalRouting)
+                .expect("Codex local routing field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let format = match app.form.as_ref() {
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+    }
+
+    #[test]
+    fn provider_codex_local_routing_model_catalog_opens_list_page_and_adds_models() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.codex_takeover = true;
+
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            form.codex_base_url.set("https://api.example.com/v1");
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::CodexLocalRouting)
+                .expect("Codex local routing field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data); // open local routing page
+        app.on_key(key(KeyCode::Enter), &data); // enable local routing
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.editor.is_none());
+        assert!(matches!(
+            app.form,
+            Some(super::super::form::FormState::ProviderAdd(ref form))
+                if matches!(form.page, super::super::form::ProviderFormPage::CodexModelCatalog)
+        ));
+
+        app.on_key(key(KeyCode::Char('+')), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::CodexModelCatalogField {
+                    row: None,
+                    field: CodexModelCatalogField::Model,
+                },
+                ..
+            })
+        ));
+        for ch in "deepseek-chat".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data);
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+
+        let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.codex_model_catalog.len(), 1);
+        assert_eq!(form.codex_model_catalog[0].model, "deepseek-chat");
+
+        app.on_key(key(KeyCode::Right), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::CodexModelCatalogField {
+                    row: Some(0),
+                    field: CodexModelCatalogField::DisplayName,
+                },
+                ..
+            })
+        ));
+        for ch in "DeepSeek Chat".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data);
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+
+        app.on_key(key(KeyCode::Right), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::CodexModelCatalogField {
+                    row: Some(0),
+                    field: CodexModelCatalogField::ContextWindow,
+                },
+                ..
+            })
+        ));
+        for ch in "256k".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data);
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+
+        let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.codex_model_catalog[0].display_name, "DeepSeek Chat");
+        assert_eq!(form.codex_model_catalog[0].context_window, "256k");
+        assert_eq!(
+            form.codex_model_catalog_field,
+            CodexModelCatalogField::ContextWindow
+        );
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderModelFetch {
+                field: ProviderAddField::CodexLocalRouting,
+                ..
+            }
+        ));
+
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::CodexLocalRouting,
+            claude_idx: None,
+            input: TextInput::new("kimi-k2"),
+            query: "kimi-k2".to_string(),
+            fetching: false,
+            models: vec!["kimi-k2".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+        app.on_key(key(KeyCode::Enter), &data);
+
+        let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.codex_model_catalog.len(), 2);
+        assert_eq!(form.codex_model_catalog[1].model, "kimi-k2");
+    }
+
+    #[test]
     fn provider_claude_model_overlay_jk_navigates_when_not_editing() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -12951,6 +13532,499 @@ mod tests {
     }
 
     #[test]
+    fn context_help_global_keeps_shortcuts_and_english_eyebrow() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(text.contains("Help follows the focused item"), "{text}");
+        assert!(text.contains("↑↓ or h/j/k/l  move"), "{text}");
+        assert!(text.contains("?   toggle help"), "{text}");
+        assert!(text.contains("Providers: Enter details"), "{text}");
+        assert!(!text.contains("点在哪"), "{text}");
+        assert!(!text.contains("显示/关闭帮助"), "{text}");
+    }
+
+    #[test]
+    fn context_help_provider_field_tracks_focused_codex_base_url() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Codex));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Codex,
+        )));
+        select_provider_field(&mut app, ProviderAddField::CodexBaseUrl);
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(text.contains("Help follows the focused item"), "{text}");
+        assert!(
+            text.contains("Codex natively supports OpenAI Responses API"),
+            "{text}"
+        );
+        assert!(text.contains("keep local routing enabled"), "{text}");
+        assert!(!text.contains("Codex 原生"), "{text}");
+    }
+
+    #[test]
+    fn context_help_codex_local_routing_fields_follow_focus() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Codex));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Codex,
+        )));
+        select_provider_field(&mut app, ProviderAddField::CodexLocalRouting);
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let main_field = help_text(&app);
+        assert!(main_field.contains("Local Routing"), "{main_field}");
+        assert!(
+            main_field.contains("OpenAI Chat Completions"),
+            "{main_field}"
+        );
+        assert!(!main_field.contains("本地路由"), "{main_field}");
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_codex_local_routing_page();
+            form.toggle_codex_local_routing_enabled();
+            form.codex_local_routing_field_idx = form
+                .codex_local_routing_fields()
+                .iter()
+                .position(|field| *field == CodexLocalRoutingField::SupportsEffort)
+                .expect("SupportsEffort field should be visible when local routing is enabled");
+        }
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let local_routing_field = help_text(&app);
+        assert!(
+            local_routing_field.contains("reasoning effort"),
+            "{local_routing_field}"
+        );
+        assert!(
+            local_routing_field.contains("effort levels"),
+            "{local_routing_field}"
+        );
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_codex_model_catalog_page();
+            form.codex_model_catalog_field = CodexModelCatalogField::ContextWindow;
+        }
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let model_catalog_field = help_text(&app);
+        assert!(
+            model_catalog_field.contains("Context Window"),
+            "{model_catalog_field}"
+        );
+        assert!(
+            model_catalog_field.contains("provider's actual model capability"),
+            "{model_catalog_field}"
+        );
+    }
+
+    #[test]
+    fn context_help_provider_preview_uses_chinese_without_english_leakage() {
+        let _lang = use_test_language(Language::Chinese);
+        let mut app = App::new(Some(AppType::Codex));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Codex,
+        )));
+        focus_provider_json_preview(&mut app);
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.codex_preview_section = CodexPreviewSection::Config;
+        }
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(text.contains("点在哪，帮助就在哪"), "{text}");
+        assert!(
+            text.contains("本地路由、思考能力、模型目录、目标模式、远程压缩"),
+            "{text}"
+        );
+        assert!(!text.contains("Help follows"), "{text}");
+        assert!(!text.contains("Goal mode"), "{text}");
+        assert!(!text.contains("remote compaction"), "{text}");
+    }
+
+    #[test]
+    fn context_help_usage_query_template_explains_exposed_templates() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+        }
+        select_usage_query_field(&mut app, UsageQueryField::Template);
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(
+            text.contains("custom, general, newapi, and balance"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Token Plan is not shown in the TUI"),
+            "{text}"
+        );
+        assert!(!text.contains("TUI 只提供"), "{text}");
+    }
+
+    #[test]
+    fn context_help_usage_query_side_panels_follow_focus() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.set_usage_query_template(UsageQueryTemplate::Custom);
+            form.focus = FormFocus::JsonPreview;
+        }
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let extractor = help_text(&app);
+        assert!(extractor.contains("{{baseUrl}}"), "{extractor}");
+        assert!(extractor.contains("remaining quota fields"), "{extractor}");
+        assert!(extractor.contains("planName"), "{extractor}");
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Content;
+        }
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let instructions = help_text(&app);
+        assert!(
+            instructions.contains("{{baseUrl}}/api/usage"),
+            "{instructions}"
+        );
+        assert!(instructions.contains("remaining"), "{instructions}");
+        assert!(instructions.contains("User-Agent"), "{instructions}");
+    }
+
+    #[test]
+    fn context_help_long_usage_query_instructions_scroll() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.focus = FormFocus::Content;
+        }
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let Overlay::Help(help) = &app.overlay else {
+            panic!("expected Help overlay, got {:?}", app.overlay);
+        };
+        assert!(help.content.lines.len() > 20);
+        assert_eq!(help.scroll, 0);
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        let Overlay::Help(help) = &app.overlay else {
+            panic!("expected Help overlay, got {:?}", app.overlay);
+        };
+        assert_eq!(help.scroll, 2);
+
+        app.on_key(key(KeyCode::Up), &UiData::default());
+        let Overlay::Help(help) = &app.overlay else {
+            panic!("expected Help overlay, got {:?}", app.overlay);
+        };
+        assert_eq!(help.scroll, 1);
+    }
+
+    #[test]
+    fn context_help_usage_query_template_picker_restores_after_close() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+        }
+        app.overlay = Overlay::UsageQueryTemplatePicker { selected: 2 };
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let text = help_text(&app);
+        assert!(
+            text.contains("custom, general, newapi, and balance"),
+            "{text}"
+        );
+        assert!(matches!(
+            app.pending_overlay,
+            Some(Overlay::UsageQueryTemplatePicker { selected: 2 })
+        ));
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        assert!(matches!(
+            app.overlay,
+            Overlay::UsageQueryTemplatePicker { selected: 2 }
+        ));
+        assert!(app.pending_overlay.is_none());
+    }
+
+    #[test]
+    fn context_help_does_not_cover_async_running_or_loading_overlays() {
+        let _lang = use_test_language(Language::English);
+
+        let mut speedtest = App::new(Some(AppType::Claude));
+        speedtest.overlay = Overlay::SpeedtestRunning {
+            url: "https://example.com".to_string(),
+        };
+        let action = speedtest.on_key(key(KeyCode::Char('?')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            speedtest.overlay,
+            Overlay::SpeedtestRunning { ref url } if url == "https://example.com"
+        ));
+        assert!(speedtest.pending_overlay.is_none());
+
+        let mut stream_check = App::new(Some(AppType::Claude));
+        stream_check.overlay = Overlay::StreamCheckRunning {
+            provider_id: "p1".to_string(),
+            provider_name: "Provider One".to_string(),
+        };
+        let action = stream_check.on_key(key(KeyCode::Char('?')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            stream_check.overlay,
+            Overlay::StreamCheckRunning { ref provider_id, .. } if provider_id == "p1"
+        ));
+        assert!(stream_check.pending_overlay.is_none());
+
+        let mut proxy_loading = App::new(Some(AppType::Claude));
+        proxy_loading.overlay = Overlay::Loading {
+            kind: LoadingKind::Proxy,
+            title: "Proxy".to_string(),
+            message: "Working...".to_string(),
+        };
+        let action = proxy_loading.on_key(key(KeyCode::Char('?')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            proxy_loading.overlay,
+            Overlay::Loading {
+                kind: LoadingKind::Proxy,
+                ..
+            }
+        ));
+        assert!(proxy_loading.pending_overlay.is_none());
+
+        let mut webdav_loading = App::new(Some(AppType::Claude));
+        webdav_loading.overlay = Overlay::Loading {
+            kind: LoadingKind::WebDav,
+            title: "WebDAV".to_string(),
+            message: "Working...".to_string(),
+        };
+        let action = webdav_loading.on_key(key(KeyCode::Char('?')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            webdav_loading.overlay,
+            Overlay::Loading {
+                kind: LoadingKind::WebDav,
+                ..
+            }
+        ));
+        assert!(webdav_loading.pending_overlay.is_none());
+    }
+
+    #[test]
+    fn context_help_usage_query_newapi_base_url_and_timeout_follow_upstream() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.set_usage_query_template(UsageQueryTemplate::NewApi);
+        }
+        select_usage_query_field(&mut app, UsageQueryField::BaseUrl);
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let base_url = help_text(&app);
+        assert!(base_url.contains("NewAPI service URL"), "{base_url}");
+        assert!(base_url.contains("/api/user/self"), "{base_url}");
+        assert!(!base_url.contains("For the general template"), "{base_url}");
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        select_usage_query_field(&mut app, UsageQueryField::Timeout);
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let timeout = help_text(&app);
+        assert!(timeout.contains("2-30 seconds"), "{timeout}");
+    }
+
+    #[test]
+    fn context_help_falls_back_when_focus_has_no_specific_help() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Content;
+        }
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(text.contains("No help here"), "{text}");
+        assert!(!text.contains("toggle help"), "{text}");
+    }
+
+    #[test]
+    fn context_help_question_mark_stays_text_while_provider_field_is_editing() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        select_provider_field(&mut app, ProviderAddField::Name);
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(provider_editing_name(&app), (true, "?".to_string()));
+    }
+
+    #[test]
+    fn context_help_question_mark_stays_text_while_text_input_overlay_is_editing() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Export".to_string(),
+            prompt: "Path".to_string(),
+            input: TextInput::new(""),
+            submit: TextSubmit::ConfigExport,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::TextInput(TextInputState { input, .. }) if input.value == "?"
+        ));
+        assert!(app.pending_overlay.is_none());
+    }
+
+    #[test]
+    fn context_help_question_mark_stays_text_while_model_fetch_picker_is_editing() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: Vec::new(),
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::ModelFetchPicker { input, .. } if input.value == "?"
+        ));
+        assert!(app.pending_overlay.is_none());
+    }
+
+    #[test]
+    fn context_help_common_config_mentions_re_extract_guidance() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Codex));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Codex,
+        )));
+        select_provider_field(&mut app, ProviderAddField::CommonSnippet);
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        let text = help_text(&app);
+        assert!(text.contains("re-extracting"), "{text}");
+        assert!(text.contains("existing config"), "{text}");
+    }
+
+    #[test]
+    fn context_help_settings_proxy_opens_proxy_detail_text_view() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.proxy.configured_listen_address = "0.0.0.0".to_string();
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Char('?')), &data);
+
+        assert!(matches!(action, Action::None));
+        let Overlay::TextView(view) = &app.overlay else {
+            panic!("expected proxy TextView overlay, got {:?}", app.overlay);
+        };
+        assert_eq!(view.title, texts::tui_config_item_proxy());
+        let text = view.lines.join("\n");
+        assert!(text.contains("0.0.0.0:15721"), "{text}");
+        assert!(text.contains("Restart routing"), "{text}");
+    }
+
+    #[test]
+    fn context_help_chinese_empty_fallback_is_fully_chinese() {
+        let _lang = use_test_language(Language::Chinese);
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Content;
+        }
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let text = help_text(&app);
+        assert!(text.contains("点在哪，帮助就在哪"), "{text}");
+        assert!(text.contains("此处无提示"), "{text}");
+        assert!(!text.contains("Help follows"), "{text}");
+        assert!(!text.contains("No help here"), "{text}");
+    }
+
+    #[test]
     fn provider_form_usage_query_row_opens_secondary_page_and_esc_returns() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -13313,6 +14387,112 @@ mod tests {
     }
 
     #[test]
+    fn sessions_page_keys_move_selection_by_page_and_clamp() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        app.focus = Focus::Content;
+        app.sessions.pane = SessionsPane::List;
+        app.sessions.loaded_once = true;
+        app.sessions.provider_id = Some("claude".to_string());
+        app.last_size = Size {
+            width: 120,
+            height: 40,
+        };
+        for i in 0..200 {
+            app.sessions.rows.push(session_meta(
+                "claude",
+                &format!("s{i}"),
+                "Title",
+                "/tmp/p",
+                "/tmp/s.jsonl",
+                "claude --resume",
+            ));
+        }
+        // page size = last_size.height(40) - chrome(9)
+        let page = 40usize - 9;
+
+        app.on_sessions_key(key(KeyCode::PageDown), &data());
+        assert_eq!(app.sessions.selected_idx, page);
+
+        app.on_sessions_key(key(KeyCode::End), &data());
+        assert_eq!(app.sessions.selected_idx, 199);
+
+        // PageDown at the bottom is clamped to the last row.
+        app.on_sessions_key(key(KeyCode::PageDown), &data());
+        assert_eq!(app.sessions.selected_idx, 199);
+
+        app.on_sessions_key(key(KeyCode::PageUp), &data());
+        assert_eq!(app.sessions.selected_idx, 199 - page);
+
+        app.on_sessions_key(key(KeyCode::Home), &data());
+        assert_eq!(app.sessions.selected_idx, 0);
+
+        // PageUp at the top stays at 0.
+        app.on_sessions_key(key(KeyCode::PageUp), &data());
+        assert_eq!(app.sessions.selected_idx, 0);
+    }
+
+    #[test]
+    fn session_scan_cache_restores_for_the_whole_run() {
+        let mut sessions = SessionsState::default();
+        let req = sessions.start_scan("claude".to_string());
+        assert!(sessions.finish_scan(req, vec![session_meta_for_app("claude")]));
+        assert!(sessions.scan_cache.contains_key("claude"));
+
+        // Switching to another provider clears the live rows...
+        let _ = sessions.start_scan("codex".to_string());
+        assert!(sessions.rows.is_empty());
+
+        // ...switching back hits the cache and restores instantly, no re-scan.
+        assert!(sessions.restore_from_scan_cache("claude"));
+        assert_eq!(sessions.rows.len(), 1);
+        assert!(sessions.loaded_once);
+        assert_eq!(sessions.provider_id.as_deref(), Some("claude"));
+
+        // The cache never expires within a run, so a repeat restore still hits
+        // (only a manual `r` reload re-scans, which goes through start_scan).
+        let _ = sessions.start_scan("codex".to_string());
+        assert!(sessions.restore_from_scan_cache("claude"));
+        assert_eq!(sessions.rows.len(), 1);
+
+        // A provider that was never scanned is a miss.
+        assert!(!sessions.restore_from_scan_cache("gemini"));
+    }
+
+    #[test]
+    fn deleting_session_updates_scan_cache_to_prevent_resurrection() {
+        let mut sessions = SessionsState::default();
+        let req = sessions.start_scan("claude".to_string());
+        let a = session_meta(
+            "claude",
+            "a",
+            "A",
+            "/tmp",
+            "/tmp/a.jsonl",
+            "claude --resume a",
+        );
+        let b = session_meta(
+            "claude",
+            "b",
+            "B",
+            "/tmp",
+            "/tmp/b.jsonl",
+            "claude --resume b",
+        );
+        let key_b = session_key(&b);
+        assert!(sessions.finish_scan(req, vec![a, b]));
+        assert_eq!(sessions.scan_cache.get("claude").unwrap().rows.len(), 2);
+
+        assert!(sessions.remove_session_by_key(&key_b));
+        assert_eq!(sessions.rows.len(), 1);
+        // The cached snapshot drops the deleted session too, so a cache restore
+        // cannot resurrect it.
+        let cached = sessions.scan_cache.get("claude").unwrap();
+        assert_eq!(cached.rows.len(), 1);
+        assert!(cached.rows.iter().all(|s| session_key(s) != key_b));
+    }
+
+    #[test]
     fn claude_model_fill_all_a_opens_confirm_without_changing_values() {
         let mut app = setup_claude_model_picker_with_models();
 
@@ -13670,33 +14850,81 @@ mod tests {
     }
 
     #[test]
-    fn sessions_left_right_switch_between_list_and_detail_without_tab() {
+    fn sessions_arrow_keys_move_through_nav_list_and_detail() {
         let mut app = app_with_session_page();
         let data = UiData::default();
 
-        assert_eq!(app.sessions.pane, SessionsPane::List);
+        app.focus = Focus::Nav;
+        app.sessions.pane = SessionsPane::Detail;
+
         app.on_key(key(KeyCode::Right), &data);
         assert_eq!(app.focus, Focus::Content);
-        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
 
-        app.on_key(key(KeyCode::Tab), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+        let expected_key = session_key(&app.sessions.rows[0]);
+        let action = app.on_key(key(KeyCode::Right), &data);
+        assert_eq!(app.focus, Focus::Content);
         assert_eq!(app.sessions.pane, SessionsPane::Detail);
+        assert!(matches!(
+            action,
+            Action::SessionMessagesLoad {
+                ref key,
+                ref provider_id,
+                ref source_path
+            } if key == &expected_key
+                && provider_id == "claude"
+                && source_path == "/tmp/session.jsonl"
+        ));
 
         app.on_key(key(KeyCode::Left), &data);
         assert_eq!(app.focus, Focus::Content);
         assert_eq!(app.sessions.pane, SessionsPane::List);
+
+        app.on_key(key(KeyCode::Left), &data);
+        assert_eq!(app.focus, Focus::Nav);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
     }
 
     #[test]
-    fn sessions_h_l_switch_between_list_and_detail() {
+    fn sessions_tab_keys_follow_same_focus_chain_as_arrows() {
         let mut app = app_with_session_page();
         let data = UiData::default();
 
-        app.on_key(key(KeyCode::Char('l')), &data);
+        app.focus = Focus::Nav;
+        app.on_key(key(KeyCode::Tab), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+
+        let action = app.on_key(key(KeyCode::Tab), &data);
+        assert_eq!(app.focus, Focus::Content);
         assert_eq!(app.sessions.pane, SessionsPane::Detail);
+        assert!(matches!(action, Action::SessionMessagesLoad { .. }));
+
+        app.on_key(key(KeyCode::BackTab), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+
+        let mut backtab = key(KeyCode::Tab);
+        backtab.modifiers = KeyModifiers::SHIFT;
+        app.on_key(backtab, &data);
+        assert_eq!(app.focus, Focus::Nav);
+    }
+
+    #[test]
+    fn sessions_h_l_follow_arrow_focus_chain() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Char('l')), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+        assert!(matches!(action, Action::SessionMessagesLoad { .. }));
 
         app.on_key(key(KeyCode::Char('h')), &data);
         assert_eq!(app.sessions.pane, SessionsPane::List);
+
+        app.on_key(key(KeyCode::Char('h')), &data);
+        assert_eq!(app.focus, Focus::Nav);
     }
 
     #[test]
@@ -13770,7 +14998,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_filter_starts_on_list_pane_from_detail() {
+    fn sessions_filter_targets_messages_from_detail_pane() {
         let mut app = app_with_session_page();
         let data = UiData::default();
         app.sessions.pane = SessionsPane::Detail;
@@ -13778,7 +15006,8 @@ mod tests {
         app.on_key(key(KeyCode::Char('/')), &data);
 
         assert!(app.filter.active);
-        assert_eq!(app.sessions.pane, SessionsPane::List);
+        assert_eq!(app.filter.scope, FilterScope::SessionMessages);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
     }
 
     #[test]
@@ -13830,7 +15059,7 @@ mod tests {
             content: "old detail".to_string(),
             ts: Some(1_735_689_900_000),
         }];
-        app.sessions.pane = SessionsPane::Detail;
+        app.sessions.pane = SessionsPane::List;
 
         app.on_key(key(KeyCode::Char('/')), &data);
         app.on_key(key(KeyCode::Char('b')), &data);
@@ -13886,5 +15115,232 @@ mod tests {
         assert!(app.sessions.finish_delete(alpha_request_id, &alpha_key));
         assert!(app.sessions.rows.is_empty());
         assert!(app.sessions.delete_active.is_empty());
+    }
+
+    #[test]
+    fn usage_shortcuts_change_range_and_open_details() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+
+        app.on_key(key(KeyCode::Char('1')), &data);
+        assert!(matches!(app.usage.range, data::UsageRangePreset::Today));
+
+        app.on_key(key(KeyCode::Char('3')), &data);
+        assert!(matches!(
+            app.usage.range,
+            data::UsageRangePreset::ThirtyDays
+        ));
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+        assert!(matches!(app.usage.metric, UsageMetric::Cost));
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(app.usage.metric, UsageMetric::Tokens));
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &data);
+        assert!(matches!(app.usage.metric, UsageMetric::Cost));
+
+        app.on_key(key(KeyCode::Right), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Models));
+    }
+
+    #[test]
+    fn usage_custom_range_shortcut_opens_text_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('C')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::UsageCustomRange,
+                input,
+                ..
+            }) if input.value.contains("..")
+        ));
+    }
+
+    #[test]
+    fn usage_custom_range_submit_emits_action() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Custom Range".to_string(),
+            prompt: "Format: YYYY-MM-DD..YYYY-MM-DD".to_string(),
+            input: TextInput::new("2026-06-01..2026-06-05"),
+            submit: TextSubmit::UsageCustomRange,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::UsageCustomRange { range } if range.label() == "2026-06-01..2026-06-05"
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn usage_custom_range_invalid_submit_reopens_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Custom Range".to_string(),
+            prompt: "Format: YYYY-MM-DD..YYYY-MM-DD".to_string(),
+            input: TextInput::new("2026-06-05..2026-06-01"),
+            submit: TextSubmit::UsageCustomRange,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::UsageCustomRange,
+                input,
+                ..
+            }) if input.value == "2026-06-05..2026-06-01"
+        ));
+        assert!(matches!(
+            app.toast.as_ref().map(|toast| &toast.kind),
+            Some(ToastKind::Warning)
+        ));
+    }
+
+    #[test]
+    fn usage_details_tabs_and_log_detail_route_use_stack() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.usage.recent_logs.push(data::UsageLogRow {
+            request_id: "req-usage-1".to_string(),
+            ..data::UsageLogRow::default()
+        });
+
+        let action = app.on_key(key(KeyCode::Char('L')), &data);
+        assert!(matches!(action, Action::SwitchRoute(Route::UsageLogs)));
+        assert!(matches!(app.route, Route::UsageLogs));
+        assert_eq!(app.route_stack, vec![Route::Usage]);
+        assert!(matches!(app.usage.pane, UsagePane::Models));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Providers));
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Models));
+
+        app.on_key(key(KeyCode::Tab), &data);
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Recent));
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.route, Route::UsageLogs));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::UsageLogDetail { request_id })
+                if request_id == "req-usage-1"
+        ));
+        assert!(matches!(
+            app.route,
+            Route::UsageLogDetail { ref request_id } if request_id == "req-usage-1"
+        ));
+        assert_eq!(app.route_stack, vec![Route::Usage, Route::UsageLogs]);
+    }
+
+    #[test]
+    fn usage_pricing_shortcut_opens_pricing_as_child_route() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.pricing.rows = vec![data::ModelPricingRow {
+            model_id: "claude-sonnet-4-5".to_string(),
+            display_name: "Claude Sonnet 4.5".to_string(),
+            ..data::ModelPricingRow::default()
+        }];
+
+        let action = app.on_key(key(KeyCode::Char('P')), &data);
+
+        assert!(matches!(action, Action::SwitchRoute(Route::Pricing)));
+        assert!(matches!(app.route, Route::Pricing));
+        assert_eq!(app.route_stack, vec![Route::Usage]);
+        assert!(matches!(app.nav_item(), NavItem::Usage));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::SwitchRoute(Route::Usage)));
+        assert!(matches!(app.route, Route::Usage));
+        assert!(app.route_stack.is_empty());
+    }
+
+    #[test]
+    fn pricing_shortcuts_select_edit_and_delete() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Pricing;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.pricing.rows = vec![
+            data::ModelPricingRow {
+                model_id: "gpt-5.4".to_string(),
+                display_name: "GPT 5.4".to_string(),
+                ..data::ModelPricingRow::default()
+            },
+            data::ModelPricingRow {
+                model_id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                ..data::ModelPricingRow::default()
+            },
+        ];
+
+        app.on_key(key(KeyCode::Down), &data);
+        assert_eq!(app.pricing.selected_idx, 1);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        let Some(editor) = app.editor.as_ref() else {
+            panic!("expected pricing editor");
+        };
+        assert!(matches!(
+            editor.submit,
+            EditorSubmit::PricingEdit { ref model_id } if model_id == "claude-sonnet-4-5"
+        ));
+        assert!(editor.text().contains("\"input_cost_per_million\""));
+        assert!(matches!(app.route, Route::Pricing));
+        assert!(app.route_stack.is_empty());
+
+        app.editor = None;
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.editor.is_none(),
+            "pricing e shortcut should be disabled"
+        );
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::PricingDelete { ref model_id },
+                ..
+            }) if model_id == "claude-sonnet-4-5"
+        ));
     }
 }

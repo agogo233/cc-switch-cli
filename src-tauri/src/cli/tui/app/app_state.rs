@@ -49,6 +49,8 @@ pub enum Action {
     },
     SkillsDiscover {
         query: String,
+        source: SkillsDiscoverSource,
+        force: bool,
     },
     SkillsRepoAdd {
         spec: String,
@@ -110,6 +112,12 @@ pub enum Action {
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
+    },
+    UsageCustomRange {
+        range: data::UsageCustomRange,
+    },
+    PricingDelete {
+        model_id: String,
     },
 
     ManagedAuthRefresh {
@@ -237,6 +245,9 @@ pub enum Action {
         enabled: bool,
     },
     SetClaudePluginIntegration {
+        enabled: bool,
+    },
+    SetCodexUnifiedSessionHistory {
         enabled: bool,
     },
     #[allow(dead_code)]
@@ -434,12 +445,13 @@ pub enum SettingsItem {
     ManagedAccounts,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
+    CodexUnifiedSessionHistory,
     Proxy,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 9] = [
+    pub const ALL: [SettingsItem; 10] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::VisibleAppsMode,
@@ -447,6 +459,7 @@ impl SettingsItem {
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
+        SettingsItem::CodexUnifiedSessionHistory,
         SettingsItem::Proxy,
         SettingsItem::CheckForUpdates,
     ];
@@ -548,6 +561,8 @@ pub struct App {
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,
 
+    pub usage: UsageState,
+    pub pricing: PricingState,
     pub sessions: SessionsState,
     pub provider_idx: usize,
     pub mcp_idx: usize,
@@ -558,6 +573,12 @@ pub struct App {
     pub skills_unmanaged_idx: usize,
     pub skills_discover_results: Vec<crate::services::skill::Skill>,
     pub skills_discover_query: String,
+    pub skills_discover_source: SkillsDiscoverSource,
+    pub skills_discover_loading: bool,
+    pub skills_discover_request_id: u64,
+    pub skills_discover_active_request_id: Option<u64>,
+    pub skills_discover_cache:
+        HashMap<(SkillsDiscoverSource, String), Vec<crate::services::skill::Skill>>,
     pub skills_unmanaged_results: Vec<crate::services::skill::UnmanagedSkill>,
     pub skills_unmanaged_selected: HashSet<String>,
     pub config_idx: usize,

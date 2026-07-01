@@ -18,6 +18,7 @@ mod config;
 mod editor;
 mod helpers;
 mod mcp;
+mod pricing;
 mod prompts;
 mod providers;
 mod settings;
@@ -37,6 +38,10 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
             | super::route::Route::Sessions
             | super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
@@ -52,6 +57,10 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
             | super::route::Route::Sessions
             | super::route::Route::Mcp
             | super::route::Route::HermesMemory
@@ -76,7 +85,12 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
     }
 }
 
-fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+pub(crate) fn apply_preloaded_app_switch(
+    app: &mut App,
+    data: &mut UiData,
+    next: AppType,
+    next_data: UiData,
+) {
     app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
     let original_route = app.route.clone();
@@ -127,6 +141,10 @@ pub(super) struct RuntimeActionContext<'a> {
     managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "TUI dispatcher receives independent worker channels and request trackers"
+)]
 pub(crate) fn handle_action(
     terminal: &mut TuiTerminal,
     app: &mut App,
@@ -316,6 +334,18 @@ pub(crate) fn handle_action(
         Action::SwitchRoute(route) => {
             ctx.app.route = route;
             ctx.app.maybe_prompt_import_candidate(ctx.data);
+            if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
+                && ctx.app.skills_discover_results.is_empty()
+                && !ctx.app.skills_discover_loading
+                && matches!(
+                    ctx.app.skills_discover_source,
+                    super::app::SkillsDiscoverSource::Repos
+                )
+            {
+                let query = ctx.app.skills_discover_query.clone();
+                let source = ctx.app.skills_discover_source;
+                skills::discover(&mut ctx, query, source, false)?;
+            }
             Ok(())
         }
         Action::Quit => {
@@ -328,7 +358,11 @@ pub(crate) fn handle_action(
         Action::SkillsUninstall { directory } => skills::uninstall(&mut ctx, directory),
         Action::SkillsSync { app: scope } => skills::sync(&mut ctx, scope),
         Action::SkillsSetSyncMethod { method } => skills::set_sync_method(&mut ctx, method),
-        Action::SkillsDiscover { query } => skills::discover(&mut ctx, query),
+        Action::SkillsDiscover {
+            query,
+            source,
+            force,
+        } => skills::discover(&mut ctx, query, source, force),
         Action::SkillsRepoAdd { spec } => skills::repo_add(&mut ctx, spec),
         Action::SkillsRepoRemove { owner, name } => skills::repo_remove(&mut ctx, owner, name),
         Action::SkillsRepoToggleEnabled {
@@ -389,6 +423,8 @@ pub(crate) fn handle_action(
             field,
             claude_idx,
         ),
+        Action::UsageCustomRange { .. } => Ok(()),
+        Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
         Action::McpSetApps { id, apps } => mcp::set_apps(&mut ctx, id, apps),
         Action::McpDelete { id } => mcp::delete(&mut ctx, id),
@@ -480,6 +516,9 @@ pub(crate) fn handle_action(
                 ToastKind::Success,
             );
             Ok(())
+        }
+        Action::SetCodexUnifiedSessionHistory { enabled } => {
+            settings::set_codex_unified_session_history(&mut ctx, enabled)
         }
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {

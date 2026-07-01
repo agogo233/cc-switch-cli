@@ -302,6 +302,10 @@ where
     build_buffered_json_response_inner(status, headers, body, transform)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stream response setup needs timeout, format, and shadow context"
+)]
 pub fn build_anthropic_stream_response(
     response: reqwest::Response,
     first_byte_timeout: Option<Duration>,
@@ -333,6 +337,7 @@ pub fn build_anthropic_stream_response(
         )),
         "gemini_native" => Box::pin(create_anthropic_sse_stream_from_gemini(
             timed_stream,
+            Some(stream_completion.clone()),
             gemini_shadow,
             provider_id,
             session_id,

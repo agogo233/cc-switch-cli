@@ -1,4 +1,4 @@
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use std::{collections::HashSet, path::PathBuf};
 
 use super::{provider_inspect, provider_usage_query};
@@ -17,6 +17,7 @@ use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
+use indexmap::IndexMap;
 use inquire::{Confirm, Select};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
@@ -30,17 +31,10 @@ const CLAUDE_API_FORMAT_CHOICES: [&str; 4] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_GEMINI_NATIVE,
 ];
-
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider.category.as_deref() == Some("official")
-        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
+const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
+    CLAUDE_API_FORMAT_OPENAI_RESPONSES,
+    CLAUDE_API_FORMAT_OPENAI_CHAT,
+];
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
     provider
@@ -63,6 +57,18 @@ fn normalize_claude_api_format(raw: &str) -> &'static str {
         CLAUDE_API_FORMAT_OPENAI_RESPONSES => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
         CLAUDE_API_FORMAT_GEMINI_NATIVE => CLAUDE_API_FORMAT_GEMINI_NATIVE,
         _ => CLAUDE_API_FORMAT_ANTHROPIC,
+    }
+}
+
+fn normalize_codex_api_format(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "chat"
+        | "chat_completions"
+        | "chat-completions"
+        | CLAUDE_API_FORMAT_OPENAI_CHAT
+        | "openai-chat"
+        | "openai_chat_completions" => CLAUDE_API_FORMAT_OPENAI_CHAT,
+        _ => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     }
 }
 
@@ -103,6 +109,34 @@ fn effective_claude_api_format(provider: &Provider) -> &'static str {
         CLAUDE_API_FORMAT_OPENAI_CHAT
     } else {
         CLAUDE_API_FORMAT_ANTHROPIC
+    }
+}
+
+fn effective_codex_api_format(provider: &Provider) -> &'static str {
+    if let Some(api_format) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(|value| value.as_str())
+        })
+    {
+        return normalize_codex_api_format(api_format);
+    }
+
+    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+        CLAUDE_API_FORMAT_OPENAI_CHAT
+    } else {
+        CLAUDE_API_FORMAT_OPENAI_RESPONSES
     }
 }
 
@@ -165,6 +199,31 @@ fn strip_claude_api_format_legacy_settings(provider: &mut Provider) {
     settings_obj.remove("openrouter_compat_mode");
 }
 
+fn strip_codex_api_format_legacy_settings(provider: &mut Provider) {
+    let Some(settings_obj) = provider.settings_config.as_object_mut() else {
+        return;
+    };
+    settings_obj.remove("api_format");
+    settings_obj.remove("apiFormat");
+}
+
+fn normalize_codex_settings_wire_api(provider: &mut Provider) {
+    let Some(config_text) = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let normalized =
+        crate::codex_config::normalize_codex_config_wire_api_to_responses(&config_text);
+
+    if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+        settings_obj.insert("config".to_string(), serde_json::Value::String(normalized));
+    }
+}
+
 fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
     let api_format = normalize_claude_api_format(api_format);
     if api_format == CLAUDE_API_FORMAT_ANTHROPIC {
@@ -179,6 +238,16 @@ fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
             .api_format = Some(api_format.to_string());
     }
     strip_claude_api_format_legacy_settings(provider);
+}
+
+fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
+    let api_format = normalize_codex_api_format(api_format);
+    provider
+        .meta
+        .get_or_insert_with(ProviderMeta::default)
+        .api_format = Some(api_format.to_string());
+    strip_codex_api_format_legacy_settings(provider);
+    normalize_codex_settings_wire_api(provider);
 }
 
 fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
@@ -199,30 +268,71 @@ fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Pr
     false
 }
 
-fn prompt_claude_api_format(provider: &Provider) -> Result<&'static str, AppError> {
-    let current = effective_claude_api_format(provider);
-    let default_index = CLAUDE_API_FORMAT_CHOICES
+fn apply_fixed_codex_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
+    if !matches!(app_type, AppType::Codex) {
+        return true;
+    }
+
+    if provider.is_codex_official() {
+        if let Some(meta) = provider.meta.as_mut() {
+            meta.api_format = None;
+            meta.codex_chat_reasoning = None;
+        }
+        if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+            settings_obj.remove("modelCatalog");
+        }
+        prune_empty_provider_meta(provider);
+        strip_codex_api_format_legacy_settings(provider);
+        normalize_codex_settings_wire_api(provider);
+        return true;
+    }
+
+    false
+}
+
+fn prompt_api_format(
+    choices: &'static [&'static str],
+    current: &str,
+    value_label: fn(&str) -> &'static str,
+    fallback: &'static str,
+) -> Result<&'static str, AppError> {
+    let default_index = choices
         .iter()
         .position(|api_format| *api_format == current)
         .unwrap_or(0);
-    let choices = CLAUDE_API_FORMAT_CHOICES
+    let labels = choices
         .iter()
-        .map(|api_format| texts::tui_claude_api_format_value(api_format).to_string())
+        .map(|api_format| value_label(api_format).to_string())
         .collect::<Vec<_>>();
 
-    let selected = Select::new(texts::tui_label_claude_api_format(), choices.clone())
+    let selected = Select::new(texts::tui_label_claude_api_format(), labels.clone())
         .with_starting_cursor(default_index)
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-    let selected_index = choices
+    let selected_index = labels
         .iter()
-        .position(|choice| choice == &selected)
+        .position(|label| label == &selected)
         .unwrap_or(default_index);
 
-    Ok(CLAUDE_API_FORMAT_CHOICES
-        .get(selected_index)
-        .copied()
-        .unwrap_or(CLAUDE_API_FORMAT_ANTHROPIC))
+    Ok(choices.get(selected_index).copied().unwrap_or(fallback))
+}
+
+fn prompt_claude_api_format(provider: &Provider) -> Result<&'static str, AppError> {
+    prompt_api_format(
+        &CLAUDE_API_FORMAT_CHOICES,
+        effective_claude_api_format(provider),
+        texts::tui_claude_api_format_value,
+        CLAUDE_API_FORMAT_ANTHROPIC,
+    )
+}
+
+fn prompt_codex_api_format(provider: &Provider) -> Result<&'static str, AppError> {
+    prompt_api_format(
+        &CODEX_API_FORMAT_CHOICES,
+        effective_codex_api_format(provider),
+        texts::tui_codex_api_format_value,
+        CLAUDE_API_FORMAT_OPENAI_RESPONSES,
+    )
 }
 
 fn prompt_and_apply_claude_api_format(
@@ -236,6 +346,30 @@ fn prompt_and_apply_claude_api_format(
     let api_format = prompt_claude_api_format(provider)?;
     apply_claude_api_format(provider, api_format);
     Ok(())
+}
+
+fn prompt_and_apply_codex_api_format(
+    app_type: &AppType,
+    provider: &mut Provider,
+) -> Result<(), AppError> {
+    if apply_fixed_codex_api_format_if_needed(app_type, provider) {
+        return Ok(());
+    }
+
+    let api_format = prompt_codex_api_format(provider)?;
+    apply_codex_api_format(provider, api_format);
+    Ok(())
+}
+
+fn prompt_and_apply_provider_api_format(
+    app_type: &AppType,
+    provider: &mut Provider,
+) -> Result<(), AppError> {
+    match app_type {
+        AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
+        AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
+        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+    }
 }
 
 fn normalize_optional_account_id(account_id: Option<String>) -> Option<String> {
@@ -450,7 +584,17 @@ pub enum ProviderCommand {
     /// Fetch remote model list for a provider
     FetchModels {
         /// Provider ID to query
-        id: String,
+        #[arg(required_unless_present = "base_url")]
+        id: Option<String>,
+        /// Base URL to query without saving a provider
+        #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+        base_url: Option<String>,
+        /// API key for the one-off request
+        #[arg(long, requires = "base_url")]
+        api_key: Option<String>,
+        /// Authentication/header strategy for the one-off request
+        #[arg(long, value_enum, requires = "base_url")]
+        auth: Option<ModelFetchAuthArg>,
     },
     /// Query provider quota or usage
     Quota {
@@ -494,8 +638,22 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::StreamCheck { id } => {
             provider_inspect::stream_check_provider(app_type, &id)
         }
-        ProviderCommand::FetchModels { id } => {
-            provider_inspect::fetch_models_provider(app_type, &id)
+        ProviderCommand::FetchModels {
+            id,
+            base_url,
+            api_key,
+            auth,
+        } => {
+            if let Some(id) = id {
+                provider_inspect::fetch_models_provider(app_type, &id)
+            } else {
+                provider_inspect::fetch_models_once(
+                    app_type,
+                    base_url.as_deref(),
+                    api_key.as_deref(),
+                    auth.map(Into::into),
+                )
+            }
         }
         ProviderCommand::Quota { id, json } => {
             provider_inspect::quota_provider(app_type, &id, json)
@@ -505,8 +663,63 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ModelFetchAuthArg {
+    Bearer,
+    Anthropic,
+    GoogleApiKey,
+}
+
+impl From<ModelFetchAuthArg> for provider_inspect::ProviderModelFetchStrategy {
+    fn from(value: ModelFetchAuthArg) -> Self {
+        match value {
+            ModelFetchAuthArg::Bearer => Self::Bearer,
+            ModelFetchAuthArg::Anthropic => Self::Anthropic,
+            ModelFetchAuthArg::GoogleApiKey => Self::GoogleApiKey,
+        }
+    }
+}
+
 fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
+}
+
+/// Resolve a switch argument to a real provider id and its provider record.
+///
+/// An exact id match always wins, so a provider whose name happens to collide
+/// with another provider's id never shadows the id lookup. When the id lookup
+/// misses, fall back to a case- and whitespace-insensitive `name` match. A
+/// single name match resolves to that provider's real id; multiple matches
+/// return an ambiguity error listing the candidate ids so the user can pick one.
+fn resolve_provider_for_switch(
+    providers: &IndexMap<String, Provider>,
+    arg: &str,
+) -> Result<(String, Provider), AppError> {
+    if let Some(provider) = providers.get(arg) {
+        return Ok((arg.to_string(), provider.clone()));
+    }
+
+    let needle = arg.trim();
+    let matches: Vec<(&String, &Provider)> = providers
+        .iter()
+        .filter(|(_, provider)| provider.name.trim().eq_ignore_ascii_case(needle))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(AppError::Message(format!("Provider '{}' not found", arg))),
+        [(id, provider)] => Ok(((*id).clone(), (*provider).clone())),
+        multiple => {
+            let candidate_ids = multiple
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(AppError::Message(format!(
+                "Multiple providers named '{}'. Specify one by id: {}",
+                arg, candidate_ids
+            )))
+        }
+    }
 }
 
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
@@ -514,13 +727,12 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let app_str = app_type.as_str().to_string();
     let skip_live_sync = !crate::sync_policy::should_sync_live(&app_type);
 
-    // 检查 provider 是否存在
+    // 检查 provider 是否存在（支持按 id 或名称解析）
     let providers = ProviderService::list(&state, app_type.clone())?;
-    let Some(provider) = providers.get(id).cloned() else {
-        return Err(AppError::Message(format!("Provider '{}' not found", id)));
-    };
+    let (resolved_id, provider) = resolve_provider_for_switch(&providers, id)?;
+    let id = resolved_id.as_str();
 
-    // 执行切换
+    // 执行切换（upstream parity：干净写入，无冲突提示）
     ProviderService::switch(&state, app_type.clone(), id)?;
     if let Err(err) =
         crate::claude_plugin::sync_claude_plugin_on_provider_switch(&app_type, &provider)
@@ -677,7 +889,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
                 &app_type,
                 Some(&provider.settings_config),
                 provider.meta.as_ref(),
-                is_codex_official_provider(&provider),
+                provider.is_codex_official(),
             )?;
             provider.settings_config = prompt_result.settings_config.clone();
             settings_prompt_result = Some(prompt_result);
@@ -705,7 +917,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
         &mut provider,
         settings_prompt_result.as_ref(),
     );
-    prompt_and_apply_claude_api_format(&app_type, &mut provider)?;
+    prompt_and_apply_provider_api_format(&app_type, &mut provider)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut provider)?;
     if let Some(enabled) = prompt_common_config_enabled(&app_type, common_snippet.as_deref(), None)?
     {
@@ -723,7 +935,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
         return Ok(());
     }
 
-    // 7. 调用 Service 层
+    // 7. 调用 Service 层（upstream parity：干净写入，无冲突提示）
     let provider_id = provider.id.clone();
     ProviderService::add(&state, app_type.clone(), provider)?;
 
@@ -785,7 +997,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
             &app_type,
             Some(&original.settings_config),
             original.meta.as_ref(),
-            matches!(app_type, AppType::Codex) && is_codex_official_provider(&original),
+            matches!(app_type, AppType::Codex) && original.is_codex_official(),
         )?)
     } else {
         None
@@ -822,7 +1034,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         in_failover_queue: original.in_failover_queue, // 保留故障转移状态
     };
     apply_settings_prompt_result_metadata(&app_type, &mut updated, settings_prompt_result.as_ref());
-    prompt_and_apply_claude_api_format(&app_type, &mut updated)?;
+    prompt_and_apply_provider_api_format(&app_type, &mut updated)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut updated)?;
     if let Some(enabled) =
         prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&updated))?
@@ -842,7 +1054,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 8. 调用 Service 层
+    // 8. 调用 Service 层（upstream parity：干净写入，无冲突提示）
     ProviderService::update(&state, app_type.clone(), updated)?;
 
     // 9. 成功消息
@@ -857,6 +1069,342 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn existing_provider_ids_for_duplicate(
+    app_type: &AppType,
+    manager_ids: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, AppError> {
+    let mut ids = manager_ids.into_iter().collect::<HashSet<_>>();
+    if app_type.is_additive_mode() {
+        let live_ids = match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            AppType::Hermes => crate::hermes_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            AppType::OpenClaw => crate::openclaw_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        ids.extend(live_ids);
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
+    let mut draft = source.clone();
+    draft.id = provider_copy_id(&source.id, existing_ids);
+    draft.name = format!("{} copy", source.name.trim());
+    draft.created_at = None;
+    draft.in_failover_queue = false;
+    draft
+}
+
+fn duplicate_provider(app_type: AppType, id: &str, edit: bool) -> Result<(), AppError> {
+    if edit {
+        return duplicate_provider_interactive(app_type, id);
+    }
+
+    let state = AppState::try_new()?;
+    let duplicate = ProviderService::duplicate(&state, app_type, id, None)?;
+
+    println!(
+        "{}",
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
+    );
+    Ok(())
+}
+
+fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), AppError> {
+    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
+
+    println!("{}", highlight(&format!("Duplicate Provider: {}", id)));
+    println!("{}", "=".repeat(50));
+
+    let state = AppState::try_new()?;
+    let config = state.config.read().unwrap();
+    let manager = config
+        .get_manager(&app_type)
+        .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+    let source = manager
+        .providers
+        .get(id)
+        .ok_or_else(|| {
+            let msg = texts::entity_not_found(texts::entity_provider(), id);
+            AppError::localized("provider.not_found", msg.clone(), msg)
+        })?
+        .clone();
+    let existing_ids =
+        existing_provider_ids_for_duplicate(&app_type, manager.providers.keys().cloned())?;
+    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
+    drop(config);
+
+    let draft = provider_duplicate_draft(&source, &existing_ids);
+
+    println!("\n{}", highlight(texts::current_config_header()));
+    display_provider_summary(&draft, &app_type);
+    println!();
+    println!("{}", info(texts::edit_fields_instruction()));
+
+    let (name, website_url) = prompt_basic_fields(Some(&draft))?;
+    let settings_prompt_result = if Confirm::new(texts::modify_provider_config_prompt())
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        Some(prompt_settings_config(
+            &app_type,
+            Some(&draft.settings_config),
+            draft.meta.as_ref(),
+            matches!(app_type, AppType::Codex) && source.is_codex_official(),
+        )?)
+    } else {
+        None
+    };
+    let settings_config = settings_prompt_result
+        .as_ref()
+        .map(|result| result.settings_config.clone())
+        .unwrap_or_else(|| draft.settings_config.clone());
+
+    let optional = if Confirm::new(texts::modify_optional_fields_prompt())
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        prompt_optional_fields(Some(&draft))?
+    } else {
+        OptionalFields::from_provider(&draft)
+    };
+
+    let mut copied = Provider {
+        id: draft.id.clone(),
+        name: name.trim().to_string(),
+        settings_config,
+        website_url,
+        category: source.category.clone(),
+        created_at: None,
+        sort_index: optional.sort_index,
+        notes: optional.notes,
+        icon: source.icon.clone(),
+        icon_color: source.icon_color.clone(),
+        meta: source.meta.clone(),
+        in_failover_queue: false,
+    };
+    apply_settings_prompt_result_metadata(&app_type, &mut copied, settings_prompt_result.as_ref());
+    prompt_and_apply_provider_api_format(&app_type, &mut copied)?;
+    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
+    if let Some(enabled) =
+        prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?
+    {
+        set_provider_common_config_meta(&mut copied, enabled);
+    }
+
+    println!("\n{}", highlight(texts::updated_config_header()));
+    display_provider_summary(&copied, &app_type);
+    if !Confirm::new(&texts::confirm_create_entity(texts::entity_provider()))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        println!("{}", info(texts::cancelled()));
+        return Ok(());
+    }
+
+    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
+    println!(
+        "{}",
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
+    );
+    Ok(())
+}
+
+fn import_live_config(app_type: AppType) -> Result<(), AppError> {
+    let state = get_state()?;
+    let imported = ProviderService::import_live_config(&state, app_type.clone())?;
+    if imported > 0 {
+        println!(
+            "{}",
+            success(&format!(
+                "✓ Imported {imported} provider(s) from {} live config",
+                app_type.as_str()
+            ))
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "No providers imported from {} live config.",
+                app_type.as_str()
+            ))
+        );
+    }
+    Ok(())
+}
+
+fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
+    let state = get_state()?;
+    ProviderService::remove_from_live_config(&state, app_type.clone(), id)?;
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Removed provider '{}' from {} live config",
+            id,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Result<(), AppError> {
+    let state = get_state()?;
+    let default = ProviderService::set_default_model(&state, app_type.clone(), id, model)?;
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Set '{}' as default for {}",
+            default,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude) {
+        return Err(AppError::Message(format!(
+            "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",
+            app_type.as_str()
+        )));
+    }
+
+    let state = get_state()?;
+
+    // Single lock scope: get provider AND common_config_snippet together
+    let (provider, common_config_snippet) = {
+        let config = state.config.read().map_err(AppError::from)?;
+        let manager = config
+            .get_manager(&app_type)
+            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+
+        let provider = manager
+            .providers
+            .get(id)
+            .ok_or_else(|| {
+                let msg = texts::provider_not_found(id);
+                AppError::localized("provider.not_found", msg.clone(), msg)
+            })?
+            .clone();
+
+        (
+            provider,
+            config.common_config_snippets.get(&app_type).cloned(),
+        )
+    };
+
+    let apply_common_config = ProviderService::provider_uses_common_config_for_app(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+    );
+
+    let output_path = match output {
+        None => {
+            // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
+            std::env::current_dir()
+                .map_err(|e| AppError::Message(format!("无法获取当前工作目录: {}", e)))?
+                .join(".claude")
+                .join("settings.local.json")
+        }
+        Some(path) => {
+            // If path looks like a directory (no .json extension), append settings-{name}.json
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with('/') || path_str.ends_with('\\') || !path_str.ends_with(".json") {
+                path.join(format!(
+                    "settings-{}.json",
+                    crate::config::sanitize_provider_name(&provider.name)
+                ))
+            } else {
+                path
+            }
+        }
+    };
+
+    if output_path.exists() {
+        let confirm = Confirm::new(&format!(
+            "File '{}' already exists. Overwrite?",
+            output_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+        if !confirm {
+            println!("{}", info(texts::cancelled()));
+            return Ok(());
+        }
+    }
+
+    let settings_content = ProviderService::build_live_backup_snapshot(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+        apply_common_config,
+    )?;
+
+    crate::config::write_json_file(&output_path, &settings_content)?;
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Exported provider '{}' to {}",
+            id,
+            output_path.display()
+        ))
+    );
+
+    // If output is settings.local.json, Claude CLI will auto-load it
+    if output_path
+        .file_name()
+        .map(|n| n.to_string_lossy() == "settings.local.json")
+        .unwrap_or(false)
+    {
+        println!(
+            "{}",
+            info("Claude CLI will auto-load this config. Just run: claude")
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "Use it with: claude --settings {}",
+                output_path.display()
+            ))
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,6 +1414,15 @@ mod tests {
         Provider::with_id(
             "provider-1".to_string(),
             "Provider One".to_string(),
+            settings_config,
+            None,
+        )
+    }
+
+    fn codex_provider(settings_config: serde_json::Value) -> Provider {
+        Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex Provider".to_string(),
             settings_config,
             None,
         )
@@ -1104,6 +1661,122 @@ mod tests {
     }
 
     #[test]
+    fn codex_api_format_effective_value_prefers_meta_over_legacy_settings() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_chat",
+            "apiFormat": "chat"
+        }));
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(CLAUDE_API_FORMAT_OPENAI_RESPONSES.to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_OPENAI_RESPONSES
+        );
+    }
+
+    #[test]
+    fn codex_api_format_effective_value_reads_legacy_chat_wire_api() {
+        let provider = codex_provider(json!({
+            "config": r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "chat"
+"#
+        }));
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_OPENAI_CHAT
+        );
+    }
+
+    #[test]
+    fn codex_api_format_apply_writes_meta_and_normalizes_legacy_config() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_responses",
+            "apiFormat": "openai_responses",
+            "config": r#"model_provider = "vendor"
+wire_api = "chat"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "chat"
+"#
+        }));
+
+        apply_codex_api_format(&mut provider, CLAUDE_API_FORMAT_OPENAI_CHAT);
+
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some(CLAUDE_API_FORMAT_OPENAI_CHAT)
+        );
+        assert!(provider.settings_config.get("api_format").is_none());
+        assert!(provider.settings_config.get("apiFormat").is_none());
+        let config_text = provider
+            .settings_config
+            .get("config")
+            .and_then(serde_json::Value::as_str)
+            .expect("config should remain a string");
+        assert!(config_text.contains("wire_api = \"responses\""));
+        assert!(
+            !config_text.contains("wire_api = \"chat\""),
+            "CLI should persist upstream Codex wire_api semantics"
+        );
+    }
+
+    #[test]
+    fn codex_api_format_fixed_provider_clears_overrides_and_normalizes_config() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_chat",
+            "apiFormat": "chat",
+            "config": r#"model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+wire_api = "chat"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "stale-chat-model" }
+                ]
+            }
+        }));
+        provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(CLAUDE_API_FORMAT_OPENAI_CHAT.to_string()),
+            codex_chat_reasoning: Some(crate::provider::CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert!(apply_fixed_codex_api_format_if_needed(
+            &AppType::Codex,
+            &mut provider
+        ));
+        assert!(provider.meta.is_none());
+        assert!(provider.settings_config.get("api_format").is_none());
+        assert!(provider.settings_config.get("apiFormat").is_none());
+        assert!(provider.settings_config.get("modelCatalog").is_none());
+        let config_text = provider
+            .settings_config
+            .get("config")
+            .and_then(serde_json::Value::as_str)
+            .expect("config should remain a string");
+        assert!(config_text.contains("wire_api = \"responses\""));
+        assert!(!config_text.contains("wire_api = \"chat\""));
+    }
+
+    #[test]
     fn codex_oauth_provider_options_write_upstream_managed_account_shape() {
         let mut provider = claude_provider(json!({
             "env": {
@@ -1211,340 +1884,4 @@ mod tests {
             "sk-demo"
         );
     }
-}
-
-fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
-    let base_id = format!("{}-copy", original_id.trim());
-    if !existing_ids.iter().any(|id| id == &base_id) {
-        return base_id;
-    }
-
-    let mut counter = 2;
-    loop {
-        let candidate = format!("{base_id}-{counter}");
-        if !existing_ids.iter().any(|id| id == &candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
-fn existing_provider_ids_for_duplicate(
-    app_type: &AppType,
-    manager_ids: impl IntoIterator<Item = String>,
-) -> Result<Vec<String>, AppError> {
-    let mut ids = manager_ids.into_iter().collect::<HashSet<_>>();
-    if app_type.is_additive_mode() {
-        let live_ids = match app_type {
-            AppType::OpenCode => crate::opencode_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            AppType::Hermes => crate::hermes_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            AppType::OpenClaw => crate::openclaw_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        ids.extend(live_ids);
-    }
-    Ok(ids.into_iter().collect())
-}
-
-fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
-    let mut draft = source.clone();
-    draft.id = provider_copy_id(&source.id, existing_ids);
-    draft.name = format!("{} copy", source.name.trim());
-    draft.created_at = None;
-    draft.in_failover_queue = false;
-    draft
-}
-
-fn duplicate_provider(app_type: AppType, id: &str, edit: bool) -> Result<(), AppError> {
-    if edit {
-        return duplicate_provider_interactive(app_type, id);
-    }
-
-    let state = AppState::try_new()?;
-    let duplicate = ProviderService::duplicate(&state, app_type, id, None)?;
-
-    println!(
-        "{}",
-        success(&texts::provider_duplicated_success(id, &duplicate.id))
-    );
-    Ok(())
-}
-
-fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), AppError> {
-    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
-
-    println!("{}", highlight(&format!("Duplicate Provider: {}", id)));
-    println!("{}", "=".repeat(50));
-
-    let state = AppState::try_new()?;
-    let config = state.config.read().unwrap();
-    let manager = config
-        .get_manager(&app_type)
-        .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let source = manager
-        .providers
-        .get(id)
-        .ok_or_else(|| {
-            let msg = texts::entity_not_found(texts::entity_provider(), id);
-            AppError::localized("provider.not_found", msg.clone(), msg)
-        })?
-        .clone();
-    let existing_ids =
-        existing_provider_ids_for_duplicate(&app_type, manager.providers.keys().cloned())?;
-    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
-    drop(config);
-
-    let draft = provider_duplicate_draft(&source, &existing_ids);
-
-    println!("\n{}", highlight(texts::current_config_header()));
-    display_provider_summary(&draft, &app_type);
-    println!();
-    println!("{}", info(texts::edit_fields_instruction()));
-
-    let (name, website_url) = prompt_basic_fields(Some(&draft))?;
-    let settings_prompt_result = if Confirm::new(texts::modify_provider_config_prompt())
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        Some(prompt_settings_config(
-            &app_type,
-            Some(&draft.settings_config),
-            draft.meta.as_ref(),
-            matches!(app_type, AppType::Codex) && is_codex_official_provider(&source),
-        )?)
-    } else {
-        None
-    };
-    let settings_config = settings_prompt_result
-        .as_ref()
-        .map(|result| result.settings_config.clone())
-        .unwrap_or_else(|| draft.settings_config.clone());
-
-    let optional = if Confirm::new(texts::modify_optional_fields_prompt())
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        prompt_optional_fields(Some(&draft))?
-    } else {
-        OptionalFields::from_provider(&draft)
-    };
-
-    let mut copied = Provider {
-        id: draft.id.clone(),
-        name: name.trim().to_string(),
-        settings_config,
-        website_url,
-        category: source.category.clone(),
-        created_at: None,
-        sort_index: optional.sort_index,
-        notes: optional.notes,
-        icon: source.icon.clone(),
-        icon_color: source.icon_color.clone(),
-        meta: source.meta.clone(),
-        in_failover_queue: false,
-    };
-    apply_settings_prompt_result_metadata(&app_type, &mut copied, settings_prompt_result.as_ref());
-    prompt_and_apply_claude_api_format(&app_type, &mut copied)?;
-    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
-    if let Some(enabled) =
-        prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?
-    {
-        set_provider_common_config_meta(&mut copied, enabled);
-    }
-
-    println!("\n{}", highlight(texts::updated_config_header()));
-    display_provider_summary(&copied, &app_type);
-    if !Confirm::new(&texts::confirm_create_entity(texts::entity_provider()))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        println!("{}", info(texts::cancelled()));
-        return Ok(());
-    }
-
-    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
-    println!(
-        "{}",
-        success(&texts::provider_duplicated_success(id, &duplicate.id))
-    );
-    Ok(())
-}
-
-fn import_live_config(app_type: AppType) -> Result<(), AppError> {
-    let state = get_state()?;
-    let imported = ProviderService::import_live_config(&state, app_type.clone())?;
-    if imported > 0 {
-        println!(
-            "{}",
-            success(&format!(
-                "✓ Imported {imported} provider(s) from {} live config",
-                app_type.as_str()
-            ))
-        );
-    } else {
-        println!(
-            "{}",
-            info(&format!(
-                "No providers imported from {} live config.",
-                app_type.as_str()
-            ))
-        );
-    }
-    Ok(())
-}
-
-fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
-    let state = get_state()?;
-    ProviderService::remove_from_live_config(&state, app_type.clone(), id)?;
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Removed provider '{}' from {} live config",
-            id,
-            app_type.as_str()
-        ))
-    );
-    Ok(())
-}
-
-fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Result<(), AppError> {
-    let state = get_state()?;
-    let default = ProviderService::set_default_model(&state, app_type.clone(), id, model)?;
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Set '{}' as default for {}",
-            default,
-            app_type.as_str()
-        ))
-    );
-    Ok(())
-}
-
-fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::Claude) {
-        return Err(AppError::Message(format!(
-            "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",
-            app_type.as_str()
-        )));
-    }
-
-    let state = get_state()?;
-
-    // Single lock scope: get provider AND common_config_snippet together
-    let (provider, common_config_snippet) = {
-        let config = state.config.read().map_err(AppError::from)?;
-        let manager = config
-            .get_manager(&app_type)
-            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-
-        let provider = manager
-            .providers
-            .get(id)
-            .ok_or_else(|| {
-                let msg = texts::provider_not_found(id);
-                AppError::localized("provider.not_found", msg.clone(), msg)
-            })?
-            .clone();
-
-        (
-            provider,
-            config.common_config_snippets.get(&app_type).cloned(),
-        )
-    };
-
-    let apply_common_config = ProviderService::provider_uses_common_config_for_app(
-        &app_type,
-        &provider,
-        common_config_snippet.as_deref(),
-    );
-
-    let output_path = match output {
-        None => {
-            // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
-            std::env::current_dir()
-                .map_err(|e| AppError::Message(format!("无法获取当前工作目录: {}", e)))?
-                .join(".claude")
-                .join("settings.local.json")
-        }
-        Some(path) => {
-            // If path looks like a directory (no .json extension), append settings-{name}.json
-            let path_str = path.to_string_lossy();
-            if path_str.ends_with('/') || path_str.ends_with('\\') || !path_str.ends_with(".json") {
-                path.join(format!(
-                    "settings-{}.json",
-                    crate::config::sanitize_provider_name(&provider.name)
-                ))
-            } else {
-                path
-            }
-        }
-    };
-
-    if output_path.exists() {
-        let confirm = Confirm::new(&format!(
-            "File '{}' already exists. Overwrite?",
-            output_path.display()
-        ))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-
-        if !confirm {
-            println!("{}", info(texts::cancelled()));
-            return Ok(());
-        }
-    }
-
-    let settings_content = ProviderService::build_live_backup_snapshot(
-        &app_type,
-        &provider,
-        common_config_snippet.as_deref(),
-        apply_common_config,
-    )?;
-
-    crate::config::write_json_file(&output_path, &settings_content)?;
-
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Exported provider '{}' to {}",
-            id,
-            output_path.display()
-        ))
-    );
-
-    // If output is settings.local.json, Claude CLI will auto-load it
-    if output_path
-        .file_name()
-        .map(|n| n.to_string_lossy() == "settings.local.json")
-        .unwrap_or(false)
-    {
-        println!(
-            "{}",
-            info("Claude CLI will auto-load this config. Just run: claude")
-        );
-    } else {
-        println!(
-            "{}",
-            info(&format!(
-                "Use it with: claude --settings {}",
-                output_path.display()
-            ))
-        );
-    }
-
-    Ok(())
 }

@@ -8,7 +8,9 @@ use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 
 use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
-use super::super::data::{load_state, UiData};
+use super::super::data::load_state;
+#[cfg(test)]
+use super::super::data::UiData;
 use super::super::form::ProviderAddField;
 use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, StreamCheckReq};
 use super::super::text_edit::TextInput;
@@ -64,15 +66,49 @@ fn guard_last_active_failover_queue_entry(
     Ok(false)
 }
 
+fn refresh_provider_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    refresh_provider_data_after_write_with_config(ctx, state, false)
+}
+
+fn refresh_provider_and_config_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    refresh_provider_data_after_write_with_config(ctx, state, true)
+}
+
+fn refresh_provider_data_after_write_with_config(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+    refresh_config: bool,
+) -> Result<(), AppError> {
+    let app_type = ctx.app.app_type.clone();
+    state.reload_config_snapshot_from_db()?;
+    ctx.data
+        .refresh_current_app_provider_data(state, &app_type)?;
+    if refresh_config {
+        ctx.data.refresh_current_app_config_data(state, &app_type)?;
+    }
+    ctx.app.clamp_selections(ctx.data);
+    ctx.data.mark_current_app_data_changed();
+    Ok(())
+}
+
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    do_switch(ctx, id)
+    // Upstream parity: provider switch is a clean write; no live-conflict
+    // preview/overlay is surfaced.
+    let state = load_state()?;
+    do_switch(ctx, state, id)
 }
 
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     let state = load_state()?;
     let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
 
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.pending_overlay = None;
     if imported {
         let toast_message = match ctx.app.app_type {
@@ -87,8 +123,11 @@ pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(
     Ok(())
 }
 
-fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    let state = load_state()?;
+fn do_switch(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: crate::store::AppState,
+    id: String,
+) -> Result<(), AppError> {
     let switched_provider = ctx
         .data
         .providers
@@ -107,7 +146,7 @@ fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppEr
             );
         }
     }
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.pending_overlay = None;
 
     let proxy_ready = ctx
@@ -192,7 +231,7 @@ pub(super) fn set_failover_queue(
             .remove_from_failover_queue(ctx.app.app_type.as_str(), &id)?;
     }
 
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.push_toast(
         if enabled {
             crate::t!(
@@ -274,7 +313,7 @@ pub(super) fn move_failover_queue(
 
     let state = load_state()?;
     ProviderService::update_sort_order(&state, ctx.app.app_type.clone(), updates)?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.push_toast(
         crate::t!("Failover queue order updated.", "故障转移队列顺序已更新。"),
         ToastKind::Success,
@@ -291,7 +330,7 @@ pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     ProviderService::delete(&state, ctx.app.app_type.clone(), &id)?;
     ctx.app
         .push_toast(texts::tui_toast_provider_deleted(), ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     Ok(())
 }
 
@@ -307,7 +346,7 @@ pub(super) fn remove_from_config(
                 texts::tui_toast_provider_removed_from_config(),
                 ToastKind::Success,
             );
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
         crate::app_config::AppType::OpenCode | crate::app_config::AppType::Hermes => {
@@ -317,7 +356,7 @@ pub(super) fn remove_from_config(
                 texts::tui_toast_provider_removed_from_app_config(ctx.app.app_type.as_str()),
                 ToastKind::Success,
             );
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
         _ => delete(ctx, id),
@@ -338,7 +377,7 @@ pub(super) fn set_default_model(
         texts::tui_toast_provider_set_as_default(&default)
     };
     ctx.app.push_toast(message, ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_and_config_data_after_write(ctx, &state)?;
     Ok(())
 }
 
@@ -420,7 +459,7 @@ pub(super) fn model_fetch(
 
     ctx.app.overlay = Overlay::ModelFetchPicker {
         request_id,
-        field: field.clone(),
+        field,
         claude_idx,
         input: TextInput::new(""),
         query: String::new(),
@@ -473,13 +512,15 @@ mod tests {
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
     };
-    use crate::{AppType, MultiAppConfig};
+    use crate::{AppState, AppType, MultiAppConfig};
 
     struct EnvGuard {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_claude_config_dir: Option<OsString>,
+        old_codex_home: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -488,9 +529,13 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -498,6 +543,8 @@ mod tests {
                 old_home,
                 old_userprofile,
                 old_config_dir,
+                old_claude_config_dir,
+                old_codex_home,
             }
         }
     }
@@ -516,6 +563,14 @@ mod tests {
                 Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
                 None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
+            match &self.old_claude_config_dir {
+                Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+            match &self.old_codex_home {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
@@ -528,24 +583,30 @@ mod tests {
     impl SettingsGuard {
         fn with_opencode_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.opencode_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                opencode_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set opencode override dir");
             Self { previous }
         }
 
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
 
         fn with_hermes_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.hermes_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                hermes_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set hermes override dir");
             Self { previous }
         }
@@ -678,6 +739,8 @@ mod tests {
         data: UiData,
     }
 
+    const MATCHING_CODEX_LIVE_CONFIG: &str = "model_provider = \"latest\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.latest]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[projects.local]\ntrust_level = \"trusted\"\n";
+
     fn run_codex_switch(
         current_id: &str,
         config_text: Option<&str>,
@@ -749,7 +812,9 @@ mod tests {
         if seed_live {
             seed_claude_live_settings(json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "live-key"
+                    "ANTHROPIC_BASE_URL": "https://example.com",
+                    "ANTHROPIC_API_KEY": "sk-new",
+                    "LOCAL_ONLY": "preserve-me"
                 },
                 "permissions": {
                     "allow": ["Bash"]
@@ -801,6 +866,16 @@ mod tests {
             json!({"env":{"ANTHROPIC_BASE_URL":format!("https://{id}.example.com")}}),
             None,
         )
+    }
+
+    fn add_claude_queue_provider(state: &AppState, id: &str) -> Result<(), AppError> {
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("https://{id}.example.com"),
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))?;
+        ProviderService::add(state, AppType::Claude, claude_queue_provider(id)).map(|_| ())
     }
 
     fn reload_fixture_data(fixture: &mut RuntimeActionFixture) {
@@ -857,8 +932,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -896,8 +970,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -935,10 +1008,8 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add first provider");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
-            .expect("add second provider");
+        add_claude_queue_provider(&state, "p1").expect("add first provider");
+        add_claude_queue_provider(&state, "p2").expect("add second provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -983,10 +1054,8 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add first provider");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
-            .expect("add second provider");
+        add_claude_queue_provider(&state, "p1").expect("add first provider");
+        add_claude_queue_provider(&state, "p2").expect("add second provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -1026,8 +1095,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -1068,6 +1136,13 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed live settings");
         ProviderService::add(
             &state,
             AppType::Claude,
@@ -1122,6 +1197,12 @@ mod tests {
             .db
             .is_in_failover_queue("claude", "p1")
             .expect("read failover queue membership"));
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "p1" && !row.provider.in_failover_queue));
     }
 
     #[test]
@@ -1145,16 +1226,26 @@ mod tests {
             None,
         );
         second.sort_index = Some(1);
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://first.example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed first live settings");
         ProviderService::add(&state, AppType::Claude, first).expect("add first provider");
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://second.example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed second live settings");
         ProviderService::add(&state, AppType::Claude, second).expect("add second provider");
         state
             .db
             .add_to_failover_queue("claude", "first")
             .expect("queue first provider");
-        state
-            .db
-            .add_to_failover_queue("claude", "second")
-            .expect("queue second provider");
 
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
         let mut app = App::new(Some(AppType::Claude));
@@ -1181,6 +1272,15 @@ mod tests {
             managed_auth_req_tx: None,
         };
 
+        set_failover_queue(&mut ctx, "second".to_string(), true)
+            .expect("queue second provider before moving");
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "second" && row.provider.in_failover_queue));
+
         move_failover_queue(
             &mut ctx,
             "second".to_string(),
@@ -1198,8 +1298,8 @@ mod tests {
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
         let fixture = run_codex_switch(
             "old-provider",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            Some(MATCHING_CODEX_LIVE_CONFIG),
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
         )
         .expect("switch should succeed");
 
@@ -1225,12 +1325,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_overwrites_existing_codex_settings_without_prompt() {
-        let fixture = run_codex_switch(
-            "",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            None,
-        )
-        .expect("switch should succeed");
+        let fixture = run_codex_switch("", Some(MATCHING_CODEX_LIVE_CONFIG), None)
+            .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1248,8 +1344,12 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_codex_auth_only_state_switches_normally() {
-        let fixture = run_codex_switch("", None, Some(json!({"OPENAI_API_KEY": "legacy-key"})))
-            .expect("switch should succeed");
+        let fixture = run_codex_switch(
+            "",
+            None,
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
+        )
+        .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1347,7 +1447,7 @@ mod tests {
                 .and_then(|meta| meta.live_config_managed),
             Some(true)
         );
-        assert!(matches!(ctx.app.toast, Some(_)));
+        assert!(ctx.app.toast.is_some());
 
         remove_from_config(&mut ctx, "p1".to_string())
             .expect("remove opencode provider from config");
@@ -1523,12 +1623,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_existing_codex_install_with_current_provider_switches_normally() {
-        let fixture = run_codex_switch(
-            "old-provider",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            None,
-        )
-        .expect("switch should succeed");
+        let fixture = run_codex_switch("old-provider", Some(MATCHING_CODEX_LIVE_CONFIG), None)
+            .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1542,7 +1638,7 @@ mod tests {
 
         seed_codex_live_files(
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
         )
         .expect("seed codex live files");
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
@@ -1596,8 +1692,69 @@ mod tests {
         assert!(matches!(
             fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
-                if title == texts::tui_claude_api_format_requires_proxy_title()
-                    && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                if title.as_str() == texts::tui_claude_api_format_requires_proxy_title()
+                    && message.as_str()
+                        == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                            .as_str()
+                    && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_switch_proxy_notice_uses_refreshed_proxy_snapshot() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        claude_test_config("old-provider", "openai_chat")
+            .save()
+            .expect("persist claude providers");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude).expect("load claude data");
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
+        data.proxy.managed_runtime = false;
+        assert_eq!(
+            data.proxy
+                .routes_current_app_through_proxy(&AppType::Claude),
+            Some(true),
+            "precondition: stale in-memory proxy snapshot should look ready"
+        );
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        switch(&mut ctx, "proxy-provider".to_string()).expect("switch provider");
+
+        assert_eq!(ctx.data.providers.current_id, "proxy-provider");
+        assert!(matches!(
+            &ctx.app.overlay,
+            Overlay::Confirm(ConfirmOverlay { title, message, action })
+                if title.as_str() == texts::tui_claude_api_format_requires_proxy_title()
+                    && message.as_str()
+                        == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                            .as_str()
                     && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
         ));
     }
@@ -1755,6 +1912,16 @@ mod tests {
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
         let mut app = App::new(Some(AppType::OpenClaw));
         let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(OpenClawDefaultModel {
+                    primary: "stale-provider/stale-model".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: HashMap::new(),
+                }),
+                models: None,
+                extra: HashMap::new(),
+            });
         data.providers
             .rows
             .push(crate::cli::tui::data::ProviderRow {
@@ -1811,6 +1978,21 @@ mod tests {
         assert_eq!(default_model.primary, "p1/model-primary");
         assert_eq!(
             default_model.fallbacks,
+            vec![
+                "p1/model-fallback-1".to_string(),
+                "p1/model-fallback-2".to_string()
+            ]
+        );
+        let refreshed_snapshot_model = ctx
+            .data
+            .config
+            .openclaw_agents_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.model.as_ref())
+            .expect("ui config snapshot should refresh after setting default model");
+        assert_eq!(refreshed_snapshot_model.primary, "p1/model-primary");
+        assert_eq!(
+            refreshed_snapshot_model.fallbacks,
             vec![
                 "p1/model-fallback-1".to_string(),
                 "p1/model-fallback-2".to_string()
@@ -2119,7 +2301,7 @@ mod tests {
 
         remove_from_config(&mut ctx, "p2".to_string())
             .expect("fallback-only default reference should be removable");
-        assert!(matches!(ctx.app.toast, Some(_)));
+        assert!(ctx.app.toast.is_some());
         assert!(!crate::openclaw_config::get_providers()
             .expect("read providers after successful remove")
             .contains_key("p2"));

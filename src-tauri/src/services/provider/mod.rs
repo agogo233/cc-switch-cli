@@ -10,6 +10,7 @@ mod endpoints;
 mod gemini;
 mod gemini_auth;
 mod live;
+pub(crate) mod live_merge;
 mod models;
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,49 @@ use live::LiveSnapshot;
 pub use common::migrate_legacy_codex_config;
 #[cfg(test)]
 use common::strip_codex_common_config_from_full_text;
+
+/// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
+/// live 配置，使开关即时生效（无需等下一次切换）。
+pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, AppError> {
+    let current_id = ProviderService::current(state, AppType::Codex)?;
+    if current_id.is_empty() {
+        return Ok(false);
+    }
+    let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
+    let Some(provider) = providers.get(&current_id) else {
+        return Ok(false);
+    };
+    if provider.category.as_deref() != Some("official") {
+        return Ok(false);
+    }
+
+    let has_live_backup =
+        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+            .ok()
+            .flatten()
+            .is_some();
+    let live_taken_over = state
+        .proxy_service
+        .detect_takeover_in_live_config_for_app(&AppType::Codex);
+    if has_live_backup || live_taken_over {
+        futures::executor::block_on(
+            state
+                .proxy_service
+                .update_live_backup_from_provider(AppType::Codex.as_str(), provider),
+        )
+        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+        return Ok(true);
+    }
+
+    let common_config_snippet = state.db.get_config_snippet(AppType::Codex.as_str())?;
+    ProviderService::write_live_snapshot(
+        &AppType::Codex,
+        provider,
+        common_config_snippet.as_deref(),
+        true,
+    )?;
+    Ok(true)
+}
 
 /// 供应商相关业务逻辑
 pub struct ProviderService;
@@ -97,12 +141,62 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
 struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
+    previous_provider: Option<Provider>,
     backup: LiveSnapshot,
     sync_mcp: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
+    previous_common_config_snippet: Option<String>,
     takeover_active: bool,
     activate_provider: bool,
+}
+
+#[derive(Clone)]
+struct PreparedPostCommitAction {
+    action: PostCommitAction,
+    effect: PreparedPostCommitEffect,
+}
+
+#[derive(Clone)]
+enum PreparedPostCommitEffect {
+    Live(PreparedLiveWrite),
+    ProxyLiveBackup(Value),
+}
+
+#[derive(Clone)]
+enum PreparedLiveWrite {
+    Noop,
+    Claude {
+        settings: Value,
+    },
+    Codex {
+        auth: PreparedCodexAuthWrite,
+        config: crate::codex_config::PreparedCodexConfigText,
+    },
+    Gemini {
+        env: std::collections::HashMap<String, String>,
+        settings: Value,
+        auth_type: GeminiAuthType,
+    },
+    GeminiSecurityFlag {
+        auth_type: GeminiAuthType,
+    },
+    OpenCode {
+        config: Value,
+    },
+    Hermes {
+        providers: serde_yaml::Value,
+    },
+    OpenClaw {
+        models: Value,
+    },
+}
+
+#[derive(Clone)]
+enum PreparedCodexAuthWrite {
+    Preserve,
+    Write(Value),
+    Delete,
 }
 
 impl ProviderService {
@@ -541,19 +635,45 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        let mut guard = state.config.write().map_err(AppError::from)?;
-        let original = guard.clone();
-        let (result, action) = match f(&mut guard) {
-            Ok(value) => value,
-            Err(err) => {
-                *guard = original;
-                return Err(err);
-            }
-        };
-        drop(guard);
+        Self::run_staged_transaction(state, None, f)
+    }
 
-        if let Err(save_err) = state.save() {
-            if let Err(rollback_err) = Self::restore_config_only(state, original.clone()) {
+    fn run_staged_transaction<R, F>(
+        state: &AppState,
+        preserved_current_apps: Option<&[AppType]>,
+        f: F,
+    ) -> Result<R, AppError>
+    where
+        F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
+    {
+        let original = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            guard.clone()
+        };
+        let mut candidate = original.clone();
+        let (result, action) = f(&mut candidate)?;
+        let prepared = action
+            .map(|action| Self::prepare_post_commit_action(state, action))
+            .transpose()?;
+
+        {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            *guard = candidate.clone();
+        }
+
+        let save_result = match preserved_current_apps {
+            Some(apps) => state.save_config_snapshot_preserving_current_providers(&candidate, apps),
+            None => state.save_config_snapshot(&candidate),
+        };
+
+        if let Err(save_err) = save_result {
+            let rollback_result = match preserved_current_apps {
+                Some(apps) => {
+                    Self::restore_config_only_preserving_current_providers(state, original, apps)
+                }
+                None => Self::restore_config_only(state, original),
+            };
+            if let Err(rollback_err) = rollback_result {
                 return Err(AppError::localized(
                     "config.save.rollback_failed",
                     format!("保存配置失败: {save_err}；回滚失败: {rollback_err}"),
@@ -563,11 +683,22 @@ impl ProviderService {
             return Err(save_err);
         }
 
-        if let Some(action) = action {
-            if let Err(err) = Self::apply_post_commit(state, &action) {
-                if let Err(rollback_err) =
-                    Self::rollback_after_failure(state, original.clone(), action.backup.clone())
-                {
+        if let Some(prepared) = prepared {
+            if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared) {
+                let rollback_result = match preserved_current_apps {
+                    Some(apps) => Self::rollback_after_failure_preserving_current_providers(
+                        state,
+                        original,
+                        apps,
+                        prepared.action.backup.clone(),
+                    ),
+                    None => Self::rollback_after_failure(
+                        state,
+                        original,
+                        prepared.action.backup.clone(),
+                    ),
+                };
+                if let Err(rollback_err) = rollback_result {
                     return Err(AppError::localized(
                         "post_commit.rollback_failed",
                         format!("后置操作失败: {err}；回滚失败: {rollback_err}"),
@@ -589,51 +720,7 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        let mut guard = state.config.write().map_err(AppError::from)?;
-        let original = guard.clone();
-        let (result, action) = match f(&mut guard) {
-            Ok(value) => value,
-            Err(err) => {
-                *guard = original;
-                return Err(err);
-            }
-        };
-        drop(guard);
-
-        if let Err(save_err) = state.save_preserving_current_providers(preserved_current_apps) {
-            if let Err(rollback_err) = Self::restore_config_only_preserving_current_providers(
-                state,
-                original.clone(),
-                preserved_current_apps,
-            ) {
-                return Err(AppError::localized(
-                    "config.save.rollback_failed",
-                    format!("保存配置失败: {save_err}；回滚失败: {rollback_err}"),
-                    format!("Failed to save config: {save_err}; rollback failed: {rollback_err}"),
-                ));
-            }
-            return Err(save_err);
-        }
-
-        if let Some(action) = action {
-            if let Err(err) = Self::apply_post_commit(state, &action) {
-                if let Err(rollback_err) = Self::rollback_after_failure_preserving_current_providers(
-                    state,
-                    original.clone(),
-                    preserved_current_apps,
-                    action.backup.clone(),
-                ) {
-                    return Err(AppError::localized(
-                        "post_commit.rollback_failed",
-                        format!("后置操作失败: {err}；回滚失败: {rollback_err}"),
-                        format!("Post-commit step failed: {err}; rollback failed: {rollback_err}"),
-                    ));
-                }
-                return Err(err);
-            }
-        }
-
-        Ok(result)
+        Self::run_staged_transaction(state, Some(preserved_current_apps), f)
     }
 
     fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
@@ -679,14 +766,19 @@ impl ProviderService {
         backup.restore()
     }
 
-    fn apply_post_commit(state: &AppState, action: &PostCommitAction) -> Result<(), AppError> {
-        if action.takeover_active {
-            futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(action.app_type.as_str(), &action.provider),
-            )
-            .map_err(AppError::Message)?;
+    fn prepare_post_commit_action(
+        state: &AppState,
+        action: PostCommitAction,
+    ) -> Result<PreparedPostCommitAction, AppError> {
+        let effect = if action.takeover_active {
+            let backup_snapshot =
+                futures::executor::block_on(state.proxy_service.prepare_live_backup_from_provider(
+                    action.app_type.as_str(),
+                    &action.provider,
+                    action.previous_provider.as_ref(),
+                ))
+                .map_err(AppError::Message)?;
+            PreparedPostCommitEffect::ProxyLiveBackup(backup_snapshot)
         } else {
             let apply_common_config = action
                 .provider
@@ -694,32 +786,60 @@ impl ProviderService {
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
-            Self::write_live_snapshot(
+            PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
                 &action.app_type,
                 &action.provider,
+                action.previous_provider.as_ref(),
                 action.common_config_snippet.as_deref(),
+                action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
-            )?;
-            if action.activate_provider && matches!(action.app_type, AppType::Hermes) {
-                crate::hermes_config::set_current_provider(
-                    &action.provider.id,
-                    &action.provider.settings_config,
-                )?;
+            )?)
+        };
+
+        Ok(PreparedPostCommitAction { action, effect })
+    }
+
+    fn apply_prepared_post_commit_action(
+        state: &AppState,
+        prepared: &PreparedPostCommitAction,
+    ) -> Result<(), AppError> {
+        match &prepared.effect {
+            PreparedPostCommitEffect::Live(live) => {
+                Self::apply_prepared_live_snapshot(live)?;
+                if prepared.action.activate_provider
+                    && matches!(prepared.action.app_type, AppType::Hermes)
+                {
+                    crate::hermes_config::set_current_provider(
+                        &prepared.action.provider.id,
+                        &prepared.action.provider.settings_config,
+                    )?;
+                }
+            }
+            PreparedPostCommitEffect::ProxyLiveBackup(snapshot) => {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .save_live_backup_snapshot(prepared.action.app_type.as_str(), snapshot),
+                )
+                .map_err(AppError::Message)?;
             }
         }
-        if action.sync_mcp {
-            // 使用 v3.7.0 统一的 MCP 同步机制，支持所有应用
+
+        if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
             McpService::sync_all_enabled(state)?;
         }
-        if !action.takeover_active
-            && action.refresh_snapshot
-            && crate::sync_policy::should_sync_live(&action.app_type)
+        if !prepared.action.takeover_active
+            && prepared.action.refresh_snapshot
+            && crate::sync_policy::should_sync_live(&prepared.action.app_type)
         {
-            Self::refresh_provider_snapshot(state, &action.app_type, &action.provider.id)?;
+            Self::refresh_provider_snapshot(
+                state,
+                &prepared.action.app_type,
+                &prepared.action.provider.id,
+            )?;
         }
 
-        // D6: Align upstream live flows - also sync skills (best effort, should not block provider ops).
         if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
             log::warn!("同步 Skills 失败: {e}");
         }
@@ -843,6 +963,18 @@ impl ProviderService {
                         "Failed to restore Codex settings while refreshing '{}': {err}",
                         provider.id
                     );
+                }
+                if Self::codex_live_write_category(&provider) == Some("official") {
+                    if let Err(err) =
+                        crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                            &mut settings_for_storage,
+                        )
+                    {
+                        log::warn!(
+                            "Failed to strip unified session bucket while refreshing '{}': {err}",
+                            provider.id
+                        );
+                    }
                 }
                 let mut snapshot_provider = provider.clone();
                 snapshot_provider.settings_config = settings_for_storage;
@@ -1091,6 +1223,7 @@ impl ProviderService {
         app_type: &AppType,
         current_provider_id: Option<&str>,
         takeover_active: bool,
+        previous_common_config_snippet: Option<String>,
     ) -> Result<Option<PostCommitAction>, AppError> {
         if app_type.is_additive_mode() {
             return Ok(None);
@@ -1103,8 +1236,9 @@ impl ProviderService {
         Self::build_post_commit_action_for_current_provider(
             config,
             app_type,
-            &current_provider_id,
+            current_provider_id,
             takeover_active,
+            previous_common_config_snippet,
         )
     }
 
@@ -1113,6 +1247,7 @@ impl ProviderService {
         app_type: &AppType,
         current_provider_id: &str,
         takeover_active: bool,
+        previous_common_config_snippet: Option<String>,
     ) -> Result<Option<PostCommitAction>, AppError> {
         let provider = config
             .get_manager(app_type)
@@ -1125,10 +1260,12 @@ impl ProviderService {
         Ok(Some(PostCommitAction {
             app_type: app_type.clone(),
             provider,
+            previous_provider: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
+            previous_common_config_snippet,
             takeover_active,
             activate_provider: false,
         }))
@@ -1532,6 +1669,10 @@ impl ProviderService {
         });
         Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
 
+        // 清空（None）→ 记录 cleared=true，避免下次启动自动重新播种；
+        // 设置非空片段 → cleared=false。
+        let snippet_cleared = normalized_snippet.is_none();
+
         let app_type_clone = app_type.clone();
         let (effective_current_provider, db_providers) = if app_type.is_additive_mode() {
             (None, None)
@@ -1645,10 +1786,19 @@ impl ProviderService {
                     &app_type_clone,
                     effective_current_provider.as_deref(),
                     takeover_active,
+                    old_snippet,
                 )?;
                 Ok(((), action))
             },
-        )
+        )?;
+
+        // 与启动期 best-effort 播种不同，这里传播错误：若该标记写入失败，
+        // 下次启动会误判为"未清空"并把刚清空的片段重新播种回来。
+        state
+            .db
+            .set_config_snippet_cleared(app_type.as_str(), snippet_cleared)?;
+
+        Ok(())
     }
 
     pub fn clear_common_config_snippet(
@@ -1759,12 +1909,14 @@ impl ProviderService {
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
+                    previous_provider: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
+                    previous_common_config_snippet: None,
                     takeover_active: false,
                     activate_provider: false,
                 })
@@ -1895,6 +2047,7 @@ impl ProviderService {
                 effective_current_provider.as_deref() == Some(provider_id.as_str())
             };
 
+            let previous_provider = manager.providers.get(&provider_id).cloned();
             manager
                 .providers
                 .insert(provider_id.clone(), merged.clone());
@@ -1904,12 +2057,14 @@ impl ProviderService {
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
                     provider: merged,
+                    previous_provider,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
+                    previous_common_config_snippet: None,
                     takeover_active: false,
                     activate_provider: false,
                 })
@@ -2018,6 +2173,11 @@ impl ProviderService {
             }
             .to_string(),
         );
+        if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                &mut provider.settings_config,
+            )?;
+        }
 
         state.db.save_provider(app_type.as_str(), &provider)?;
         state
@@ -2239,7 +2399,7 @@ impl ProviderService {
             AppType::OpenCode => Self::import_opencode_providers_from_live(state),
             AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
             AppType::Hermes => Self::import_hermes_providers_from_live(state),
-            _ => Self::import_default_config(state, app_type).map(|imported| usize::from(imported)),
+            _ => Self::import_default_config(state, app_type).map(usize::from),
         }
     }
 
@@ -2432,10 +2592,7 @@ impl ProviderService {
                 continue;
             }
 
-            if let Err(e) = Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)
-            {
-                log::warn!("sync_current_to_live: 写入 {app_type} live 配置失败: {e}");
-            }
+            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
         }
 
         if let Err(e) =
@@ -2455,6 +2612,83 @@ impl ProviderService {
         Ok(())
     }
 
+    fn prepare_switch_post_commit_action(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        provider_id: &str,
+        effective_current_provider: Option<&str>,
+        previous_common_config_snippet: Option<String>,
+    ) -> Result<PostCommitAction, AppError> {
+        if app_type.is_additive_mode() {
+            let provider = {
+                let provider = config
+                    .get_manager_mut(app_type)
+                    .ok_or_else(|| Self::app_not_found(app_type))?
+                    .providers
+                    .get_mut(provider_id)
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.not_found",
+                            format!("供应商不存在: {provider_id}"),
+                            format!("Provider not found: {provider_id}"),
+                        )
+                    })?;
+                Self::set_provider_live_config_managed(provider, true);
+                provider.clone()
+            };
+
+            return Ok(PostCommitAction {
+                app_type: app_type.clone(),
+                provider,
+                previous_provider: None,
+                backup: Self::capture_live_snapshot(app_type)?,
+                sync_mcp: matches!(app_type, AppType::OpenCode),
+                refresh_snapshot: false,
+                common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
+                previous_common_config_snippet: None,
+                takeover_active: false,
+                activate_provider: matches!(app_type, AppType::Hermes),
+            });
+        }
+
+        let backup = Self::capture_live_snapshot(app_type)?;
+        let previous_provider = effective_current_provider
+            .filter(|current_id| *current_id != provider_id)
+            .and_then(|current_id| {
+                config
+                    .get_manager(app_type)
+                    .and_then(|manager| manager.providers.get(current_id))
+                    .cloned()
+            });
+        let provider = match app_type {
+            AppType::Codex => {
+                Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
+            }
+            AppType::Claude => {
+                Self::prepare_switch_claude(config, provider_id, effective_current_provider)?
+            }
+            AppType::Gemini => {
+                Self::prepare_switch_gemini(config, provider_id, effective_current_provider)?
+            }
+            AppType::OpenCode => unreachable!("additive mode handled above"),
+            AppType::Hermes => unreachable!("additive mode handled above"),
+            AppType::OpenClaw => unreachable!("additive mode handled above"),
+        };
+
+        Ok(PostCommitAction {
+            app_type: app_type.clone(),
+            provider,
+            previous_provider,
+            backup,
+            sync_mcp: true,
+            refresh_snapshot: true,
+            common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
+            previous_common_config_snippet,
+            takeover_active: false,
+            activate_provider: false,
+        })
+    }
+
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
         if !app_type.is_additive_mode() {
@@ -2472,14 +2706,14 @@ impl ProviderService {
                     .ok()
                     .flatten()
                     .is_some();
-            let is_proxy_running = state
+            let running_takeover_active = state
                 .proxy_service
-                .is_running_blocking()
+                .is_app_takeover_active_blocking(&app_type)
                 .map_err(AppError::Message)?;
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
-            let should_hot_switch = (is_app_taken_over || live_taken_over) && is_proxy_running;
+            let should_hot_switch = is_app_taken_over || live_taken_over || running_takeover_active;
 
             if should_hot_switch {
                 futures::executor::block_on(
@@ -2504,76 +2738,20 @@ impl ProviderService {
         } else {
             crate::settings::get_effective_current_provider(&state.db, &app_type)?
         };
+        let previous_common_config_snippet = if app_type.is_additive_mode() {
+            None
+        } else {
+            state.db.get_config_snippet(app_type.as_str())?
+        };
 
         Self::run_transaction(state, move |config| {
-            if app_type_clone.is_additive_mode() {
-                let provider = {
-                    let provider = config
-                        .get_manager_mut(&app_type_clone)
-                        .ok_or_else(|| Self::app_not_found(&app_type_clone))?
-                        .providers
-                        .get_mut(&provider_id_owned)
-                        .ok_or_else(|| {
-                            AppError::localized(
-                                "provider.not_found",
-                                format!("供应商不存在: {provider_id_owned}"),
-                                format!("Provider not found: {provider_id_owned}"),
-                            )
-                        })?;
-                    Self::set_provider_live_config_managed(provider, true);
-                    provider.clone()
-                };
-
-                let action = PostCommitAction {
-                    app_type: app_type_clone.clone(),
-                    provider,
-                    backup: Self::capture_live_snapshot(&app_type_clone)?,
-                    sync_mcp: matches!(app_type_clone, AppType::OpenCode),
-                    refresh_snapshot: false,
-                    common_config_snippet: config
-                        .common_config_snippets
-                        .get(&app_type_clone)
-                        .cloned(),
-                    takeover_active: false,
-                    activate_provider: matches!(&app_type_clone, AppType::Hermes),
-                };
-
-                return Ok(((), Some(action)));
-            }
-
-            let backup = Self::capture_live_snapshot(&app_type_clone)?;
-            let provider = match app_type_clone {
-                AppType::Codex => Self::prepare_switch_codex(
-                    config,
-                    &provider_id_owned,
-                    effective_current_provider.as_deref(),
-                )?,
-                AppType::Claude => Self::prepare_switch_claude(
-                    config,
-                    &provider_id_owned,
-                    effective_current_provider.as_deref(),
-                )?,
-                AppType::Gemini => Self::prepare_switch_gemini(
-                    config,
-                    &provider_id_owned,
-                    effective_current_provider.as_deref(),
-                )?,
-                AppType::OpenCode => unreachable!("additive mode handled above"),
-                AppType::Hermes => unreachable!("additive mode handled above"),
-                AppType::OpenClaw => unreachable!("additive mode handled above"),
-            };
-
-            let action = PostCommitAction {
-                app_type: app_type_clone.clone(),
-                provider,
-                backup,
-                sync_mcp: true, // v3.7.0: 所有应用切换时都同步 MCP，防止配置丢失
-                refresh_snapshot: true,
-                common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
-                takeover_active: false,
-                activate_provider: false,
-            };
-
+            let action = Self::prepare_switch_post_commit_action(
+                config,
+                &app_type_clone,
+                &provider_id_owned,
+                effective_current_provider.as_deref(),
+                previous_common_config_snippet,
+            )?;
             Ok(((), Some(action)))
         })?;
 
@@ -2590,6 +2768,25 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
+        let prepared = Self::prepare_live_snapshot(
+            app_type,
+            provider,
+            None,
+            common_config_snippet,
+            None,
+            apply_common_config,
+        )?;
+        Self::apply_prepared_live_snapshot(&prepared)
+    }
+
+    fn prepare_live_snapshot(
+        app_type: &AppType,
+        provider: &Provider,
+        previous_provider: Option<&Provider>,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+    ) -> Result<PreparedLiveWrite, AppError> {
         let apply_common_config = Self::resolve_live_apply_common_config(
             app_type,
             provider,
@@ -2598,19 +2795,29 @@ impl ProviderService {
         );
 
         match app_type {
-            AppType::Codex => {
-                Self::write_codex_live(provider, common_config_snippet, apply_common_config)
-            }
-            AppType::Claude => {
-                Self::write_claude_live(provider, common_config_snippet, apply_common_config)
-            }
-            AppType::Gemini => Self::write_gemini_live(
+            AppType::Codex => Self::prepare_codex_live_write(
+                provider,
+                common_config_snippet,
+                previous_common_config_snippet,
+                apply_common_config,
+                false,
+            ),
+            AppType::Claude => Self::prepare_claude_live_write(
+                provider,
+                common_config_snippet,
+                previous_common_config_snippet,
+                apply_common_config,
+                false,
+            ),
+            AppType::Gemini => Self::prepare_gemini_live_write(
                 provider,
                 if apply_common_config {
                     common_config_snippet
                 } else {
                     None
                 },
+                previous_common_config_snippet,
+                false,
             ),
             AppType::OpenCode => {
                 let config_to_write = if let Some(obj) = provider.settings_config.as_object() {
@@ -2626,12 +2833,29 @@ impl ProviderService {
                     provider.settings_config.clone()
                 };
 
-                match serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(
+                let config = match serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(
                     config_to_write.clone(),
                 ) {
-                    Ok(config) => crate::opencode_config::set_typed_provider(&provider.id, &config),
-                    Err(_) => crate::opencode_config::set_provider(&provider.id, config_to_write),
-                }
+                    Ok(config) => {
+                        let previous_config = previous_provider.and_then(|previous| {
+                            serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(
+                                previous.settings_config.clone(),
+                            )
+                            .ok()
+                        });
+                        crate::opencode_config::prepare_typed_provider_with_base(
+                            &provider.id,
+                            previous_config.as_ref(),
+                            &config,
+                        )?
+                    }
+                    Err(_) => crate::opencode_config::prepare_provider_with_base(
+                        &provider.id,
+                        previous_provider.map(|previous| previous.settings_config.clone()),
+                        config_to_write,
+                    )?,
+                };
+                Ok(PreparedLiveWrite::OpenCode { config })
             }
             AppType::Hermes => {
                 if !provider.settings_config.is_object() {
@@ -2641,8 +2865,11 @@ impl ProviderService {
                         "Hermes configuration must be a JSON object",
                     ));
                 }
-                crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())
-                    .map(|_| ())
+                let providers = crate::hermes_config::prepare_provider(
+                    &provider.id,
+                    provider.settings_config.clone(),
+                )?;
+                Ok(PreparedLiveWrite::Hermes { providers })
             }
             AppType::OpenClaw => {
                 let settings_config = provider.settings_config.clone();
@@ -2650,15 +2877,36 @@ impl ProviderService {
                     || settings_config.get("api").is_some()
                     || settings_config.get("models").is_some();
                 if !looks_like_provider {
-                    return Ok(());
+                    return Ok(PreparedLiveWrite::Noop);
                 }
 
                 let config = Self::parse_openclaw_provider_settings(&settings_config)?;
                 Self::validate_openclaw_provider_models(&provider.id, &config)?;
-                let write_result =
-                    crate::openclaw_config::set_typed_provider(&provider.id, &config).map(|_| ());
+                let models = crate::openclaw_config::prepare_typed_provider(&provider.id, &config)
+                    .map_err(Self::normalize_openclaw_live_write_error)?;
+                Ok(PreparedLiveWrite::OpenClaw { models })
+            }
+        }
+    }
 
-                write_result.map_err(Self::normalize_openclaw_live_write_error)
+    fn apply_prepared_live_snapshot(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+        match prepared {
+            PreparedLiveWrite::Noop => Ok(()),
+            PreparedLiveWrite::Claude { .. } => Self::apply_claude_live_write(prepared),
+            PreparedLiveWrite::Codex { .. } => Self::apply_codex_live_write(prepared),
+            PreparedLiveWrite::Gemini { .. } | PreparedLiveWrite::GeminiSecurityFlag { .. } => {
+                Self::apply_gemini_live_write(prepared)
+            }
+            PreparedLiveWrite::OpenCode { config } => {
+                crate::opencode_config::write_prepared_config(config)
+            }
+            PreparedLiveWrite::Hermes { providers } => {
+                crate::hermes_config::write_prepared_providers(providers).map(|_| ())
+            }
+            PreparedLiveWrite::OpenClaw { models } => {
+                crate::openclaw_config::write_prepared_models(models)
+                    .map(|_| ())
+                    .map_err(Self::normalize_openclaw_live_write_error)
             }
         }
     }

@@ -41,6 +41,13 @@ fn command_uses_own_logger(command: &Option<Commands>) -> bool {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
+    if database_access_required(&cli.command) {
+        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
+        // This ensures the chmod happens before database initialization,
+        // and also ensures that the user is only queried once.
+        cc_switch_lib::validate_config_dir()?;
+        cc_switch_lib::prompt_fix_permissions()?;
+    }
     initialize_startup_state_if_needed(&cli.command)?;
 
     match cli.command {
@@ -50,6 +57,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Provider(cmd)) => {
             cc_switch_lib::cli::commands::provider::execute(cmd, cli.app)
         }
+        Some(Commands::Use { id }) => cc_switch_lib::cli::commands::provider::execute(
+            cc_switch_lib::cli::commands::provider::ProviderCommand::Switch { id },
+            cli.app,
+        ),
         Some(Commands::Mcp(cmd)) => cc_switch_lib::cli::commands::mcp::execute(cmd, cli.app),
         Some(Commands::Prompts(cmd)) => {
             cc_switch_lib::cli::commands::prompts::execute(cmd, cli.app)
@@ -70,6 +81,9 @@ fn run(cli: Cli) -> Result<(), AppError> {
         #[cfg(unix)]
         Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
+        Some(Commands::Deeplink(cmd)) => {
+            cc_switch_lib::cli::commands::deeplink::execute(cmd, cli.app)
+        }
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
         Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
@@ -101,10 +115,18 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
     Ok(())
 }
 
+fn database_access_required(command: &Option<Commands>) -> bool {
+    !matches!(
+        command,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        command_requires_startup_state, command_uses_own_logger, initialize_startup_state_if_needed,
+        command_requires_startup_state, command_uses_own_logger, database_access_required,
+        initialize_startup_state_if_needed,
     };
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
@@ -191,6 +213,38 @@ mod tests {
         assert!(!command_requires_startup_state(&sessions.command));
         assert!(!command_requires_startup_state(&auth.command));
         assert!(command_requires_startup_state(&provider.command));
+    }
+
+    #[test]
+    fn completions_update_skip_database_access() {
+        let update = Cli::parse_from(["cc-switch", "update"]);
+        let completions = Cli::parse_from(["cc-switch", "completions", "bash"]);
+
+        assert!(!database_access_required(&update.command));
+        assert!(!database_access_required(&completions.command));
+    }
+
+    #[test]
+    fn normal_commands_require_database_access() {
+        let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
+        let mcp = Cli::parse_from(["cc-switch", "mcp", "list"]);
+        let config = Cli::parse_from(["cc-switch", "config", "validate"]);
+        let proxy = Cli::parse_from(["cc-switch", "proxy", "show"]);
+        let interactive = Cli::parse_from(["cc-switch"]);
+        let internal = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+
+        assert!(database_access_required(&provider.command));
+        assert!(database_access_required(&mcp.command));
+        assert!(database_access_required(&config.command));
+        assert!(database_access_required(&proxy.command));
+        assert!(database_access_required(&interactive.command));
+        assert!(database_access_required(&internal.command));
     }
 
     #[test]

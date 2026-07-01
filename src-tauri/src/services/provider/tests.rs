@@ -1,58 +1,10 @@
 use super::*;
 use serial_test::serial;
-use std::ffi::OsString;
-use std::path::Path;
 use tempfile::TempDir;
 
-use crate::test_support::{
-    lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-};
+use crate::test_support::TestEnvGuard;
 
-struct EnvGuard {
-    _lock: TestHomeSettingsLock,
-    old_home: Option<OsString>,
-    old_userprofile: Option<OsString>,
-    old_config_dir: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set_home(home: &Path) -> Self {
-        let lock = lock_test_home_and_settings();
-        let old_home = std::env::var_os("HOME");
-        let old_userprofile = std::env::var_os("USERPROFILE");
-        let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
-        set_test_home_override(Some(home));
-        crate::settings::reload_test_settings();
-        Self {
-            _lock: lock,
-            old_home,
-            old_userprofile,
-            old_config_dir,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.old_userprofile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match &self.old_config_dir {
-            Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-            None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
-        }
-        set_test_home_override(self.old_home.as_deref().map(Path::new));
-        crate::settings::reload_test_settings();
-    }
-}
+type EnvGuard = TestEnvGuard;
 
 fn codex_settings(config: &str) -> Value {
     json!({
@@ -67,6 +19,30 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
         .get_or_insert_with(crate::provider::ProviderMeta::default)
         .apply_common_config = Some(true);
     provider
+}
+
+#[test]
+fn extract_codex_common_config_excludes_profile_model_selection() {
+    let extracted = ProviderService::extract_codex_common_config_from_config_toml(
+        r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+disable_response_storage = true
+
+[model_providers.aihubmix]
+base_url = "https://aihubmix.example/v1"
+
+[profiles.work]
+model_provider = "aihubmix"
+model = "gpt-5.4"
+approval_policy = "never"
+"#,
+    )
+    .expect("extract common config");
+
+    assert!(extracted.contains("disable_response_storage = true"));
+    assert!(extracted.contains("approval_policy = \"never\""));
+    assert!(!extracted.contains("model_provider"));
+    assert!(!extracted.contains("model = \"gpt-5.4\""));
 }
 
 #[test]
@@ -171,7 +147,7 @@ fn capture_codex_temp_launch_snapshot_clears_auth_when_auth_file_is_missing() {
 
 fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
-    let env = EnvGuard::set_home(temp_home.path());
+    let env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -227,14 +203,12 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
 
     std::fs::write(
         get_codex_config_path(),
-        r#"model_provider = "azure"
+        r#"model_provider = "second"
 model = "gpt-4"
 disable_response_storage = true
 
-[model_providers.azure]
-name = "Azure OpenAI"
-base_url = "https://azure.example/v1"
-wire_api = "responses"
+[model_providers.second]
+base_url = "https://api.two.example/v1"
 
 [mcp_servers.my_server]
 command = "npx"
@@ -250,7 +224,7 @@ command = "npx"
 
 fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
-    let env = EnvGuard::set_home(temp_home.path());
+    let env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -296,7 +270,7 @@ fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppStat
 fn setup_codex_state_with_db_current_and_broken_fallback_other_snapshot(
 ) -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
-    let env = EnvGuard::set_home(temp_home.path());
+    let env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -452,7 +426,7 @@ fn set_common_config_snippet_rejects_non_object_opencode_json() {
 #[serial]
 fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -535,7 +509,7 @@ fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
 #[serial]
 fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -597,7 +571,7 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 #[serial]
 fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -659,7 +633,7 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
 #[serial]
 fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -736,7 +710,7 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
 #[serial]
 fn codex_switch_backfills_effective_current_and_preserves_runtime_projects() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -845,17 +819,24 @@ trust_level = "trusted"
         "state.save should persist the de-duplicated provider snapshot"
     );
 
+    // Upstream parity (clean overwrite): switching to p2 OVERWRITES config.toml
+    // with p2's effective config. p2 is not opted into the common config, so the
+    // runtime project trust (auto-extracted from p1's live config) is not forced
+    // into p2's live file. It is preserved in the common snippet instead.
     let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
     assert!(
         !p2_live.contains("/tmp/codex-project-a"),
-        "target provider live config should not absorb source provider runtime project trust"
+        "clean overwrite should not inject p1's runtime project trust into p2's live config"
     );
 
     ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    // Switching back to p1 reapplies its common-config opt-in (set during the
+    // backfill that auto-extracted the runtime projects), so the project trust
+    // returns to the live config via the common snippet.
     let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
     assert!(
         p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
-        "runtime project trust should survive switching away and back"
+        "runtime project trust should survive switching away and back via the common snippet"
     );
 }
 
@@ -863,7 +844,7 @@ trust_level = "trusted"
 #[serial]
 fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -941,11 +922,338 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     );
 }
 
+fn setup_claude_switch_preview_state(live_settings: Value) -> (TempDir, EnvGuard, AppState) {
+    let temp_home = TempDir::new().expect("create temp home");
+    let env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(&get_claude_settings_path(), &live_settings)
+        .expect("seed live settings with current provider");
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    (temp_home, env, state)
+}
+
+#[test]
+#[serial]
+fn switch_claude_writes_target_when_live_matches_current_provider() {
+    // When the live file matches the current provider exactly, switching is a
+    // clean write of the target provider's values (no conflict is surfaced).
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "token1",
+            "ANTHROPIC_BASE_URL": "https://claude.one"
+        }
+    }));
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two"),
+    );
+}
+
+#[test]
+#[serial]
+fn switch_overwrites_claude_settings_discarding_unstored_live_edit() {
+    // Upstream clean-write: switching to p2 OVERWRITES settings.json with p2's
+    // effective values; any unstored manual edits to the live file are dropped.
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "manual-token",
+            "ANTHROPIC_BASE_URL": "https://claude.one"
+        }
+    }));
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+        "incoming provider value should win on a clean write"
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two"),
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_sanitizes_internal_only_fields_from_live_settings() {
+    // Upstream parity (sanitize_claude_settings_for_live): CC-Switch internal-only
+    // fields (api_format / apiFormat / openrouter_compat_mode / openrouterCompatMode)
+    // must never be written into Claude Code's settings.json, even though the
+    // stored provider snapshot carries them.
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "t1" } }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_AUTH_TOKEN": "t2" },
+                    "api_format": "openai_chat",
+                    "apiFormat": "openai_chat",
+                    "openrouter_compat_mode": true,
+                    "openrouterCompatMode": true
+                }),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    for key in [
+        "api_format",
+        "apiFormat",
+        "openrouter_compat_mode",
+        "openrouterCompatMode",
+    ] {
+        assert!(
+            live.get(key).is_none(),
+            "internal-only field `{key}` must be sanitized out of live settings.json, got:\n{live}"
+        );
+    }
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("t2"),
+        "the provider's real env must still be written"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_overwrites_claude_settings_when_live_missing_target_field() {
+    // The live file is missing the token that the target provider defines; a
+    // clean write should still publish the target provider's value.
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://claude.one"
+        }
+    }));
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two")
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_writes_target_when_live_settings_file_missing() {
+    // With no live settings.json present, switching is a clean write that
+    // creates the file with the target provider's values.
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_with_missing_settings_file_creates_target_live_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2")
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two")
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn switch_updates_running_proxy_takeover_target_without_restart() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -986,16 +1294,9 @@ async fn switch_updates_running_proxy_takeover_target_without_restart() {
 
     let state = state_from_config(config);
     state.save().expect("persist config snapshot to db");
-    let mut runtime_config = state
-        .db
-        .get_global_proxy_config()
-        .await
-        .expect("load global proxy config");
-    runtime_config.listen_port = 0;
     state
         .db
-        .update_global_proxy_config(runtime_config)
-        .await
+        .set_app_proxy_preferred_port("claude", 0)
         .expect("set ephemeral proxy port");
 
     state
@@ -1031,7 +1332,25 @@ async fn switch_updates_running_proxy_takeover_target_without_restart() {
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
             .and_then(Value::as_str),
         Some("https://api.two.example"),
-        "hot-switch should also refresh the restore backup to the newly selected provider"
+        "hot-switch should refresh the restore backup to the selected provider"
+    );
+
+    let snapshot = state
+        .db
+        .get_failover_live_snapshot("claude", "p2")
+        .await
+        .expect("get failover snapshot")
+        .expect("failover snapshot should exist");
+    let snapshot_value: Value =
+        serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+    assert_eq!(
+        snapshot_value
+            .get("env")
+            .and_then(Value::as_object)
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(Value::as_str),
+        Some("https://api.two.example"),
+        "hot-switch should generate a provider-specific live snapshot"
     );
 
     state
@@ -1045,7 +1364,7 @@ async fn switch_updates_running_proxy_takeover_target_without_restart() {
 #[serial]
 fn add_first_provider_sets_current() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1159,7 +1478,7 @@ fn provider_add_rejects_invalid_openclaw_provider_key() {
 #[serial]
 fn provider_add_injects_coding_plan_usage_script_for_claude_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1201,7 +1520,7 @@ fn provider_add_injects_coding_plan_usage_script_for_claude_provider() {
 #[serial]
 fn provider_add_keeps_existing_usage_script_for_coding_plan_claude_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1259,7 +1578,7 @@ fn provider_add_keeps_existing_usage_script_for_coding_plan_claude_provider() {
 #[serial]
 fn current_prefers_effective_current_from_local_settings_without_mutating_config() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1323,7 +1642,7 @@ fn current_prefers_effective_current_from_local_settings_without_mutating_config
 #[serial]
 fn current_falls_back_to_db_current_without_self_healing_config() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1422,7 +1741,7 @@ fn current_falls_back_to_db_current_without_self_healing_config() {
 #[serial]
 fn current_clears_invalid_local_override_and_falls_back_to_db_current() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -1491,7 +1810,7 @@ fn current_clears_invalid_local_override_and_falls_back_to_db_current() {
 #[serial]
 fn sync_current_to_live_prefers_effective_current_from_local_settings() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(
         get_claude_settings_path()
             .parent()
@@ -1584,7 +1903,7 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
 #[serial]
 fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -1630,12 +1949,13 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
         &get_claude_settings_path(),
         &json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": "stale-token",
-                "ANTHROPIC_BASE_URL": "https://stale.example"
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "LOCAL_ONLY": "preserve-me"
             }
         }),
     )
-    .expect("seed stale live settings");
+    .expect("seed live settings");
 
     let state = state_from_config(config);
     state
@@ -1713,7 +2033,7 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
 #[serial]
 fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_current_provider() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -1744,12 +2064,13 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
         &get_claude_settings_path(),
         &json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": "stale-token",
-                "ANTHROPIC_BASE_URL": "https://stale.example"
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "LOCAL_ONLY": "preserve-me"
             }
         }),
     )
-    .expect("seed stale live settings");
+    .expect("seed live settings");
 
     let state = state_from_config(config);
     state
@@ -1839,7 +2160,7 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
 #[serial]
 fn common_config_snippet_is_merged_into_claude_settings_on_write() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2032,7 +2353,7 @@ fn toml_common_config_array_subset_removal_preserves_extra_items() {
 #[serial]
 fn set_codex_common_config_snippet_accepts_runtime_local_keys_like_upstream() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     let state = state_from_config(MultiAppConfig::default());
 
     ProviderService::set_common_config_snippet(
@@ -2172,7 +2493,7 @@ fn build_effective_live_snapshot_requires_explicit_common_config_opt_in() {
 #[serial]
 fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2229,7 +2550,7 @@ fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
 #[serial]
 fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2292,7 +2613,7 @@ fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
 #[serial]
 fn provider_add_does_not_infer_claude_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2350,7 +2671,7 @@ fn provider_add_does_not_infer_claude_common_config_opt_in() {
 #[serial]
 fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2408,7 +2729,7 @@ fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
 #[serial]
 fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2491,7 +2812,7 @@ fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
 #[serial]
 fn provider_update_does_not_infer_claude_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2567,9 +2888,86 @@ fn provider_update_does_not_infer_claude_common_config_opt_in() {
 
 #[test]
 #[serial]
+fn provider_update_overwrites_claude_live_for_current_provider() {
+    // Upstream parity: updating the current provider clean-writes the new
+    // effective config to settings.json (no conflict prompt / detection).
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token-old",
+                        "ANTHROPIC_BASE_URL": "https://claude.old"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old"
+            }
+        }),
+    )
+    .expect("seed live settings");
+
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new"
+            }
+        }),
+        None,
+    );
+
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token-new"),
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new"),
+    );
+}
+
+#[test]
+#[serial]
 fn provider_update_treats_settings_effective_current_as_current_for_live_write() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2661,7 +3059,7 @@ fn provider_update_treats_settings_effective_current_as_current_for_live_write()
 #[serial]
 fn provider_update_clears_invalid_local_current_override_and_falls_back_to_stored_current() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -2759,7 +3157,7 @@ fn provider_update_clears_invalid_local_current_override_and_falls_back_to_store
 #[serial]
 fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -2830,7 +3228,7 @@ fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
 #[serial]
 fn switch_backfill_preserves_matching_common_fields_when_meta_missing() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);
@@ -2917,7 +3315,7 @@ fn switch_backfill_preserves_matching_common_fields_when_meta_missing() {
 #[serial]
 fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -3056,7 +3454,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snaps
 #[serial]
 fn updating_common_snippet_migrates_legacy_claude_model_keys_from_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -3160,7 +3558,7 @@ fn updating_common_snippet_migrates_legacy_claude_model_keys_from_provider_snaps
 #[serial]
 fn updating_common_snippet_skips_providers_with_apply_common_config_disabled() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -3269,7 +3667,7 @@ fn updating_common_snippet_skips_providers_with_apply_common_config_disabled() {
 #[serial]
 fn setting_claude_common_snippet_does_not_infer_existing_provider_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -3355,7 +3753,7 @@ fn setting_claude_common_snippet_does_not_infer_existing_provider_opt_in() {
 #[serial]
 fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
         .expect("create ~/.claude (initialized)");
 
@@ -3444,7 +3842,7 @@ fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
 #[serial]
 fn common_config_snippet_is_merged_into_codex_config_on_write() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -3477,7 +3875,7 @@ fn common_config_snippet_is_merged_into_codex_config_on_write() {
 #[serial]
 fn provider_add_strips_common_snippet_before_codex_snapshot_persist() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -3526,7 +3924,7 @@ fn provider_add_strips_common_snippet_before_codex_snapshot_persist() {
 #[serial]
 fn provider_add_does_not_infer_codex_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -3578,7 +3976,7 @@ fn provider_add_does_not_infer_codex_common_config_opt_in() {
 #[serial]
 fn provider_update_does_not_infer_codex_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -3746,7 +4144,7 @@ model = "gpt-5"
 #[serial]
 fn provider_add_tolerates_invalid_codex_common_snippet_during_storage_normalization() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -3772,7 +4170,7 @@ fn provider_add_tolerates_invalid_codex_common_snippet_during_storage_normalizat
 #[serial]
 fn codex_switch_extracts_common_snippet_preserving_mcp_servers() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -4087,7 +4485,7 @@ fn clearing_codex_common_snippet_uses_db_current_before_skipping_broken_other_sn
 #[serial]
 fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -4192,7 +4590,7 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
 #[serial]
 fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -4276,7 +4674,7 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
 #[serial]
 fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -4338,7 +4736,7 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
 #[serial]
 fn updating_common_snippet_removes_stale_fields_from_other_codex_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -4427,7 +4825,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_codex_provider_snapsh
 #[serial]
 fn setting_codex_common_snippet_does_not_infer_existing_provider_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -4496,7 +4894,7 @@ fn setting_codex_common_snippet_does_not_infer_existing_provider_opt_in() {
 #[serial]
 fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -4570,7 +4968,7 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
 #[serial]
 fn import_default_config_preserves_codex_common_snippet_in_db_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -4806,7 +5204,7 @@ fn resolve_usage_script_credentials_does_not_require_provider_api_key_when_scrip
 #[serial]
 fn common_config_snippet_is_merged_into_gemini_env_on_write() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -4846,7 +5244,7 @@ fn common_config_snippet_is_merged_into_gemini_env_on_write() {
 #[serial]
 fn provider_add_strips_common_snippet_before_gemini_snapshot_persist() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -4898,7 +5296,7 @@ fn provider_add_strips_common_snippet_before_gemini_snapshot_persist() {
 #[serial]
 fn provider_add_does_not_infer_gemini_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -4953,7 +5351,7 @@ fn provider_add_does_not_infer_gemini_common_config_opt_in() {
 #[serial]
 fn provider_update_does_not_infer_gemini_common_config_opt_in() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -5027,7 +5425,7 @@ fn provider_update_does_not_infer_gemini_common_config_opt_in() {
 #[serial]
 fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switch() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Gemini);
@@ -5084,9 +5482,187 @@ fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switc
 
 #[test]
 #[serial]
+fn switching_google_official_gemini_clears_stale_api_key_env() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
+        .expect("create ~/.gemini (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("gemini manager");
+        manager.current = "api-key".to_string();
+        manager.providers.insert(
+            "api-key".to_string(),
+            Provider::with_id(
+                "api-key".to_string(),
+                "API Key".to_string(),
+                json!({
+                    "env": {
+                        "GEMINI_API_KEY": "token1",
+                        "GOOGLE_GEMINI_BASE_URL": "https://api.example.com",
+                        "GEMINI_BASE_URL": "https://legacy.example.com",
+                        "GEMINI_MODEL": "gemini-test"
+                    }
+                }),
+                None,
+            ),
+        );
+        let mut google = Provider::with_id(
+            "google-official".to_string(),
+            "Google".to_string(),
+            json!({ "env": {} }),
+            Some("https://ai.google.dev".to_string()),
+        );
+        google.meta = Some(crate::provider::ProviderMeta {
+            partner_promotion_key: Some("google-official".to_string()),
+            ..crate::provider::ProviderMeta::default()
+        });
+        manager
+            .providers
+            .insert("google-official".to_string(), google);
+    }
+
+    crate::gemini_config::write_gemini_env_atomic(&std::collections::HashMap::from([
+        ("GEMINI_API_KEY".to_string(), "token1".to_string()),
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://api.example.com".to_string(),
+        ),
+        (
+            "GEMINI_BASE_URL".to_string(),
+            "https://legacy.example.com".to_string(),
+        ),
+        ("GEMINI_MODEL".to_string(), "gemini-test".to_string()),
+        ("USER_DEFINED_ENV".to_string(), "keep-me".to_string()),
+    ]))
+    .expect("seed current gemini env");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Gemini, "google-official")
+        .expect("switch to Google official Gemini");
+
+    let live_env = crate::gemini_config::read_gemini_env().expect("read gemini env");
+    for key in [
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GEMINI_BASE_URL",
+        "GEMINI_MODEL",
+    ] {
+        assert!(
+            !live_env.contains_key(key),
+            "Google official Gemini should clear stale {key} from .env"
+        );
+    }
+    // Upstream parity: write_gemini_env_atomic is a FULL overwrite of .env with
+    // the provider's env_map (no merge with the prior file). A Google-official
+    // provider with an empty env therefore writes an empty .env, clearing even
+    // unrelated keys — matching upstream write_gemini_live.
+    assert!(
+        !live_env.contains_key("USER_DEFINED_ENV"),
+        "Gemini .env is a full overwrite with the provider env (upstream parity); prior unrelated keys are not preserved"
+    );
+
+    let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
+        .expect("read gemini settings");
+    assert_eq!(
+        settings
+            .pointer("/security/auth/selectedType")
+            .and_then(Value::as_str),
+        Some("oauth-personal")
+    );
+}
+
+#[test]
+#[serial]
+fn switch_preserves_gemini_mcp_servers_after_clean_env_overwrite() {
+    // Upstream parity: .env is a full overwrite, but settings.json is a shallow
+    // merge that preserves user-managed mcpServers (and other unrelated keys).
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
+        .expect("create ~/.gemini (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("gemini manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({ "env": { "GEMINI_API_KEY": "token1" } }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({ "env": { "GEMINI_API_KEY": "token2" } }),
+                None,
+            ),
+        );
+    }
+
+    crate::gemini_config::write_gemini_env_atomic(&std::collections::HashMap::from([
+        ("GEMINI_API_KEY".to_string(), "token1".to_string()),
+        ("USER_DEFINED_ENV".to_string(), "stale".to_string()),
+    ]))
+    .expect("seed current gemini env");
+    write_json_file(
+        &crate::gemini_config::get_gemini_settings_path(),
+        &json!({
+            "mcpServers": { "my-server": { "command": "node", "args": ["server.js"] } },
+            "theme": "dark"
+        }),
+    )
+    .expect("seed gemini settings.json with user mcpServers");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Gemini, "p2").expect("switch to p2");
+
+    // .env is a full overwrite: the stale unrelated key is gone, token updated.
+    let live_env = crate::gemini_config::read_gemini_env().expect("read gemini env");
+    assert_eq!(
+        live_env.get("GEMINI_API_KEY").map(String::as_str),
+        Some("token2"),
+    );
+    assert!(
+        !live_env.contains_key("USER_DEFINED_ENV"),
+        ".env should be fully overwritten for API-key Gemini providers"
+    );
+
+    // settings.json is a shallow merge: mcpServers and unrelated keys survive.
+    let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
+        .expect("read gemini settings");
+    assert_eq!(
+        settings
+            .pointer("/mcpServers/my-server/command")
+            .and_then(Value::as_str),
+        Some("node"),
+        "user mcpServers must be preserved through a clean env overwrite"
+    );
+    assert_eq!(
+        settings.pointer("/theme").and_then(Value::as_str),
+        Some("dark"),
+        "unrelated settings.json fields must be preserved"
+    );
+}
+
+#[test]
+#[serial]
 fn updating_common_snippet_removes_stale_fields_from_other_gemini_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -5188,7 +5764,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_gemini_provider_snaps
 #[serial]
 fn setting_gemini_common_snippet_normalizes_explicitly_enabled_provider_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -5254,7 +5830,7 @@ fn setting_gemini_common_snippet_normalizes_explicitly_enabled_provider_snapshot
 #[serial]
 fn replacing_gemini_common_snippet_tolerates_invalid_stored_snippet() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -5340,7 +5916,7 @@ fn replacing_gemini_common_snippet_tolerates_invalid_stored_snippet() {
 #[serial]
 fn import_default_config_preserves_gemini_common_snippet_in_db_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
         .expect("create ~/.gemini (initialized)");
 
@@ -5407,7 +5983,7 @@ fn import_default_config_preserves_gemini_common_snippet_in_db_snapshot() {
 #[serial]
 fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     crate::openclaw_config::set_provider(
         "existing",
@@ -5541,7 +6117,7 @@ custom_providers:
 #[serial]
 fn delete_rejects_last_failover_queue_provider_while_active() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Claude);

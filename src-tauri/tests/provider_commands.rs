@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashMap;
@@ -686,6 +688,7 @@ fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
     cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
             id: "provider-one".to_string(),
+            edit: false,
         },
         Some(AppType::Claude),
     )
@@ -797,6 +800,7 @@ fn provider_duplicate_opencode_skips_live_write_and_avoids_live_only_id() {
     cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
             id: "provider-one".to_string(),
+            edit: false,
         },
         Some(AppType::OpenCode),
     )
@@ -867,6 +871,7 @@ fn provider_duplicate_hermes_clears_read_only_source_marker() {
     cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
             id: "remote-provider".to_string(),
+            edit: false,
         },
         Some(AppType::Hermes),
     )
@@ -910,6 +915,7 @@ fn provider_duplicate_missing_source_returns_error_without_creating_provider() {
     let err = cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
             id: "missing-provider".to_string(),
+            edit: false,
         },
         Some(AppType::Claude),
     )
@@ -1622,10 +1628,12 @@ fn switch_provider_updates_claude_live_and_state() {
     }
     let legacy_live = json!({
         "env": {
-            "ANTHROPIC_API_KEY": "legacy-key"
+            "ANTHROPIC_API_KEY": "fresh-key",
+            "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
-            "path": "/tmp/workspace"
+            "path": "/tmp/new-workspace",
+            "localOnly": true
         }
     });
     std::fs::write(
@@ -1780,8 +1788,7 @@ fn switch_provider_codex_rejects_missing_auth() {
 
 #[tokio::test]
 #[serial]
-async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_updates_restore_backup(
-) {
+async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selected_provider() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1791,17 +1798,20 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
 
-    let legacy_live = json!({
+    let provider_a_live = json!({
         "env": {
-            "ANTHROPIC_API_KEY": "legacy-key"
+            "ANTHROPIC_API_KEY": "stale-key",
+            "ANTHROPIC_BASE_URL": "https://a.example",
+            "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
-            "path": "/tmp/workspace"
+            "path": "/tmp/old-workspace",
+            "localOnly": true
         }
     });
     std::fs::write(
         &settings_path,
-        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+        serde_json::to_string_pretty(&provider_a_live).expect("serialize provider A live"),
     )
     .expect("seed claude live config");
 
@@ -1817,7 +1827,11 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
                 "old-provider".to_string(),
                 "Legacy Claude".to_string(),
                 json!({
-                    "env": { "ANTHROPIC_API_KEY": "stale-key" }
+                    "env": {
+                        "ANTHROPIC_API_KEY": "stale-key",
+                        "ANTHROPIC_BASE_URL": "https://a.example"
+                    },
+                    "workspace": { "path": "/tmp/old-workspace" }
                 }),
                 None,
             ),
@@ -1838,6 +1852,18 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
         manager
             .providers
             .insert("new-provider".to_string(), new_provider);
+        manager.providers.insert(
+            "future-provider".to_string(),
+            Provider::with_id(
+                "future-provider".to_string(),
+                "Future Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "future-key" },
+                    "workspace": { "path": "/tmp/future-workspace" }
+                }),
+                None,
+            ),
+        );
     }
     config.common_config_snippets.claude = Some(
         serde_json::json!({
@@ -1851,17 +1877,11 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
     let state = state_from_config(config);
     state.save().expect("persist provider state to db");
 
-    let mut proxy_config = state
-        .proxy_service
-        .get_config()
-        .await
-        .expect("read proxy config");
-    proxy_config.listen_port = find_free_port();
+    let proxy_port = find_free_port();
     state
-        .proxy_service
-        .update_config(&proxy_config)
-        .await
-        .expect("update proxy config");
+        .db
+        .set_app_proxy_preferred_port("claude", proxy_port)
+        .expect("update claude proxy port");
 
     state
         .proxy_service
@@ -1879,7 +1899,7 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
             .get("env")
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
             .and_then(|value| value.as_str()),
-        Some(format!("http://127.0.0.1:{}", proxy_config.listen_port).as_str()),
+        Some(format!("http://127.0.0.1:{proxy_port}").as_str()),
         "provider switch under takeover should keep Claude live config pointed at the local proxy"
     );
     assert_eq!(
@@ -1903,10 +1923,50 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
     assert_eq!(
         backup_after_switch
             .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "takeover-time switch should refresh the restore backup to the selected provider"
+    );
+    assert_eq!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("LOCAL_ONLY"))
+            .and_then(|value| value.as_str()),
+        Some("preserve-me"),
+        "takeover-time switch should keep local-only live config values in the restore backup"
+    );
+    assert!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "takeover-time switch should remove provider-owned keys that are absent from the selected provider"
+    );
+    assert_eq!(
+        backup_after_switch
+            .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
         Some("1"),
-        "takeover-time switch should refresh the stored backup with the same Claude common snippet semantics"
+        "selected-provider restore backup should use normal Claude common snippet semantics"
+    );
+
+    let failover_snapshot = state
+        .db
+        .get_failover_live_snapshot("claude", "new-provider")
+        .await
+        .expect("read generated failover snapshot after takeover-time switch")
+        .expect("new provider failover snapshot should exist after switch");
+    let failover_snapshot: serde_json::Value = serde_json::from_str(&failover_snapshot.config_json)
+        .expect("parse generated failover snapshot after takeover-time switch");
+    assert_eq!(
+        failover_snapshot
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        Some("1"),
+        "takeover-time switch should generate a provider snapshot with normal Claude common snippet semantics"
     );
 
     state
@@ -1923,14 +1983,197 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
             .and_then(|env| env.get("ANTHROPIC_API_KEY"))
             .and_then(|value| value.as_str()),
         Some("fresh-key"),
-        "restore after a takeover-time switch should recover the new provider config, not the pre-switch one"
+        "restore after a takeover-time switch should recover the selected provider"
     );
     assert_eq!(
         restored_live
             .get("env")
-            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|env| env.get("LOCAL_ONLY"))
             .and_then(|value| value.as_str()),
-        Some("1"),
-        "restore after a takeover-time switch should keep the normal Claude common snippet semantics"
+        Some("preserve-me"),
+        "restore after a takeover-time switch should keep local-only live config values"
     );
+    assert!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "restore after a takeover-time switch should not restore stale provider-owned keys"
+    );
+    assert_ne!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("stale-key"),
+        "disable takeover must not restore the provider that was current when takeover started"
+    );
+
+    ProviderService::switch(&state, AppType::Claude, "future-provider")
+        .expect("switching away after takeover restore should succeed");
+
+    let saved_new_provider = saved_provider(AppType::Claude, "new-provider");
+    assert_eq!(
+        saved_new_provider
+            .settings_config
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "switching after takeover restore should not backfill stale provider A into provider B"
+    );
+
+    let live_after_future_switch: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings after future switch");
+    assert_eq!(
+        live_after_future_switch
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("future-key"),
+        "switching after takeover restore should write provider C instead of stale provider A"
+    );
+}
+
+fn seed_claude_provider(config: &mut MultiAppConfig, id: &str, name: &str) {
+    let manager = config
+        .get_manager_mut(&AppType::Claude)
+        .expect("claude manager");
+    let provider = Provider::with_id(
+        id.to_string(),
+        name.to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_API_KEY": format!("sk-{id}")
+            }
+        }),
+        None,
+    );
+    manager.providers.insert(id.to_string(), provider);
+}
+
+#[test]
+#[serial]
+fn provider_switch_resolves_by_name_case_and_whitespace_insensitive() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "id-alpha".to_string();
+    }
+    seed_claude_provider(&mut config, "id-alpha", "Alpha");
+    seed_claude_provider(&mut config, "id-beta", "Beta Provider");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    provider_command(
+        ProviderCommand::Switch {
+            id: "  beta provider  ".to_string(),
+        },
+        AppType::Claude,
+    );
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    assert_eq!(
+        ProviderService::current(&refreshed, AppType::Claude).expect("read current provider"),
+        "id-beta"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_prefers_exact_id_over_name_collision() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "id-other".to_string();
+    }
+    // A provider whose id is "shared" and another whose *name* is "shared".
+    seed_claude_provider(&mut config, "shared", "Real Id Provider");
+    seed_claude_provider(&mut config, "id-other", "shared");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    provider_command(
+        ProviderCommand::Switch {
+            id: "shared".to_string(),
+        },
+        AppType::Claude,
+    );
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    assert_eq!(
+        ProviderService::current(&refreshed, AppType::Claude).expect("read current provider"),
+        "shared",
+        "exact id match must win over a colliding provider name"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_unknown_name_or_id_reports_not_found() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    seed_claude_provider(&mut config, "id-alpha", "Alpha");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let err = provider_command_result(
+        ProviderCommand::Switch {
+            id: "nonexistent".to_string(),
+        },
+        AppType::Claude,
+    )
+    .expect_err("unknown provider should error");
+    assert!(
+        err.to_string().contains("not found"),
+        "expected not-found error, got: {err}"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_ambiguous_name_lists_candidate_ids() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    seed_claude_provider(&mut config, "id-one", "Duplicate");
+    seed_claude_provider(&mut config, "id-two", "Duplicate");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let err = provider_command_result(
+        ProviderCommand::Switch {
+            id: "duplicate".to_string(),
+        },
+        AppType::Claude,
+    )
+    .expect_err("ambiguous name should error");
+    let message = err.to_string();
+    assert!(message.contains("id-one"), "expected id-one in: {message}");
+    assert!(message.contains("id-two"), "expected id-two in: {message}");
 }

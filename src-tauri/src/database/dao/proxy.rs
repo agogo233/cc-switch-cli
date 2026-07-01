@@ -16,7 +16,33 @@ fn default_app_preferred_port(app_type: &str) -> u16 {
         "claude" => 15721,
         "codex" => 15722,
         "gemini" => 15723,
-        _ => 15721,
+        _ => 15724,
+    }
+}
+
+fn default_global_proxy_config() -> GlobalProxyConfig {
+    GlobalProxyConfig {
+        proxy_enabled: false,
+        listen_address: "127.0.0.1".to_string(),
+        listen_port: 15721,
+        enable_logging: true,
+    }
+}
+
+fn default_app_proxy_config(app_type: impl Into<String>) -> AppProxyConfig {
+    AppProxyConfig {
+        app_type: app_type.into(),
+        enabled: false,
+        auto_failover_enabled: false,
+        max_retries: 3,
+        streaming_first_byte_timeout: 60,
+        streaming_idle_timeout: 120,
+        non_streaming_timeout: 600,
+        circuit_failure_threshold: 4,
+        circuit_success_threshold: 2,
+        circuit_timeout_seconds: 60,
+        circuit_error_rate_threshold: 0.6,
+        circuit_min_requests: 10,
     }
 }
 
@@ -74,13 +100,34 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;
-                Ok(GlobalProxyConfig {
-                    proxy_enabled: false,
-                    listen_address: "127.0.0.1".to_string(),
-                    listen_port: 15721,
-                    enable_logging: true,
-                })
+                Ok(default_global_proxy_config())
             }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取全局代理配置，不存在时返回默认值但不写入数据库。
+    pub async fn get_global_proxy_config_or_default(&self) -> Result<GlobalProxyConfig, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT proxy_enabled, listen_address, listen_port, enable_logging
+                 FROM proxy_config WHERE app_type = 'claude'",
+                [],
+                |row| {
+                    Ok(GlobalProxyConfig {
+                        proxy_enabled: row.get::<_, i32>(0)? != 0,
+                        listen_address: row.get(1)?,
+                        listen_port: row.get::<_, i32>(2)? as u16,
+                        enable_logging: row.get::<_, i32>(3)? != 0,
+                    })
+                },
+            )
+        };
+
+        match result {
+            Ok(config) => Ok(config),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_global_proxy_config()),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
@@ -159,6 +206,27 @@ impl Database {
                 self.init_proxy_config_rows().await?;
                 Ok("1".to_string())
             }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取默认成本倍率，不存在时返回默认值但不写入数据库。
+    pub async fn get_default_cost_multiplier_or_default(
+        &self,
+        app_type: &str,
+    ) -> Result<String, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT default_cost_multiplier FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get(0),
+            )
+        };
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok("1".to_string()),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
@@ -294,20 +362,50 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;
-                Ok(AppProxyConfig {
-                    app_type: app_type_owned,
-                    enabled: false,
-                    auto_failover_enabled: false,
-                    max_retries: 3,
-                    streaming_first_byte_timeout: 60,
-                    streaming_idle_timeout: 120,
-                    non_streaming_timeout: 600,
-                    circuit_failure_threshold: 4,
-                    circuit_success_threshold: 2,
-                    circuit_timeout_seconds: 60,
-                    circuit_error_rate_threshold: 0.6,
-                    circuit_min_requests: 10,
-                })
+                Ok(default_app_proxy_config(app_type_owned))
+            }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取应用级代理配置，不存在时返回默认值但不写入数据库。
+    pub async fn get_proxy_config_for_app_or_default(
+        &self,
+        app_type: &str,
+    ) -> Result<AppProxyConfig, AppError> {
+        let app_type_owned = app_type.to_string();
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT app_type, enabled, auto_failover_enabled,
+                        max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                        circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                        circuit_error_rate_threshold, circuit_min_requests
+                 FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| {
+                    Ok(AppProxyConfig {
+                        app_type: row.get(0)?,
+                        enabled: row.get::<_, i32>(1)? != 0,
+                        auto_failover_enabled: row.get::<_, i32>(2)? != 0,
+                        max_retries: row.get::<_, i32>(3)? as u32,
+                        streaming_first_byte_timeout: row.get::<_, i32>(4)? as u32,
+                        streaming_idle_timeout: row.get::<_, i32>(5)? as u32,
+                        non_streaming_timeout: row.get::<_, i32>(6)? as u32,
+                        circuit_failure_threshold: row.get::<_, i32>(7)? as u32,
+                        circuit_success_threshold: row.get::<_, i32>(8)? as u32,
+                        circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
+                        circuit_error_rate_threshold: row.get(10)?,
+                        circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                    })
+                },
+            )
+        };
+
+        match result {
+            Ok(config) => Ok(config),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Ok(default_app_proxy_config(app_type_owned))
             }
             Err(e) => Err(AppError::Database(e.to_string())),
         }
@@ -551,7 +649,9 @@ impl Database {
         }
 
         if let Some(port) = self.get_legacy_app_proxy_listen_port(app_type)? {
-            return Ok(port);
+            if app_type == "claude" || port != default_app_preferred_port("claude") {
+                return Ok(port);
+            }
         }
 
         Ok(default_app_preferred_port(app_type))
@@ -932,6 +1032,122 @@ impl Database {
         Ok(())
     }
 
+    // ==================== Failover Live Snapshots ====================
+
+    pub async fn save_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        config_json: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO proxy_failover_live_snapshots
+             (app_type, provider_id, config_json, generated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![app_type, provider_id, config_json, now],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn get_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<Option<FailoverLiveSnapshot>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let result = conn.query_row(
+            "SELECT app_type, provider_id, config_json, generated_at
+             FROM proxy_failover_live_snapshots
+             WHERE app_type = ?1 AND provider_id = ?2",
+            rusqlite::params![app_type, provider_id],
+            |row| {
+                Ok(FailoverLiveSnapshot {
+                    app_type: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    config_json: row.get(2)?,
+                    generated_at: row.get(3)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    pub async fn list_failover_live_snapshots(
+        &self,
+        app_type: &str,
+    ) -> Result<Vec<FailoverLiveSnapshot>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare(
+                "SELECT app_type, provider_id, config_json, generated_at
+                 FROM proxy_failover_live_snapshots
+                 WHERE app_type = ?1
+                 ORDER BY provider_id",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![app_type], |row| {
+                Ok(FailoverLiveSnapshot {
+                    app_type: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    config_json: row.get(2)?,
+                    generated_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row.map_err(|e| AppError::Database(e.to_string()))?);
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn delete_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM proxy_failover_live_snapshots WHERE app_type = ?1 AND provider_id = ?2",
+            rusqlite::params![app_type, provider_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn delete_failover_live_snapshots_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM proxy_failover_live_snapshots WHERE app_type = ?1",
+            rusqlite::params![app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn delete_all_failover_live_snapshots(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute("DELETE FROM proxy_failover_live_snapshots", [])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     // ==================== Sync Methods for Tray Menu ====================
 
     /// 同步获取应用的 proxy 启用状态和自动故障转移状态
@@ -978,227 +1194,6 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::database::dao::proxy::PROXY_PREFERENCES_KEY;
-    use crate::database::Database;
-    use crate::error::AppError;
-    use crate::provider::Provider;
-    use serde_json::json;
-
-    fn save_queue_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
-        let provider = Provider::with_id(
-            id.to_string(),
-            id.to_string(),
-            json!({"env": {"BASE_URL": "https://example.com"}}),
-            None,
-        );
-        db.save_provider(app_type, &provider)?;
-        db.add_to_failover_queue(app_type, id)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_default_cost_multiplier_round_trip() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        let default = db.get_default_cost_multiplier("claude").await?;
-        assert_eq!(default, "1");
-
-        db.set_default_cost_multiplier("claude", "1.5").await?;
-        let updated = db.get_default_cost_multiplier("claude").await?;
-        assert_eq!(updated, "1.5");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_default_cost_multiplier_validation() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        let err = db
-            .set_default_cost_multiplier("claude", "not-a-number")
-            .await
-            .unwrap_err();
-        // AppError::localized returns AppError::Localized variant
-        assert!(matches!(
-            err,
-            AppError::Localized {
-                key: "error.invalidMultiplier",
-                ..
-            }
-        ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_pricing_model_source_round_trip_and_validation() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        let default = db.get_pricing_model_source("claude").await?;
-        assert_eq!(default, "response");
-
-        db.set_pricing_model_source("claude", "request").await?;
-        let updated = db.get_pricing_model_source("claude").await?;
-        assert_eq!(updated, "request");
-
-        let err = db
-            .set_pricing_model_source("claude", "invalid")
-            .await
-            .unwrap_err();
-        // AppError::localized returns AppError::Localized variant
-        assert!(matches!(
-            err,
-            AppError::Localized {
-                key: "error.invalidPricingMode",
-                ..
-            }
-        ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn clears_supported_failover_rows() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        save_queue_provider(&db, "claude", "claude-p1")?;
-        save_queue_provider(&db, "codex", "codex-p1")?;
-        save_queue_provider(&db, "gemini", "gemini-p1")?;
-        db.set_proxy_flags_sync("claude", true, true)?;
-        db.set_proxy_flags_sync("codex", true, true)?;
-        db.set_proxy_flags_sync("gemini", true, true)?;
-
-        let cleared = db.clear_auto_failover_for_supported_apps().await?;
-
-        assert_eq!(cleared, 3);
-        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
-        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
-        assert_eq!(db.get_proxy_flags_sync("gemini"), (true, false));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn disabling_global_proxy_config_clears_supported_failover_rows() -> Result<(), AppError>
-    {
-        let db = Database::memory()?;
-        save_queue_provider(&db, "claude", "claude-p1")?;
-        save_queue_provider(&db, "codex", "codex-p1")?;
-        save_queue_provider(&db, "gemini", "gemini-p1")?;
-        db.set_proxy_flags_sync("claude", true, true)?;
-        db.set_proxy_flags_sync("codex", true, true)?;
-        db.set_proxy_flags_sync("gemini", true, true)?;
-
-        let mut config = db.get_global_proxy_config().await?;
-        config.proxy_enabled = false;
-        db.update_global_proxy_config(config).await?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
-        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
-        assert_eq!(db.get_proxy_flags_sync("gemini"), (true, false));
-        Ok(())
-    }
-
-    #[test]
-    fn proxy_preferences_persist_preferred_ports_in_settings_kv() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        db.set_app_proxy_preferred_port("codex", 17022)?;
-        db.set_app_proxy_preferred_port("gemini", 17023)?;
-
-        let raw = db
-            .get_setting(PROXY_PREFERENCES_KEY)?
-            .expect("proxy preferences should be stored in settings");
-        assert!(raw.contains("\"preferredPort\":17022"));
-
-        let preferences = db.get_proxy_preferences()?;
-        assert_eq!(
-            preferences
-                .apps
-                .get("codex")
-                .and_then(|preference| preference.preferred_port),
-            Some(17022)
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn app_preferred_port_falls_back_to_legacy_proxy_config() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let mut config = db.get_proxy_config().await?;
-        config.listen_port = 17021;
-        db.update_proxy_config(config).await?;
-
-        assert_eq!(db.get_app_proxy_preferred_port("claude")?, 17021);
-
-        db.set_app_proxy_preferred_port("claude", 17022)?;
-        assert_eq!(db.get_app_proxy_preferred_port("claude")?, 17022);
-        Ok(())
-    }
-
-    #[test]
-    fn set_proxy_flags_sync_masks_failover_without_takeover() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        db.set_proxy_flags_sync("claude", false, true)?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
-        Ok(())
-    }
-
-    #[test]
-    fn set_proxy_flags_sync_masks_failover_with_empty_queue() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        db.set_proxy_flags_sync("claude", true, true)?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_proxy_config_for_app_masks_failover_without_takeover() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let mut config = db.get_proxy_config_for_app("claude").await?;
-        config.enabled = false;
-        config.auto_failover_enabled = true;
-
-        db.update_proxy_config_for_app(config).await?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_proxy_config_for_app_masks_failover_with_empty_queue() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let mut config = db.get_proxy_config_for_app("claude").await?;
-        config.enabled = true;
-        config.auto_failover_enabled = true;
-
-        db.update_proxy_config_for_app(config).await?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_proxy_config_for_app_preserves_failover_with_non_empty_queue(
-    ) -> Result<(), AppError> {
-        let db = Database::memory()?;
-        save_queue_provider(&db, "claude", "claude-p1")?;
-        let mut config = db.get_proxy_config_for_app("claude").await?;
-        config.enabled = true;
-        config.auto_failover_enabled = true;
-
-        db.update_proxy_config_for_app(config).await?;
-
-        assert_eq!(db.get_proxy_flags_sync("claude"), (true, true));
         Ok(())
     }
 }

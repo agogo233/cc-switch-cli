@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::cli::tui::data::ProxySnapshot;
 use crate::cli::tui::data::QuotaTarget;
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
@@ -111,14 +112,108 @@ pub(crate) enum QuotaMsg {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AppDataLoadKind {
+    Initial,
+    Snapshot,
+    Full,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AppDataReq {
+    InitialLoad {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        /// Other visible apps to pre-seed from the same in-memory snapshot, each
+        /// paired with its own request_id (matching a pending entry registered by
+        /// the cache). Lets one initial request warm every visible app so the first
+        /// switch renders real data instead of an empty placeholder.
+        extras: Vec<(AppType, u64)>,
+    },
+    Load {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
+    FullLoad {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
+    DropState {
+        ack: mpsc::Sender<()>,
+    },
+}
+
+pub(crate) enum AppDataMsg {
+    Loaded {
+        kind: AppDataLoadKind,
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        result: Result<crate::cli::tui::data::UiData, String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum UsagePricingReq {
+    Load {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    },
+    DropState {
+        ack: mpsc::Sender<()>,
+    },
+}
+
+pub(crate) enum UsagePricingMsg {
+    Loaded {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+        result: Result<crate::cli::tui::data::UsagePricingData, String>,
+    },
+}
+
+pub(crate) enum SessionUsageSyncReq {
+    Run { request_id: u64 },
+}
+
+pub(crate) enum SessionUsageSyncMsg {
+    Finished {
+        request_id: u64,
+        result: Result<(), String>,
+    },
+}
+
 pub(crate) enum SkillsReq {
-    Discover { query: String },
-    Install { spec: String, app: AppType },
+    Discover {
+        request_id: u64,
+        query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
+        force: bool,
+    },
+    Install {
+        spec: String,
+        app: AppType,
+    },
 }
 
 pub(crate) enum SkillsMsg {
     DiscoverFinished {
+        request_id: u64,
         query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
         result: Result<Vec<crate::services::skill::Skill>, String>,
     },
     InstallFinished {
@@ -255,12 +350,34 @@ pub(crate) struct QuotaSystem {
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
+pub(crate) struct AppDataSystem {
+    pub(crate) req_tx: mpsc::Sender<AppDataReq>,
+    pub(crate) result_rx: mpsc::Receiver<AppDataMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct UsagePricingSystem {
+    pub(crate) req_tx: mpsc::Sender<UsagePricingReq>,
+    pub(crate) result_rx: mpsc::Receiver<UsagePricingMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionUsageSyncSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionUsageSyncReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionUsageSyncMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ProxyReq {
     SetManagedSessionForCurrentApp {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
+    },
+    RefreshSnapshot {
+        request_id: u64,
+        app_type: AppType,
     },
 }
 
@@ -270,6 +387,11 @@ pub(crate) enum ProxyMsg {
         app_type: AppType,
         enabled: bool,
         result: Result<(), String>,
+    },
+    SnapshotRefreshed {
+        request_id: u64,
+        app_type: AppType,
+        result: Result<ProxySnapshot, String>,
     },
 }
 

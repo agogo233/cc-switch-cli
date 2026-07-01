@@ -262,6 +262,15 @@ fn serve_proxy(
                 }
             }
             crate::services::state_coordination::clear_restore_mutation_guard_bypass_env();
+            let session_sync_task =
+                crate::services::session_usage::spawn_periodic_session_usage_sync(
+                    state.db.clone(),
+                    "foreground-proxy",
+                );
+            let usage_maintenance_task = crate::database::Database::spawn_periodic_usage_maintenance(
+                state.db.clone(),
+                "foreground-proxy",
+            );
 
             println!("{}", highlight(crate::t!("Local Proxy Running", "本地代理已启动")));
             println!(
@@ -308,6 +317,8 @@ fn serve_proxy(
             tokio::signal::ctrl_c()
                 .await
                 .map_err(|e| AppError::Message(format!("failed to listen for Ctrl-C: {e}")))?;
+            session_sync_task.abort();
+            usage_maintenance_task.abort();
 
             service
                 .stop_with_restore()
@@ -672,8 +683,10 @@ mod tests {
             config: RwLock::new(MultiAppConfig::default()),
             proxy_service: ProxyService::new(db.clone()),
         };
-        let mut config = crate::ProxyConfig::default();
-        config.listen_port = 15721;
+        let config = crate::ProxyConfig {
+            listen_port: 15721,
+            ..Default::default()
+        };
         db.set_proxy_flags_sync("claude", true, false)
             .expect("enable claude proxy route");
         db.set_app_proxy_preferred_port("codex", 15722)

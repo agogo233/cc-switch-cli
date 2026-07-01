@@ -185,7 +185,7 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
         | AppType::OpenCode
         | AppType::Hermes
         | AppType::OpenClaw => {
-            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
             if !value.is_object() {
@@ -317,7 +317,7 @@ fn extract(
 
 fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
     let state = get_state()?;
-    ProviderService::clear_common_config_snippet(&state, app_type.clone())?;
+    ProviderService::set_common_config_snippet(&state, app_type.clone(), None)?;
 
     println!(
         "{}",
@@ -350,55 +350,15 @@ mod tests {
 
     use serde_json::json;
     use serial_test::serial;
-    use std::ffi::OsString;
-    use std::path::Path;
     use tempfile::TempDir;
 
     use crate::codex_config::{get_codex_config_dir, get_codex_config_path};
     use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
     use crate::provider::{Provider, ProviderMeta};
     use crate::services::ProviderService;
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
+    use crate::test_support::TestEnvGuard;
 
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
+    type EnvGuard = TestEnvGuard;
 
     fn common_config_meta(enabled: bool) -> ProviderMeta {
         ProviderMeta {
@@ -409,7 +369,7 @@ mod tests {
 
     fn seed_current_claude_provider_with_meta(meta: Option<ProviderMeta>) -> (TempDir, EnvGuard) {
         let temp_home = TempDir::new().expect("create temp home");
-        let env = EnvGuard::set_home(temp_home.path());
+        let env = TestEnvGuard::isolated(temp_home.path());
         let state = AppState::try_new().expect("create state");
         let mut provider = Provider::with_id(
             "p1".to_string(),
@@ -429,11 +389,12 @@ mod tests {
             &get_claude_settings_path(),
             &json!({
                 "env": {
-                    "ANTHROPIC_BASE_URL": "https://stale.example"
+                    "ANTHROPIC_BASE_URL": "https://provider.example",
+                    "LOCAL_ONLY": "preserve-me"
                 }
             }),
         )
-        .expect("seed stale live settings");
+        .expect("seed live settings");
 
         (temp_home, env)
     }
@@ -444,7 +405,7 @@ mod tests {
 
     fn seed_current_codex_provider_with_meta(meta: Option<ProviderMeta>) -> (TempDir, EnvGuard) {
         let temp_home = TempDir::new().expect("create temp home");
-        let env = EnvGuard::set_home(temp_home.path());
+        let env = TestEnvGuard::isolated(temp_home.path());
         std::fs::create_dir_all(get_codex_config_dir()).expect("create codex config dir");
         let state = AppState::try_new().expect("create state");
         let mut provider = Provider::with_id(
@@ -633,7 +594,7 @@ mod tests {
     #[serial]
     fn extract_from_settings_config_saves_common_snippet() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         extract(
             AppType::Claude,
@@ -718,9 +679,6 @@ mod tests {
 
     #[test]
     fn follow_up_message_is_omitted_for_additive_apps() {
-        assert!(matches!(
-            follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, ""),
-            None
-        ));
+        assert!(follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, "").is_none());
     }
 }

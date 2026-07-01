@@ -10,8 +10,12 @@ use crate::cli::provider_quota::{
 use crate::cli::ui::{create_table, error, highlight, info, success, to_json, warning};
 use crate::error::AppError;
 use crate::provider::{Provider, UsageData, UsageResult};
-use crate::services::{CredentialStatus, ProviderService, SpeedtestService, StreamCheckService};
+use crate::services::{
+    CodexOAuthService, CredentialStatus, ProviderService, SpeedtestService, StreamCheckService,
+};
 use crate::store::AppState;
+
+const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderModelFetchStrategy {
@@ -19,10 +23,17 @@ pub(crate) enum ProviderModelFetchStrategy {
     Anthropic,
     GoogleApiKey,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelFetchSource {
+    Http(ModelFetchTarget),
+    CodexOAuth { account_id: Option<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelFetchTarget {
     base_url: String,
-    auth_value: String,
+    auth_value: Option<String>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -257,31 +268,85 @@ pub(crate) fn fetch_models_provider(app_type: AppType, id: &str) -> Result<(), A
     let provider = providers
         .get(id)
         .ok_or_else(|| AppError::Message(format!("Provider '{}' not found", id)))?;
-    let target = model_fetch_target(provider, &app_type)?;
+    let source = model_fetch_source(provider, &app_type)?;
 
     println!(
         "{}",
         info(&format!("Fetching models for '{}'...", provider.name))
     );
-    println!("{}", info(&format!("Endpoint: {}", target.base_url)));
+    print_model_fetch_source(&source);
     println!();
 
+    let models = fetch_models_from_source(&source)?;
+    print_fetched_models(&models);
+
+    Ok(())
+}
+
+pub(crate) fn fetch_models_once(
+    app_type: AppType,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    strategy: Option<ProviderModelFetchStrategy>,
+) -> Result<(), AppError> {
+    let target = one_off_model_fetch_target(&app_type, base_url, api_key, strategy)?;
+    let source = ModelFetchSource::Http(target);
+
+    println!("{}", info("Fetching models from one-off config..."));
+    print_model_fetch_source(&source);
+    println!();
+
+    let models = fetch_models_from_source(&source)?;
+    print_fetched_models(&models);
+
+    Ok(())
+}
+
+fn print_model_fetch_source(source: &ModelFetchSource) {
+    match &source {
+        ModelFetchSource::Http(target) => {
+            println!("{}", info(&format!("Endpoint: {}", target.base_url)));
+        }
+        ModelFetchSource::CodexOAuth { account_id } => {
+            println!("{}", info("Endpoint: Codex OAuth managed account"));
+            if let Some(account_id) = account_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                println!("{}", info(&format!("Account: {}", account_id)));
+            }
+        }
+    }
+}
+
+fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, AppError> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
 
-    let models = runtime.block_on(async {
-        crate::cli::tui::fetch_provider_models_for_tui(
-            &target.base_url,
-            Some(target.auth_value.as_str()),
-            to_tui_strategy(target.strategy),
-        )
-        .await
-        .map_err(AppError::Message)
-    })?;
+    match &source {
+        ModelFetchSource::Http(target) => runtime.block_on(async {
+            crate::cli::tui::fetch_provider_models_for_tui(
+                &target.base_url,
+                target.auth_value.as_deref(),
+                to_tui_strategy(target.strategy),
+            )
+            .await
+            .map_err(AppError::Message)
+        }),
+        ModelFetchSource::CodexOAuth { account_id } => runtime.block_on(async {
+            CodexOAuthService::get_models(account_id.as_deref())
+                .await
+                .map(|models| models.into_iter().map(|model| model.id).collect())
+                .map_err(AppError::Message)
+        }),
+    }
+}
 
+fn print_fetched_models(models: &[String]) {
     if models.is_empty() {
         println!("{}", info("No models returned."));
-        return Ok(());
+        return;
     }
 
     let mut table = create_table();
@@ -296,8 +361,6 @@ pub(crate) fn fetch_models_provider(app_type: AppType, id: &str) -> Result<(), A
         "{}",
         success(&format!("✓ Fetched {} model(s)", models.len()))
     );
-
-    Ok(())
 }
 
 pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
@@ -702,70 +765,133 @@ fn model_fetch_target(
 
             Ok(ModelFetchTarget {
                 base_url,
-                auth_value,
+                auth_value: Some(auth_value),
                 strategy,
             })
         }
-        AppType::Codex => Ok(ModelFetchTarget {
-            base_url,
-            auth_value: StreamCheckService::extract_codex_key(provider).ok_or_else(|| {
-                AppError::Message(format!("Missing API key for provider '{}'", provider.id))
-            })?,
-            strategy: ProviderModelFetchStrategy::Bearer,
-        }),
+        AppType::Codex => {
+            Ok(ModelFetchTarget {
+                base_url,
+                auth_value: Some(StreamCheckService::extract_codex_key(provider).ok_or_else(
+                    || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
+                )?),
+                strategy: ProviderModelFetchStrategy::Bearer,
+            })
+        }
         AppType::Gemini => {
             let (auth_value, strategy) = extract_gemini_model_fetch_auth(provider)?;
             Ok(ModelFetchTarget {
                 base_url,
-                auth_value,
+                auth_value: Some(auth_value),
                 strategy,
             })
         }
         AppType::OpenCode => Ok(ModelFetchTarget {
             base_url,
-            auth_value: provider
-                .settings_config
-                .get("options")
-                .and_then(|options| options.get("apiKey"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    AppError::Message(format!("Missing API key for provider '{}'", provider.id))
-                })?,
+            auth_value: Some(
+                provider
+                    .settings_config
+                    .get("options")
+                    .and_then(|options| options.get("apiKey"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        AppError::Message(format!("Missing API key for provider '{}'", provider.id))
+                    })?,
+            ),
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
             base_url,
-            auth_value: provider
-                .settings_config
-                .get("apiKey")
-                .or_else(|| provider.settings_config.get("api_key"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    AppError::Message(format!("Missing API key for provider '{}'", provider.id))
-                })?,
+            auth_value: Some(
+                provider
+                    .settings_config
+                    .get("apiKey")
+                    .or_else(|| provider.settings_config.get("api_key"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        AppError::Message(format!("Missing API key for provider '{}'", provider.id))
+                    })?,
+            ),
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
             base_url,
-            auth_value: provider
-                .settings_config
-                .get("apiKey")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    AppError::Message(format!("Missing API key for provider '{}'", provider.id))
-                })?,
+            auth_value: Some(
+                provider
+                    .settings_config
+                    .get("apiKey")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        AppError::Message(format!("Missing API key for provider '{}'", provider.id))
+                    })?,
+            ),
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
     }
+}
+
+fn one_off_model_fetch_target(
+    app_type: &AppType,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    strategy: Option<ProviderModelFetchStrategy>,
+) -> Result<ModelFetchTarget, AppError> {
+    let base_url = base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Message("No API URL configured for one-off model fetch".into()))?
+        .trim_end_matches('/')
+        .to_string();
+    let auth_value = api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let strategy = strategy.unwrap_or_else(|| default_one_off_model_fetch_strategy(app_type));
+
+    Ok(ModelFetchTarget {
+        base_url,
+        auth_value,
+        strategy,
+    })
+}
+
+fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetchStrategy {
+    match app_type {
+        AppType::Claude => ProviderModelFetchStrategy::Anthropic,
+        AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
+        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+            ProviderModelFetchStrategy::Bearer
+        }
+    }
+}
+
+fn model_fetch_source(
+    provider: &Provider,
+    app_type: &AppType,
+) -> Result<ModelFetchSource, AppError> {
+    if matches!(app_type, AppType::Claude) && provider.is_codex_oauth() {
+        return Ok(ModelFetchSource::CodexOAuth {
+            account_id: codex_oauth_account_id(provider),
+        });
+    }
+
+    model_fetch_target(provider, app_type).map(ModelFetchSource::Http)
+}
+
+fn codex_oauth_account_id(provider: &Provider) -> Option<String> {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.managed_account_id_for(AUTH_PROVIDER_CODEX_OAUTH))
 }
 
 fn claude_uses_bearer_auth(provider: &Provider, base_url: &str) -> bool {
@@ -910,6 +1036,7 @@ fn simplify_model_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use crate::services::{ExtraUsage, QuotaTier, SubscriptionQuota};
     use serde_json::json;
 
@@ -1106,7 +1233,7 @@ mod tests {
             .expect("claude provider should resolve fetch target");
 
         assert_eq!(target.base_url, "https://claude.example.com");
-        assert_eq!(target.auth_value, "sk-claude");
+        assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
     }
 
@@ -1128,7 +1255,55 @@ mod tests {
             .expect("openrouter provider should resolve fetch target");
 
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
-        assert_eq!(target.auth_value, "sk-openrouter");
+        assert_eq!(target.auth_value.as_deref(), Some("sk-openrouter"));
+    }
+
+    #[test]
+    fn model_fetch_source_for_claude_codex_oauth_uses_managed_auth_without_config_key() {
+        let mut provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex OAuth".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+
+        let source = model_fetch_source(&provider, &AppType::Claude)
+            .expect("codex oauth provider should use managed auth");
+
+        assert_eq!(source, ModelFetchSource::CodexOAuth { account_id: None });
+    }
+
+    #[test]
+    fn model_fetch_source_for_claude_codex_oauth_keeps_bound_account_id() {
+        let mut provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex OAuth".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some("acc-123".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let source = model_fetch_source(&provider, &AppType::Claude)
+            .expect("codex oauth provider should use managed auth");
+
+        assert_eq!(
+            source,
+            ModelFetchSource::CodexOAuth {
+                account_id: Some("acc-123".to_string())
+            }
+        );
     }
 
     #[test]
@@ -1149,7 +1324,7 @@ mod tests {
             .expect("codex provider should resolve fetch target");
 
         assert_eq!(target.base_url, "https://codex.example.com/v1");
-        assert_eq!(target.auth_value, "sk-codex-env");
+        assert_eq!(target.auth_value.as_deref(), Some("sk-codex-env"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
     }
 
@@ -1170,7 +1345,37 @@ mod tests {
         let target = model_fetch_target(&provider, &AppType::Gemini)
             .expect("gemini provider should resolve oauth fetch target");
 
-        assert_eq!(target.auth_value, "ya29.token");
+        assert_eq!(target.auth_value.as_deref(), Some("ya29.token"));
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+    }
+
+    #[test]
+    fn one_off_model_fetch_target_defaults_strategy_by_app_and_trims_input() {
+        let target = one_off_model_fetch_target(
+            &AppType::Gemini,
+            Some(" https://gemini.example.com/ "),
+            Some(" sk-gemini "),
+            None,
+        )
+        .expect("one-off target should be built");
+
+        assert_eq!(target.base_url, "https://gemini.example.com");
+        assert_eq!(target.auth_value.as_deref(), Some("sk-gemini"));
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::GoogleApiKey);
+    }
+
+    #[test]
+    fn one_off_model_fetch_target_allows_auth_override_and_optional_key() {
+        let target = one_off_model_fetch_target(
+            &AppType::Claude,
+            Some("https://openrouter.ai/api/v1"),
+            None,
+            Some(ProviderModelFetchStrategy::Bearer),
+        )
+        .expect("one-off target should be built");
+
+        assert_eq!(target.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(target.auth_value, None);
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
     }
 
@@ -1191,6 +1396,9 @@ mod tests {
         let err = model_fetch_target(&provider, &AppType::OpenCode)
             .expect_err("empty base url should be rejected");
 
-        assert!(err.to_string().contains("No API URL configured"));
+        assert!(
+            err.to_string().contains("options.baseURL"),
+            "unexpected error: {err}"
+        );
     }
 }
